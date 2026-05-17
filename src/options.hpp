@@ -23,7 +23,7 @@ struct KvmProbeOptions {
 
 struct KvmViewOptions {
     LoginOptions login;
-    int idle_timeout_seconds = 10;
+    int idle_timeout_seconds = 0;
 };
 
 } // namespace hitsc

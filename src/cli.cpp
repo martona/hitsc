@@ -101,8 +101,8 @@ int run_cli(int argc, char* argv[])
     CLI::App* view = app.add_subcommand("view", "Open a live SDL viewer for MegaRAC H5Viewer /kvm.");
     configure_login_subcommand(*view, view_options.login, view_password_env_name);
     view
-        ->add_option("--idle-timeout", view_options.idle_timeout_seconds, "Stop if no WebSocket message arrives for this many seconds.")
-        ->check(CLI::PositiveNumber);
+        ->add_option("--idle-timeout", view_options.idle_timeout_seconds, "Stop if no WebSocket message arrives for this many seconds; 0 disables it.")
+        ->check(CLI::NonNegativeNumber);
     view->add_option("url", view_url, "https://host[:port]")->required();
 
     KvmCaptureDecodeOptions decode_options;

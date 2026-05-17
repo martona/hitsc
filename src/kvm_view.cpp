@@ -62,6 +62,7 @@ constexpr std::uint16_t kCmdActiveClients = 39;
 constexpr std::uint16_t kCmdKeepAlive = 57;
 constexpr std::uint16_t kCmdValidateVideoSession = 18;
 constexpr std::uint16_t kCmdValidatedVideoSession = 19;
+constexpr std::uint16_t kCmdMaxSessionClose = 22;
 constexpr std::uint16_t kCmdStopSessionImmediate = 8;
 constexpr std::uint16_t kCmdGetFullScreen = 11;
 constexpr std::uint16_t kCmdResumeRedirection = 6;
@@ -673,7 +674,7 @@ int mouse_mode_snapshot(ViewState& state)
     return state.mouse_mode;
 }
 
-void queue_outgoing_packet(
+bool queue_outgoing_packet(
     ViewState& state,
     std::uint16_t type,
     std::vector<std::uint8_t> packet,
@@ -687,7 +688,9 @@ void queue_outgoing_packet(
 
     if (send_packet) {
         send_packet(type, std::move(packet), coalesce);
+        return true;
     }
+    return false;
 }
 
 std::optional<SharedFrame> take_latest_frame(ViewState& state, std::uint64_t last_sequence)
@@ -718,6 +721,8 @@ std::string packet_name(std::uint16_t type)
         return "CMD_VALIDATE_VIDEO_SESSION";
     case kCmdValidatedVideoSession:
         return "CMD_VALIDATED_VIDEO_SESSION";
+    case kCmdMaxSessionClose:
+        return "CMD_MAX_SESSION_CLOSE";
     case kCmdGetKbdLedStatus:
         return "CMD_GET_KBD_LED_STATUS";
     case kCmdGetWebToken:
@@ -926,6 +931,18 @@ std::size_t packet_payload_size_from_bytes(const std::vector<std::uint8_t>& pack
     return packet.size() >= 8 ? packet.size() - 8 : 0;
 }
 
+std::string max_session_close_reason(std::uint16_t status)
+{
+    switch (status) {
+    case 0:
+        return "maximum KVM sessions reached";
+    case 1:
+        return "same KVM client/user already connected";
+    default:
+        return "unknown session close reason";
+    }
+}
+
 class KvmAsyncSession : public std::enable_shared_from_this<KvmAsyncSession> {
 public:
     KvmAsyncSession(
@@ -964,28 +981,33 @@ public:
     {
         auto self = shared_from_this();
         asio::post(strand_, [self] {
-            if (self->closed_) {
+            if (self->closed_ || self->stopping_) {
                 return;
             }
             self->stopping_ = true;
             set_status(self->state_, "stopping");
 
-            const bool stop_queued = std::any_of(
+            if (self->writing_ && !self->outgoing_packets_.empty()) {
+                auto keep_current = self->outgoing_packets_.begin();
+                ++keep_current;
+                self->outgoing_packets_.erase(keep_current, self->outgoing_packets_.end());
+            } else {
+                self->outgoing_packets_.clear();
+            }
+
+            const bool stop_already_pending = std::any_of(
                 self->outgoing_packets_.begin(),
                 self->outgoing_packets_.end(),
                 [](const OutgoingPacket& packet) {
                     return packet.type == kCmdStopSessionImmediate;
                 });
-            if (!stop_queued) {
-                self->queue_packet_from_strand(
+            if (!stop_already_pending) {
+                self->outgoing_packets_.push_back(OutgoingPacket{
                     kCmdStopSessionImmediate,
                     make_simple_packet(kCmdStopSessionImmediate),
-                    false);
+                    {}});
             }
-
-            if (!self->writing_ && self->outgoing_packets_.empty()) {
-                self->close_socket();
-            }
+            self->start_write();
         });
     }
 
@@ -1094,6 +1116,12 @@ private:
             queue_packet_from_strand(kCmdGetFullScreen, make_simple_packet(kCmdGetFullScreen, 1), false);
             full_screen_requested_ = true;
             std::cout << "hitsc: requested full screen\n";
+        } else if (packet.type == kCmdMaxSessionClose) {
+            const std::string reason = max_session_close_reason(packet.status);
+            set_status(state_, "session closed: " + reason);
+            std::cerr << "hitsc: kvm session closed: " << reason
+                      << " status=" << packet.status << '\n';
+            close_socket();
         } else if (packet.type == kCmdVideoPackets) {
             handle_video_packet(packet);
         }
@@ -1190,7 +1218,7 @@ private:
 
     void queue_packet_from_strand(std::uint16_t type, std::vector<std::uint8_t> packet, bool coalesce)
     {
-        if (closed_ || (stopping_ && type != kCmdStopSessionImmediate)) {
+        if (closed_ || stopping_) {
             return;
         }
 
@@ -1314,6 +1342,7 @@ private:
         }
 
         closed_ = true;
+        clear_network_callbacks(state_);
         outgoing_packets_.clear();
         beast::error_code error;
         beast::get_lowest_layer(*ws_).socket().shutdown(tcp::socket::shutdown_both, error);
@@ -1383,11 +1412,17 @@ void network_thread_main(const KvmViewOptions& options, ViewState& state, const 
         beast::get_lowest_layer(*ws).expires_after(std::chrono::seconds(30));
         beast::get_lowest_layer(*ws).connect(endpoints);
         ws->next_layer().handshake(ssl::stream_base::client);
+        beast::get_lowest_layer(*ws).expires_never();
 
         websocket::stream_base::timeout timeout;
         timeout.handshake_timeout = std::chrono::seconds(30);
-        timeout.idle_timeout = std::chrono::seconds(options.idle_timeout_seconds);
-        timeout.keep_alive_pings = true;
+        if (options.idle_timeout_seconds > 0) {
+            timeout.idle_timeout = std::chrono::seconds(options.idle_timeout_seconds);
+            timeout.keep_alive_pings = true;
+        } else {
+            timeout.idle_timeout = websocket::stream_base::none();
+            timeout.keep_alive_pings = false;
+        }
         ws->set_option(timeout);
 
         const std::string host = make_host_header(options.login.base_url);
@@ -1408,8 +1443,12 @@ void network_thread_main(const KvmViewOptions& options, ViewState& state, const 
         set_subprotocol(state, subprotocol);
         set_status(state, "connected");
         std::cout << "hitsc: kvm websocket connected"
-                  << " subprotocol=" << subprotocol
-                  << " idle-timeout=" << options.idle_timeout_seconds << "s\n";
+                  << " subprotocol=" << subprotocol;
+        if (options.idle_timeout_seconds > 0) {
+            std::cout << " idle-timeout=" << options.idle_timeout_seconds << "s\n";
+        } else {
+            std::cout << " idle-timeout=disabled\n";
+        }
 
         if (stop_requested.load()) {
             force_close_network(state);
@@ -1531,8 +1570,8 @@ void send_mouse_report(
 
     last_relative_position = position;
     const bool coalesce = buttons == 0 && wheel == 0;
-    queue_outgoing_packet(state, kCmdSendHidPacket, std::move(packet), coalesce);
-    if (verbose) {
+    const bool accepted = queue_outgoing_packet(state, kCmdSendHidPacket, std::move(packet), coalesce);
+    if (verbose && accepted) {
         std::cout << "hitsc: queued mouse"
                   << " mode=" << mouse_mode
                   << " buttons=" << static_cast<int>(buttons)
@@ -1613,6 +1652,11 @@ void run_kvm_view(const KvmViewOptions& options)
         std::optional<RemoteMousePosition> last_relative_mouse_position;
 
         while (running) {
+            if (network_done->load()) {
+                running = false;
+                continue;
+            }
+
             SDL_Event event{};
             std::optional<RemoteMousePosition> pending_mouse_motion;
             std::uint64_t pending_mouse_motion_ticks = 0;
@@ -1626,9 +1670,6 @@ void run_kvm_view(const KvmViewOptions& options)
                     if (options.login.verbose) {
                         std::cout << "hitsc: key down scancode=" << event.key.scancode
                                   << " key=" << event.key.key << '\n';
-                    }
-                    if (event.key.key == SDLK_ESCAPE) {
-                        running = false;
                     }
                 } else if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
                            event.type == SDL_EVENT_MOUSE_BUTTON_UP) {

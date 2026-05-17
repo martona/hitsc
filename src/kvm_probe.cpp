@@ -158,6 +158,8 @@ std::string packet_name(std::uint16_t type)
         return "CMD_VALIDATE_VIDEO_SESSION";
     case kCmdValidatedVideoSession:
         return "CMD_VALIDATED_VIDEO_SESSION";
+    case 22:
+        return "CMD_MAX_SESSION_CLOSE";
     case kCmdConnectionAllowed:
         return "CMD_CONNECTION_ALLOWED";
     case kCmdVideoPackets:
@@ -589,6 +591,7 @@ void run_kvm_probe(const KvmProbeOptions& options)
     beast::get_lowest_layer(ws).expires_after(std::chrono::seconds(30));
     beast::get_lowest_layer(ws).connect(endpoints);
     ws.next_layer().handshake(ssl::stream_base::client);
+    beast::get_lowest_layer(ws).expires_never();
 
     websocket::stream_base::timeout timeout;
     timeout.handshake_timeout = std::chrono::seconds(30);
