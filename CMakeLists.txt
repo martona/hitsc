@@ -47,6 +47,7 @@ add_executable(
   src/main.cpp
   src/megarac_cursor.cpp
   src/megarac_hid.cpp
+  src/megarac_kvm_session.cpp
   src/megarac_protocol.cpp
   src/megarac_video.cpp
   src/megarac_session.cpp
@@ -71,7 +72,7 @@ target_compile_definitions(
 )
 
 if(MSVC)
-  target_compile_options(hitsc PRIVATE /W4 /permissive-)
+  target_compile_options(hitsc PRIVATE /W4 /permissive- /bigobj)
 else()
   target_compile_options(hitsc PRIVATE -Wall -Wextra -Wpedantic)
 endif()
