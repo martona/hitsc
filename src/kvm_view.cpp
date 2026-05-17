@@ -91,6 +91,7 @@ constexpr int kAbsoluteMouseMode = 2;
 constexpr int kRelativeMouseMode = 1;
 constexpr int kOtherMouseMode = 3;
 constexpr int kAbsoluteMouseMax = 32767;
+constexpr std::uint8_t kValidateSessionValid = 1;
 constexpr std::uint16_t kKvmPrivReqMaster = 1;
 constexpr std::uint16_t kKvmReqAllowed = 0;
 constexpr std::size_t kIusbHeaderSize = 32;
@@ -156,7 +157,7 @@ struct ViewState {
     std::string subprotocol;
     std::function<void(std::uint16_t, std::vector<std::uint8_t>, bool)> send_packet;
     std::function<void()> stop_network;
-    std::shared_ptr<KvmWebSocket> websocket;
+    std::weak_ptr<KvmWebSocket> websocket;
     bool has_frame = false;
     int mouse_mode = kAbsoluteMouseMode;
 };
@@ -844,13 +845,17 @@ void log_sent_packet(std::uint16_t type, std::uint16_t status, std::size_t paylo
     });
 }
 
-void store_websocket(ViewState& state, std::shared_ptr<KvmWebSocket> ws)
+void store_websocket(ViewState& state, const std::shared_ptr<KvmWebSocket>& ws)
 {
     std::lock_guard lock(state.control_mutex);
-    state.websocket = std::move(ws);
-    if (!state.websocket) {
-        state.subprotocol.clear();
-    }
+    state.websocket = ws;
+}
+
+void clear_websocket(ViewState& state)
+{
+    std::lock_guard lock(state.control_mutex);
+    state.websocket.reset();
+    state.subprotocol.clear();
 }
 
 void store_network_callbacks(
@@ -872,11 +877,11 @@ void clear_network_callbacks(ViewState& state)
 
 void cancel_network(ViewState& state)
 {
-    std::shared_ptr<KvmWebSocket> ws;
+    std::weak_ptr<KvmWebSocket> weak_ws;
     std::function<void()> stop_network;
     {
         std::lock_guard lock(state.control_mutex);
-        ws = state.websocket;
+        weak_ws = state.websocket;
         stop_network = state.stop_network;
     }
 
@@ -885,6 +890,7 @@ void cancel_network(ViewState& state)
         return;
     }
 
+    std::shared_ptr<KvmWebSocket> ws = weak_ws.lock();
     if (!ws) {
         return;
     }
@@ -895,16 +901,17 @@ void cancel_network(ViewState& state)
 
 void force_close_network(ViewState& state)
 {
-    std::shared_ptr<KvmWebSocket> ws;
+    std::weak_ptr<KvmWebSocket> weak_ws;
     {
         std::lock_guard lock(state.control_mutex);
-        ws = state.websocket;
+        weak_ws = state.websocket;
         state.websocket.reset();
         state.subprotocol.clear();
         state.send_packet = {};
         state.stop_network = {};
     }
 
+    std::shared_ptr<KvmWebSocket> ws = weak_ws.lock();
     if (!ws) {
         return;
     }
@@ -970,6 +977,24 @@ std::string max_session_close_reason(std::uint16_t status)
         return "same KVM client/user already connected";
     default:
         return "unknown session close reason";
+    }
+}
+
+std::string validation_response_name(std::uint8_t response)
+{
+    switch (response) {
+    case 0:
+        return "invalid session";
+    case kValidateSessionValid:
+        return "valid session";
+    case 2:
+        return "not sufficient privilege";
+    case 3:
+        return "invalid session info";
+    case 8:
+        return "session unregistered";
+    default:
+        return "unknown validation response";
     }
 }
 
@@ -1125,13 +1150,17 @@ private:
                 false);
             validation_sent_ = true;
             std::cout << "hitsc: sent KVM validation packet\n";
+        } else if (packet.type == kCmdValidatedVideoSession) {
+            handle_validation_response(packet);
         } else if (packet.type == kCmdKeepAlive) {
             queue_packet_from_strand(kCmdKeepAlive, make_simple_packet(kCmdKeepAlive), false);
         } else if (packet.type == kCmdUsbMouseMode && !packet.payload.empty()) {
             set_mouse_mode(state_, packet.payload[0]);
+            mouse_mode_seen_ = true;
             if (options_.login.verbose) {
                 std::cout << "hitsc: mouse mode=" << static_cast<int>(packet.payload[0]) << '\n';
             }
+            send_initial_wake_hid_if_ready();
         } else if (packet.type == kCmdMediaLicenseStatus) {
             queue_packet_from_strand(
                 kCmdDisplayLockSet,
@@ -1165,6 +1194,77 @@ private:
         }
 
         send_fps_report_if_due();
+    }
+
+    void handle_validation_response(const KvmPacket& packet)
+    {
+        if (packet.payload.empty()) {
+            validation_failed_ = true;
+            set_status(state_, "validation failed: empty response");
+            std::cerr << "hitsc: KVM validation failed: empty response\n";
+            close_socket();
+            return;
+        }
+
+        const auto response = static_cast<std::uint8_t>(packet.payload[0]);
+        if (response != kValidateSessionValid) {
+            validation_failed_ = true;
+            const std::string reason = validation_response_name(response);
+            set_status(state_, "validation failed: " + reason);
+            std::cerr << "hitsc: KVM validation failed: " << reason
+                      << " response=" << static_cast<int>(response) << '\n';
+            close_socket();
+            return;
+        }
+
+        session_validated_ = true;
+        set_status(state_, "validated");
+        send_initial_wake_hid_if_ready();
+    }
+
+    void send_initial_wake_hid_if_ready()
+    {
+        if (!session_validated_ || !mouse_mode_seen_ || initial_wake_hid_sent_) {
+            return;
+        }
+
+        initial_wake_hid_sent_ = true;
+        if (deferred_hid_packet_) {
+            outgoing_packets_.push_back(std::move(*deferred_hid_packet_));
+            deferred_hid_packet_.reset();
+            start_write();
+            if (options_.login.verbose) {
+                write_log_line(std::cout, [](std::ostream& output) {
+                    output << "hitsc: released deferred HID packet after validation";
+                });
+            }
+            return;
+        }
+
+        const int mouse_mode = mouse_mode_snapshot(state_);
+        std::vector<std::uint8_t> packet;
+        if (mouse_mode == kRelativeMouseMode || mouse_mode == kOtherMouseMode) {
+            packet = make_relative_mouse_packet(0, 1, 1, 0, synthetic_mouse_sequence_++);
+        } else {
+            packet = make_absolute_mouse_packet(
+                0,
+                kInitialFramebufferWidth / 2,
+                kInitialFramebufferHeight / 2,
+                kInitialFramebufferWidth,
+                kInitialFramebufferHeight,
+                0,
+                synthetic_mouse_sequence_++);
+        }
+
+        queue_packet_from_strand(kCmdSendHidPacket, std::move(packet), false);
+        if (options_.login.verbose) {
+            write_log_line(std::cout, [&](std::ostream& output) {
+                output << "hitsc: sent synthetic wake mouse"
+                       << " mode=" << mouse_mode
+                       << " x=" << (kInitialFramebufferWidth / 2)
+                       << " y=" << (kInitialFramebufferHeight / 2);
+            });
+        }
     }
 
     void handle_kvm_sharing(const KvmPacket& packet)
@@ -1333,6 +1433,21 @@ private:
             return;
         }
 
+        if (type == kCmdSendHidPacket && !session_validated_) {
+            if (validation_failed_) {
+                return;
+            }
+
+            deferred_hid_packet_ = OutgoingPacket{type, std::move(packet), {}};
+            if (options_.login.verbose && !deferred_hid_logged_) {
+                deferred_hid_logged_ = true;
+                write_log_line(std::cout, [](std::ostream& output) {
+                    output << "hitsc: deferring HID packets until KVM validation succeeds";
+                });
+            }
+            return;
+        }
+
         auto mutable_begin = outgoing_packets_.begin();
         if (writing_ && mutable_begin != outgoing_packets_.end()) {
             ++mutable_begin;
@@ -1488,6 +1603,8 @@ private:
     KvmVideoAssembler video_assembler_;
     std::vector<std::uint8_t> framebuffer_;
     std::deque<OutgoingPacket> outgoing_packets_;
+    std::optional<OutgoingPacket> deferred_hid_packet_;
+    std::uint32_t synthetic_mouse_sequence_ = 0;
     int framebuffer_width_ = 0;
     int framebuffer_height_ = 0;
     int packets_seen_ = 0;
@@ -1496,6 +1613,11 @@ private:
     int blank_screen_packets_ = 0;
     int power_status_ = -1;
     bool validation_sent_ = false;
+    bool session_validated_ = false;
+    bool validation_failed_ = false;
+    bool deferred_hid_logged_ = false;
+    bool mouse_mode_seen_ = false;
+    bool initial_wake_hid_sent_ = false;
     bool full_screen_requested_ = false;
     bool fps_reporting_started_ = false;
     bool writing_ = false;
@@ -1605,7 +1727,7 @@ void network_thread_main(const KvmViewOptions& options, ViewState& state, const 
     }
 
     clear_network_callbacks(state);
-    store_websocket(state, {});
+    clear_websocket(state);
 }
 
 void throw_sdl_error(std::string_view context)
