@@ -11,9 +11,12 @@
 
 #include <SDL3/SDL.h>
 
+#include <boost/asio/bind_executor.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/ip/tcp.hpp>
+#include <boost/asio/post.hpp>
 #include <boost/asio/ssl.hpp>
+#include <boost/asio/strand.hpp>
 #include <boost/beast/core.hpp>
 #include <boost/beast/ssl.hpp>
 #include <boost/beast/websocket.hpp>
@@ -27,6 +30,7 @@
 #include <cmath>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <iomanip>
 #include <iostream>
 #include <memory>
@@ -130,16 +134,17 @@ struct RemoteMousePosition {
 struct OutgoingPacket {
     std::uint16_t type = 0;
     std::vector<std::uint8_t> bytes;
+    std::string encoded_text;
 };
 
 struct ViewState {
     std::mutex frame_mutex;
     std::mutex control_mutex;
-    std::mutex outgoing_mutex;
     SharedFrame frame;
-    std::deque<OutgoingPacket> outgoing_packets;
     std::string status = "starting";
     std::string subprotocol;
+    std::function<void(std::uint16_t, std::vector<std::uint8_t>, bool)> send_packet;
+    std::function<void()> stop_network;
     std::shared_ptr<KvmWebSocket> websocket;
     bool has_frame = false;
     int mouse_mode = kAbsoluteMouseMode;
@@ -607,27 +612,10 @@ bool is_binary_mode(std::string_view subprotocol)
     return subprotocol == "binary";
 }
 
-void write_packet(KvmWebSocket& ws, const std::vector<std::uint8_t>& packet, std::string_view subprotocol)
-{
-    if (is_binary_mode(subprotocol)) {
-        ws.binary(true);
-        ws.write(asio::buffer(packet));
-        return;
-    }
-
-    ws.text(true);
-    const std::string encoded = base64_encode(packet);
-    ws.write(asio::buffer(encoded));
-}
-
-std::vector<std::uint8_t> read_message_bytes(
-    KvmWebSocket& ws,
-    beast::flat_buffer& buffer,
+std::vector<std::uint8_t> message_bytes_from_buffer(
+    const beast::flat_buffer& buffer,
     std::string_view subprotocol)
 {
-    buffer.clear();
-    ws.read(buffer);
-
     const auto data = buffer.data();
     if (is_binary_mode(subprotocol)) {
         std::vector<std::uint8_t> bytes(boost::asio::buffer_size(data));
@@ -691,70 +679,15 @@ void queue_outgoing_packet(
     std::vector<std::uint8_t> packet,
     bool coalesce)
 {
+    std::function<void(std::uint16_t, std::vector<std::uint8_t>, bool)> send_packet;
     {
         std::lock_guard lock(state.control_mutex);
-        if (state.websocket == nullptr || state.subprotocol.empty()) {
-            return;
-        }
+        send_packet = state.send_packet;
     }
 
-    std::lock_guard lock(state.outgoing_mutex);
-    if (coalesce) {
-        for (auto it = state.outgoing_packets.rbegin(); it != state.outgoing_packets.rend(); ++it) {
-            if (it->type == type) {
-                it->bytes = std::move(packet);
-                return;
-            }
-        }
+    if (send_packet) {
+        send_packet(type, std::move(packet), coalesce);
     }
-
-    constexpr std::size_t max_queued_packets = 128;
-    while (state.outgoing_packets.size() >= max_queued_packets) {
-        auto removable = std::find_if(
-            state.outgoing_packets.begin(),
-            state.outgoing_packets.end(),
-            [](const OutgoingPacket& outgoing) {
-                return outgoing.type == kCmdSendHidPacket;
-            });
-        if (removable == state.outgoing_packets.end()) {
-            break;
-        }
-        state.outgoing_packets.erase(removable);
-    }
-
-    state.outgoing_packets.push_back(OutgoingPacket{type, std::move(packet)});
-}
-
-std::deque<OutgoingPacket> take_outgoing_packets(ViewState& state)
-{
-    std::lock_guard lock(state.outgoing_mutex);
-    std::deque<OutgoingPacket> packets;
-    packets.swap(state.outgoing_packets);
-    return packets;
-}
-
-void drain_outgoing_packets(
-    ViewState& state,
-    KvmWebSocket& ws,
-    std::string_view subprotocol,
-    bool verbose)
-{
-    std::deque<OutgoingPacket> packets = take_outgoing_packets(state);
-    for (const OutgoingPacket& packet : packets) {
-        write_packet(ws, packet.bytes, subprotocol);
-        if (verbose && packet.type == kCmdStopSessionImmediate) {
-            std::cout << "hitsc: sent stop session packet\n";
-        }
-    }
-}
-
-void queue_stop_session(ViewState& state)
-{
-    queue_outgoing_packet(
-        state,
-        kCmdStopSessionImmediate,
-        make_simple_packet(kCmdStopSessionImmediate),
-        false);
 }
 
 std::optional<SharedFrame> take_latest_frame(ViewState& state, std::uint64_t last_sequence)
@@ -878,27 +811,43 @@ void log_sent_packet(std::uint16_t type, std::uint16_t status, std::size_t paylo
 
 void store_websocket(ViewState& state, std::shared_ptr<KvmWebSocket> ws)
 {
-    const bool clear_queue = ws == nullptr;
-    {
-        std::lock_guard lock(state.control_mutex);
-        state.websocket = std::move(ws);
-        if (!state.websocket) {
-            state.subprotocol.clear();
-        }
+    std::lock_guard lock(state.control_mutex);
+    state.websocket = std::move(ws);
+    if (!state.websocket) {
+        state.subprotocol.clear();
     }
+}
 
-    if (clear_queue) {
-        std::lock_guard lock(state.outgoing_mutex);
-        state.outgoing_packets.clear();
-    }
+void store_network_callbacks(
+    ViewState& state,
+    std::function<void(std::uint16_t, std::vector<std::uint8_t>, bool)> send_packet,
+    std::function<void()> stop_network)
+{
+    std::lock_guard lock(state.control_mutex);
+    state.send_packet = std::move(send_packet);
+    state.stop_network = std::move(stop_network);
+}
+
+void clear_network_callbacks(ViewState& state)
+{
+    std::lock_guard lock(state.control_mutex);
+    state.send_packet = {};
+    state.stop_network = {};
 }
 
 void cancel_network(ViewState& state)
 {
     std::shared_ptr<KvmWebSocket> ws;
+    std::function<void()> stop_network;
     {
         std::lock_guard lock(state.control_mutex);
         ws = state.websocket;
+        stop_network = state.stop_network;
+    }
+
+    if (stop_network) {
+        stop_network();
+        return;
     }
 
     if (!ws) {
@@ -917,11 +866,8 @@ void force_close_network(ViewState& state)
         ws = state.websocket;
         state.websocket.reset();
         state.subprotocol.clear();
-    }
-
-    {
-        std::lock_guard lock(state.outgoing_mutex);
-        state.outgoing_packets.clear();
+        state.send_packet = {};
+        state.stop_network = {};
     }
 
     if (!ws) {
@@ -965,6 +911,446 @@ int sampled_average_rgb(const std::vector<std::uint8_t>& rgba)
     }
     return samples == 0 ? 0 : static_cast<int>(sum / (samples * 3));
 }
+
+std::uint16_t packet_status_from_bytes(const std::vector<std::uint8_t>& packet)
+{
+    if (packet.size() < 8) {
+        return 0;
+    }
+    return static_cast<std::uint16_t>(packet[6]) |
+           static_cast<std::uint16_t>(packet[7] << 8);
+}
+
+std::size_t packet_payload_size_from_bytes(const std::vector<std::uint8_t>& packet)
+{
+    return packet.size() >= 8 ? packet.size() - 8 : 0;
+}
+
+class KvmAsyncSession : public std::enable_shared_from_this<KvmAsyncSession> {
+public:
+    KvmAsyncSession(
+        asio::io_context& io,
+        std::shared_ptr<KvmWebSocket> ws,
+        KvmViewOptions options,
+        KvmConfig config,
+        std::string subprotocol,
+        ViewState& state)
+        : strand_(asio::make_strand(io))
+        , ws_(std::move(ws))
+        , options_(std::move(options))
+        , config_(std::move(config))
+        , subprotocol_(std::move(subprotocol))
+        , state_(state)
+    {
+    }
+
+    void start()
+    {
+        auto self = shared_from_this();
+        asio::dispatch(strand_, [self] {
+            self->start_read();
+        });
+    }
+
+    void send_packet(std::uint16_t type, std::vector<std::uint8_t> packet, bool coalesce)
+    {
+        auto self = shared_from_this();
+        asio::post(strand_, [self, type, packet = std::move(packet), coalesce]() mutable {
+            self->queue_packet_from_strand(type, std::move(packet), coalesce);
+        });
+    }
+
+    void request_stop()
+    {
+        auto self = shared_from_this();
+        asio::post(strand_, [self] {
+            if (self->closed_) {
+                return;
+            }
+            self->stopping_ = true;
+            set_status(self->state_, "stopping");
+
+            const bool stop_queued = std::any_of(
+                self->outgoing_packets_.begin(),
+                self->outgoing_packets_.end(),
+                [](const OutgoingPacket& packet) {
+                    return packet.type == kCmdStopSessionImmediate;
+                });
+            if (!stop_queued) {
+                self->queue_packet_from_strand(
+                    kCmdStopSessionImmediate,
+                    make_simple_packet(kCmdStopSessionImmediate),
+                    false);
+            }
+
+            if (!self->writing_ && self->outgoing_packets_.empty()) {
+                self->close_socket();
+            }
+        });
+    }
+
+private:
+    void start_read()
+    {
+        if (closed_ || stopping_) {
+            return;
+        }
+
+        read_buffer_.clear();
+        auto self = shared_from_this();
+        ws_->async_read(
+            read_buffer_,
+            asio::bind_executor(strand_, [self](beast::error_code error, std::size_t) {
+                self->on_read(error);
+            }));
+    }
+
+    void on_read(beast::error_code error)
+    {
+        if (error) {
+            handle_read_error(error);
+            return;
+        }
+
+        try {
+            packet_buffer_.append(message_bytes_from_buffer(read_buffer_, subprotocol_));
+            while (std::optional<KvmPacket> packet = packet_buffer_.next()) {
+                handle_packet(*packet);
+                if (closed_) {
+                    return;
+                }
+            }
+        } catch (const std::exception& ex) {
+            fail_with_exception(ex);
+            return;
+        }
+
+        start_read();
+    }
+
+    void handle_read_error(beast::error_code error)
+    {
+        if (stopping_ || closed_ ||
+            error == boost::asio::error::operation_aborted ||
+            error == boost::asio::error::bad_descriptor) {
+            close_socket();
+            return;
+        }
+
+        if (error == beast::error::timeout) {
+            set_status(state_, "idle timeout");
+            std::cerr << "hitsc: kvm view idle timeout after "
+                      << options_.idle_timeout_seconds << "s\n";
+            close_socket();
+            return;
+        }
+
+        if (error == websocket::error::closed ||
+            error == ssl::error::stream_truncated) {
+            set_status(state_, "remote closed");
+            std::cerr << "hitsc: kvm websocket closed\n";
+            close_socket();
+            return;
+        }
+
+        set_status(state_, std::string("error: ") + error.message());
+        std::cerr << "hitsc: kvm view error: " << error.message()
+                  << " [" << error.category().name() << ':' << error.value() << "]\n";
+        close_socket();
+    }
+
+    void handle_packet(const KvmPacket& packet)
+    {
+        ++packets_seen_;
+        if (options_.login.verbose) {
+            log_packet(packets_seen_, packet);
+        }
+
+        if (packet.type == kCmdConnectionAllowed && !validation_sent_) {
+            queue_packet_from_strand(
+                kCmdValidateVideoSession,
+                make_validate_packet(config_, options_.login.username),
+                false);
+            validation_sent_ = true;
+            std::cout << "hitsc: sent KVM validation packet\n";
+        } else if (packet.type == kCmdKeepAlive) {
+            queue_packet_from_strand(kCmdKeepAlive, make_simple_packet(kCmdKeepAlive), false);
+        } else if (packet.type == kCmdUsbMouseMode && !packet.payload.empty()) {
+            set_mouse_mode(state_, packet.payload[0]);
+            if (options_.login.verbose) {
+                std::cout << "hitsc: mouse mode=" << static_cast<int>(packet.payload[0]) << '\n';
+            }
+        } else if (packet.type == kCmdMediaLicenseStatus) {
+            queue_packet_from_strand(
+                kCmdDisplayLockSet,
+                make_payload_packet(kCmdDisplayLockSet, 0, std::vector<std::uint8_t>{2}),
+                false);
+            queue_packet_from_strand(kCmdGetUserMacro, make_simple_packet(kCmdGetUserMacro), false);
+
+            if (!config_.session.empty()) {
+                queue_packet_from_strand(kCmdGetWebToken, make_web_token_packet(config_.session), false);
+            }
+        } else if (packet.type == kCmdActiveClients && !full_screen_requested_) {
+            queue_packet_from_strand(kCmdGetFullScreen, make_simple_packet(kCmdGetFullScreen, 1), false);
+            full_screen_requested_ = true;
+            std::cout << "hitsc: requested full screen\n";
+        } else if (packet.type == kCmdVideoPackets) {
+            handle_video_packet(packet);
+        }
+
+        send_fps_report_if_due();
+    }
+
+    void handle_video_packet(const KvmPacket& packet)
+    {
+        ++video_packets_seen_;
+        const std::optional<KvmVideoFrame> frame = video_assembler_.ingest(packet.payload);
+        if (!frame) {
+            if (options_.login.verbose && video_packets_seen_ <= 20) {
+                std::cout << "hitsc: video packet #" << video_packets_seen_
+                          << " payload=" << packet.payload.size()
+                          << " complete=no\n";
+            }
+            return;
+        }
+
+        const std::uint8_t block_header = kvm_video_first_block_header(frame->compressed);
+        if (frame->rc4_enable != 0 || !kvm_video_is_supported_first_block(block_header)) {
+            std::cerr << "hitsc: skipped unsupported video frame"
+                      << " compression=" << static_cast<int>(frame->compression_mode)
+                      << " rc4=" << static_cast<int>(frame->rc4_enable)
+                      << " first-block=0x" << std::hex << static_cast<int>(block_header) << std::dec
+                      << '\n';
+            ++frames_received_since_report_;
+            fps_reporting_started_ = true;
+            return;
+        }
+
+        ++frames_received_since_report_;
+        fps_reporting_started_ = true;
+        const AspeedDecodeOptions decode_options{
+            frame->width,
+            frame->height,
+            frame->mode420,
+            frame->jpeg_table_selector,
+            frame->advance_table_selector,
+        };
+        const int next_frame_number = frames_seen_ + 1;
+        if (options_.login.verbose && (next_frame_number <= 20 || next_frame_number % 60 == 0)) {
+            std::cout << "hitsc: decoding frame #" << next_frame_number
+                      << " packets=" << packets_seen_
+                      << " video-packets=" << video_packets_seen_
+                      << " size=" << frame->width << "x" << frame->height
+                      << " compressed=" << frame->compressed.size()
+                      << " compression=" << static_cast<int>(frame->compression_mode)
+                      << " mode420=" << static_cast<int>(frame->mode420)
+                      << " first-block=0x" << std::hex << static_cast<int>(block_header) << std::dec
+                      << '\n';
+        }
+        const bool can_use_previous =
+            framebuffer_width_ == frame->width
+            && framebuffer_height_ == frame->height
+            && framebuffer_.size()
+                == static_cast<std::size_t>(frame->width) * static_cast<std::size_t>(frame->height) * 4;
+
+        std::vector<std::uint8_t> rgba =
+            decoder_.decode_rgba(decode_options, frame->compressed, can_use_previous ? &framebuffer_ : nullptr);
+        const int average_rgb = sampled_average_rgb(rgba);
+        framebuffer_ = rgba;
+        framebuffer_width_ = frame->width;
+        framebuffer_height_ = frame->height;
+        publish_frame(state_, frame->width, frame->height, std::move(rgba));
+        ++frames_processed_since_report_;
+
+        ++frames_seen_;
+        if (options_.login.verbose && (frames_seen_ <= 20 || frames_seen_ % 60 == 0)) {
+            std::cout << "hitsc: rendered frame #" << frames_seen_
+                      << " packets=" << packets_seen_
+                      << " video-packets=" << video_packets_seen_
+                      << " size=" << frame->width << "x" << frame->height
+                      << " compressed=" << frame->compressed.size()
+                      << " avg-rgb=" << average_rgb
+                      << '\n';
+        }
+    }
+
+    void send_fps_report_if_due()
+    {
+        const auto now = std::chrono::steady_clock::now();
+        if (!fps_reporting_started_ || now - last_fps_report_ < std::chrono::milliseconds(100)) {
+            return;
+        }
+
+        const int diff = std::abs(frames_received_since_report_ - frames_processed_since_report_);
+        queue_packet_from_strand(kCmdFpsDiff, make_simple_packet(kCmdFpsDiff, static_cast<std::uint16_t>(diff)), false);
+        frames_received_since_report_ = 0;
+        frames_processed_since_report_ = 0;
+        last_fps_report_ = now;
+    }
+
+    void queue_packet_from_strand(std::uint16_t type, std::vector<std::uint8_t> packet, bool coalesce)
+    {
+        if (closed_ || (stopping_ && type != kCmdStopSessionImmediate)) {
+            return;
+        }
+
+        auto mutable_begin = outgoing_packets_.begin();
+        if (writing_ && mutable_begin != outgoing_packets_.end()) {
+            ++mutable_begin;
+        }
+
+        if (coalesce) {
+            for (auto it = outgoing_packets_.end(); it != mutable_begin;) {
+                --it;
+                if (it->type == type) {
+                    it->bytes = std::move(packet);
+                    it->encoded_text.clear();
+                    return;
+                }
+            }
+        }
+
+        constexpr std::size_t max_queued_packets = 128;
+        while (outgoing_packets_.size() >= max_queued_packets) {
+            auto removable = std::find_if(
+                mutable_begin,
+                outgoing_packets_.end(),
+                [](const OutgoingPacket& outgoing) {
+                    return outgoing.type == kCmdSendHidPacket;
+                });
+            if (removable == outgoing_packets_.end()) {
+                break;
+            }
+            outgoing_packets_.erase(removable);
+            mutable_begin = outgoing_packets_.begin();
+            if (writing_ && mutable_begin != outgoing_packets_.end()) {
+                ++mutable_begin;
+            }
+        }
+
+        outgoing_packets_.push_back(OutgoingPacket{type, std::move(packet), {}});
+        start_write();
+    }
+
+    void start_write()
+    {
+        if (closed_ || writing_ || outgoing_packets_.empty()) {
+            return;
+        }
+
+        writing_ = true;
+        OutgoingPacket& packet = outgoing_packets_.front();
+        auto self = shared_from_this();
+        if (is_binary_mode(subprotocol_)) {
+            ws_->binary(true);
+            ws_->async_write(
+                asio::buffer(packet.bytes),
+                asio::bind_executor(strand_, [self](beast::error_code error, std::size_t) {
+                    self->on_write(error);
+                }));
+            return;
+        }
+
+        packet.encoded_text = base64_encode(packet.bytes);
+        ws_->text(true);
+        ws_->async_write(
+            asio::buffer(packet.encoded_text),
+            asio::bind_executor(strand_, [self](beast::error_code error, std::size_t) {
+                self->on_write(error);
+            }));
+    }
+
+    void on_write(beast::error_code error)
+    {
+        if (error) {
+            if (stopping_ || closed_ ||
+                error == boost::asio::error::operation_aborted ||
+                error == boost::asio::error::bad_descriptor) {
+                close_socket();
+                return;
+            }
+
+            set_status(state_, std::string("error: ") + error.message());
+            std::cerr << "hitsc: kvm write error: " << error.message()
+                      << " [" << error.category().name() << ':' << error.value() << "]\n";
+            close_socket();
+            return;
+        }
+
+        if (!outgoing_packets_.empty()) {
+            const OutgoingPacket sent = std::move(outgoing_packets_.front());
+            outgoing_packets_.pop_front();
+            if (options_.login.verbose) {
+                log_sent_packet(
+                    sent.type,
+                    packet_status_from_bytes(sent.bytes),
+                    packet_payload_size_from_bytes(sent.bytes),
+                    true);
+            } else if (sent.type == kCmdStopSessionImmediate) {
+                std::cout << "hitsc: sent stop session packet\n";
+            }
+        }
+
+        writing_ = false;
+        if (stopping_ && outgoing_packets_.empty()) {
+            close_socket();
+            return;
+        }
+
+        start_write();
+    }
+
+    void fail_with_exception(const std::exception& ex)
+    {
+        set_status(state_, std::string("error: ") + ex.what());
+        std::cerr << "hitsc: kvm view error: " << ex.what() << '\n';
+        close_socket();
+    }
+
+    void close_socket()
+    {
+        if (closed_) {
+            return;
+        }
+
+        closed_ = true;
+        outgoing_packets_.clear();
+        beast::error_code error;
+        beast::get_lowest_layer(*ws_).socket().shutdown(tcp::socket::shutdown_both, error);
+        error.clear();
+        beast::get_lowest_layer(*ws_).socket().close(error);
+        if (stopping_) {
+            set_status(state_, "stopped");
+        }
+    }
+
+    asio::strand<asio::io_context::executor_type> strand_;
+    std::shared_ptr<KvmWebSocket> ws_;
+    KvmViewOptions options_;
+    KvmConfig config_;
+    std::string subprotocol_;
+    ViewState& state_;
+    beast::flat_buffer read_buffer_;
+    PacketBuffer packet_buffer_;
+    AspeedDecoder decoder_;
+    KvmVideoAssembler video_assembler_;
+    std::vector<std::uint8_t> framebuffer_;
+    std::deque<OutgoingPacket> outgoing_packets_;
+    int framebuffer_width_ = 0;
+    int framebuffer_height_ = 0;
+    int packets_seen_ = 0;
+    int video_packets_seen_ = 0;
+    int frames_seen_ = 0;
+    bool validation_sent_ = false;
+    bool full_screen_requested_ = false;
+    bool fps_reporting_started_ = false;
+    bool writing_ = false;
+    bool stopping_ = false;
+    bool closed_ = false;
+    int frames_received_since_report_ = 0;
+    int frames_processed_since_report_ = 0;
+    std::chrono::steady_clock::time_point last_fps_report_ = std::chrono::steady_clock::now();
+};
 
 void network_thread_main(const KvmViewOptions& options, ViewState& state, const std::atomic_bool& stop_requested)
 {
@@ -1025,188 +1411,33 @@ void network_thread_main(const KvmViewOptions& options, ViewState& state, const 
                   << " subprotocol=" << subprotocol
                   << " idle-timeout=" << options.idle_timeout_seconds << "s\n";
 
-        PacketBuffer packet_buffer;
-        beast::flat_buffer read_buffer;
-        AspeedDecoder decoder;
-        KvmVideoAssembler video_assembler;
-        std::vector<std::uint8_t> framebuffer;
-        int framebuffer_width = 0;
-        int framebuffer_height = 0;
-        int packets_seen = 0;
-        int video_packets_seen = 0;
-        int frames_seen = 0;
-        bool validation_sent = false;
-        bool full_screen_requested = false;
-        bool fps_reporting_started = false;
-        int frames_received_since_report = 0;
-        int frames_processed_since_report = 0;
-        int fps_reports_sent = 0;
-        auto last_fps_report = std::chrono::steady_clock::now();
-
-        while (!stop_requested.load()) {
-            std::vector<std::uint8_t> bytes;
-            try {
-                bytes = read_message_bytes(*ws, read_buffer, subprotocol);
-            } catch (const beast::system_error& error) {
-                if (stop_requested.load()) {
-                    drain_outgoing_packets(state, *ws, subprotocol, options.login.verbose);
-                    break;
-                }
-                if (error.code() == beast::error::timeout) {
-                    set_status(state, "idle timeout");
-                    std::cerr << "hitsc: kvm view idle timeout after "
-                              << options.idle_timeout_seconds << "s\n";
-                    break;
-                }
-                if (error.code() == websocket::error::closed ||
-                    error.code() == ssl::error::stream_truncated ||
-                    error.code() == boost::asio::error::operation_aborted ||
-                    error.code() == boost::asio::error::bad_descriptor) {
-                    set_status(state, "remote closed");
-                    std::cerr << "hitsc: kvm websocket closed\n";
-                    break;
-                }
-                throw;
-            }
-
-            packet_buffer.append(bytes);
-            while (std::optional<KvmPacket> packet = packet_buffer.next()) {
-                ++packets_seen;
-                if (options.login.verbose) {
-                    log_packet(packets_seen, *packet);
-                }
-
-                if (packet->type == kCmdConnectionAllowed && !validation_sent) {
-                    const std::vector<std::uint8_t> validate = make_validate_packet(config, options.login.username);
-                    write_packet(*ws, validate, subprotocol);
-                    validation_sent = true;
-                    std::cout << "hitsc: sent KVM validation packet\n";
-                } else if (packet->type == kCmdKeepAlive) {
-                    write_packet(*ws, make_simple_packet(kCmdKeepAlive), subprotocol);
-                } else if (packet->type == kCmdUsbMouseMode && !packet->payload.empty()) {
-                    set_mouse_mode(state, packet->payload[0]);
-                    if (options.login.verbose) {
-                        std::cout << "hitsc: mouse mode=" << static_cast<int>(packet->payload[0]) << '\n';
-                    }
-                } else if (packet->type == kCmdMediaLicenseStatus) {
-                    const std::vector<std::uint8_t> display_lock =
-                        make_payload_packet(kCmdDisplayLockSet, 0, std::vector<std::uint8_t>{2});
-                    write_packet(*ws, display_lock, subprotocol);
-                    log_sent_packet(kCmdDisplayLockSet, 0, 1, options.login.verbose);
-
-                    const std::vector<std::uint8_t> user_macro = make_simple_packet(kCmdGetUserMacro);
-                    write_packet(*ws, user_macro, subprotocol);
-                    log_sent_packet(kCmdGetUserMacro, 0, 0, options.login.verbose);
-
-                    if (!config.session.empty()) {
-                        const std::vector<std::uint8_t> web_token = make_web_token_packet(config.session);
-                        write_packet(*ws, web_token, subprotocol);
-                        log_sent_packet(kCmdGetWebToken, 0, kWebTokenPayloadLength, options.login.verbose);
-                    }
-                } else if (packet->type == kCmdActiveClients && !full_screen_requested) {
-                    write_packet(*ws, make_simple_packet(kCmdGetFullScreen, 1), subprotocol);
-                    full_screen_requested = true;
-                    std::cout << "hitsc: requested full screen\n";
-                } else if (packet->type == kCmdVideoPackets) {
-                    ++video_packets_seen;
-                    const std::optional<KvmVideoFrame> frame = video_assembler.ingest(packet->payload);
-                    if (!frame) {
-                        if (options.login.verbose && video_packets_seen <= 20) {
-                            std::cout << "hitsc: video packet #" << video_packets_seen
-                                      << " payload=" << packet->payload.size()
-                                      << " complete=no\n";
-                        }
-                        drain_outgoing_packets(state, *ws, subprotocol, options.login.verbose);
-                        continue;
-                    }
-
-                    const std::uint8_t block_header = kvm_video_first_block_header(frame->compressed);
-                    if (frame->rc4_enable != 0 || !kvm_video_is_supported_first_block(block_header)) {
-                        std::cerr << "hitsc: skipped unsupported video frame"
-                                  << " compression=" << static_cast<int>(frame->compression_mode)
-                                  << " rc4=" << static_cast<int>(frame->rc4_enable)
-                                  << " first-block=0x" << std::hex << static_cast<int>(block_header) << std::dec
-                                  << '\n';
-                        ++frames_received_since_report;
-                        fps_reporting_started = true;
-                        drain_outgoing_packets(state, *ws, subprotocol, options.login.verbose);
-                        continue;
-                    }
-
-                    ++frames_received_since_report;
-                    fps_reporting_started = true;
-                    const AspeedDecodeOptions decode_options{
-                        frame->width,
-                        frame->height,
-                        frame->mode420,
-                        frame->jpeg_table_selector,
-                        frame->advance_table_selector,
-                    };
-                    const int next_frame_number = frames_seen + 1;
-                    if (options.login.verbose && (next_frame_number <= 20 || next_frame_number % 60 == 0)) {
-                        std::cout << "hitsc: decoding frame #" << next_frame_number
-                                  << " packets=" << packets_seen
-                                  << " video-packets=" << video_packets_seen
-                                  << " size=" << frame->width << "x" << frame->height
-                                  << " compressed=" << frame->compressed.size()
-                                  << " compression=" << static_cast<int>(frame->compression_mode)
-                                  << " mode420=" << static_cast<int>(frame->mode420)
-                                  << " first-block=0x" << std::hex << static_cast<int>(block_header) << std::dec
-                                  << '\n';
-                    }
-                    const bool can_use_previous =
-                        framebuffer_width == frame->width
-                        && framebuffer_height == frame->height
-                        && framebuffer.size()
-                            == static_cast<std::size_t>(frame->width) * static_cast<std::size_t>(frame->height) * 4;
-
-                    std::vector<std::uint8_t> rgba =
-                        decoder.decode_rgba(decode_options, frame->compressed, can_use_previous ? &framebuffer : nullptr);
-                    const int average_rgb = sampled_average_rgb(rgba);
-                    framebuffer = rgba;
-                    framebuffer_width = frame->width;
-                    framebuffer_height = frame->height;
-                    publish_frame(state, frame->width, frame->height, std::move(rgba));
-                    ++frames_processed_since_report;
-
-                    ++frames_seen;
-                    if (options.login.verbose && (frames_seen <= 20 || frames_seen % 60 == 0)) {
-                        std::cout << "hitsc: rendered frame #" << frames_seen
-                                  << " packets=" << packets_seen
-                                  << " video-packets=" << video_packets_seen
-                                  << " size=" << frame->width << "x" << frame->height
-                                  << " compressed=" << frame->compressed.size()
-                                  << " avg-rgb=" << average_rgb
-                                  << '\n';
-                    }
-                }
-
-                const auto now = std::chrono::steady_clock::now();
-                if (fps_reporting_started && now - last_fps_report >= std::chrono::milliseconds(100)) {
-                    const int diff = std::abs(frames_received_since_report - frames_processed_since_report);
-                    write_packet(*ws, make_simple_packet(kCmdFpsDiff, static_cast<std::uint16_t>(diff)), subprotocol);
-                    ++fps_reports_sent;
-                    if (options.login.verbose && (fps_reports_sent <= 5 || fps_reports_sent % 50 == 0)) {
-                        log_sent_packet(kCmdFpsDiff, static_cast<std::uint16_t>(diff), 0, true);
-                    }
-                    frames_received_since_report = 0;
-                    frames_processed_since_report = 0;
-                    last_fps_report = now;
-                }
-
-                drain_outgoing_packets(state, *ws, subprotocol, options.login.verbose);
-            }
-            drain_outgoing_packets(state, *ws, subprotocol, options.login.verbose);
+        if (stop_requested.load()) {
+            force_close_network(state);
+            return;
         }
 
-        drain_outgoing_packets(state, *ws, subprotocol, options.login.verbose);
-        force_close_network(state);
-        set_status(state, "stopped");
+        auto async_session = std::make_shared<KvmAsyncSession>(io, ws, options, config, subprotocol, state);
+        std::weak_ptr<KvmAsyncSession> weak_session = async_session;
+        store_network_callbacks(
+            state,
+            [weak_session](std::uint16_t type, std::vector<std::uint8_t> packet, bool coalesce) mutable {
+                if (auto session = weak_session.lock()) {
+                    session->send_packet(type, std::move(packet), coalesce);
+                }
+            },
+            [weak_session] {
+                if (auto session = weak_session.lock()) {
+                    session->request_stop();
+                }
+            });
+        async_session->start();
+        io.run();
     } catch (const std::exception& ex) {
         set_status(state, std::string("error: ") + ex.what());
         std::cerr << "hitsc: kvm view error: " << ex.what() << '\n';
     }
 
+    clear_network_callbacks(state);
     store_websocket(state, {});
 }
 
@@ -1302,13 +1533,37 @@ void send_mouse_report(
     const bool coalesce = buttons == 0 && wheel == 0;
     queue_outgoing_packet(state, kCmdSendHidPacket, std::move(packet), coalesce);
     if (verbose) {
-        std::cout << "hitsc: sent mouse"
+        std::cout << "hitsc: queued mouse"
                   << " mode=" << mouse_mode
                   << " buttons=" << static_cast<int>(buttons)
                   << " x=" << position.x
                   << " y=" << position.y
                   << " wheel=" << wheel
                   << '\n';
+    }
+}
+
+void stop_network_thread(
+    ViewState& state,
+    std::atomic_bool& stop_requested,
+    std::thread& network_thread,
+    const std::atomic_bool& network_done)
+{
+    stop_requested.store(true);
+    cancel_network(state);
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(750);
+    while (!network_done.load() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    if (!network_thread.joinable()) {
+        return;
+    }
+    if (network_done.load()) {
+        network_thread.join();
+    } else {
+        network_thread.detach();
     }
 }
 
@@ -1325,6 +1580,7 @@ void run_kvm_view(const KvmViewOptions& options)
     SDL_Texture* texture = nullptr;
 
     auto stop_requested = std::make_shared<std::atomic_bool>(false);
+    auto network_done = std::make_shared<std::atomic_bool>(false);
     auto state = std::make_shared<ViewState>();
     std::thread network_thread;
 
@@ -1340,8 +1596,9 @@ void run_kvm_view(const KvmViewOptions& options)
         }
 
         KvmViewOptions network_options = options;
-        network_thread = std::thread([network_options, state, stop_requested] {
+        network_thread = std::thread([network_options, state, stop_requested, network_done] {
             network_thread_main(network_options, *state, *stop_requested);
+            network_done->store(true);
         });
 
         bool running = true;
@@ -1525,12 +1782,7 @@ void run_kvm_view(const KvmViewOptions& options)
             SDL_Delay(16);
         }
     } catch (...) {
-        stop_requested->store(true);
-        queue_stop_session(*state);
-        cancel_network(*state);
-        if (network_thread.joinable()) {
-            network_thread.detach();
-        }
+        stop_network_thread(*state, *stop_requested, network_thread, *network_done);
         if (texture != nullptr) {
             SDL_DestroyTexture(texture);
         }
@@ -1544,12 +1796,7 @@ void run_kvm_view(const KvmViewOptions& options)
         throw;
     }
 
-    stop_requested->store(true);
-    queue_stop_session(*state);
-    cancel_network(*state);
-    if (network_thread.joinable()) {
-        network_thread.detach();
-    }
+    stop_network_thread(*state, *stop_requested, network_thread, *network_done);
 
     if (texture != nullptr) {
         SDL_DestroyTexture(texture);
