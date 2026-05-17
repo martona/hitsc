@@ -1,0 +1,15 @@
+{
+  "name": "hitsc",
+  "version-string": "0.1.0",
+  "description": "HTTPS IPMI terminal services client",
+  "builtin-baseline": "2b65c20fc66eda893aa15a15a453c3cf09500b19",
+  "dependencies": [
+    "boost-asio",
+    "boost-beast",
+    "boost-json",
+    "boost-system",
+    "cli11",
+    "openssl",
+    "zlib"
+  ]
+}
