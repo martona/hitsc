@@ -4,6 +4,6 @@
 
 namespace hitsc {
 
-void run_kvm_view(const KvmViewOptions& options);
+void run_megarac_probe(const MegaracProbeOptions& options);
 
 } // namespace hitsc

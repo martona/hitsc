@@ -14,16 +14,23 @@ struct LoginOptions {
     bool insecure = false;
 };
 
-struct KvmProbeOptions {
+struct MegaracProbeOptions {
     LoginOptions login;
     std::string capture_path;
     int packet_limit = 80;
     int idle_timeout_seconds = 10;
 };
 
-struct KvmViewOptions {
+struct MegaracViewOptions {
     LoginOptions login;
     int idle_timeout_seconds = 0;
+};
+
+struct AtenProbeOptions {
+    LoginOptions login;
+    bool fetch_bootstrap = true;
+    std::string websocket_path = "/";
+    int idle_timeout_seconds = 10;
 };
 
 } // namespace hitsc

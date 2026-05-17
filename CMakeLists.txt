@@ -34,20 +34,23 @@ endif()
 
 add_executable(
   hitsc
+  src/aten_probe.cpp
+  src/aten_session.cpp
   src/aspeed_decoder.cpp
+  src/bmc_session.cpp
   src/cli.cpp
   src/console.cpp
   src/cookie_jar.cpp
   src/diagnostics.cpp
   src/http_client.cpp
-  src/kvm_capture.cpp
-  src/kvm_capture_decode.cpp
-  src/kvm_probe.cpp
-  src/kvm_view.cpp
+  src/megarac_capture.cpp
+  src/megarac_capture_decode.cpp
+  src/megarac_probe.cpp
+  src/megarac_view.cpp
   src/main.cpp
   src/megarac_cursor.cpp
   src/megarac_hid.cpp
-  src/megarac_kvm_session.cpp
+  src/megarac_view_session.cpp
   src/megarac_protocol.cpp
   src/megarac_video.cpp
   src/megarac_session.cpp

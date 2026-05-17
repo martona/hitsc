@@ -4,6 +4,6 @@
 
 namespace hitsc {
 
-void run_kvm_probe(const KvmProbeOptions& options);
+void run_aten_probe(const AtenProbeOptions& options);
 
 } // namespace hitsc

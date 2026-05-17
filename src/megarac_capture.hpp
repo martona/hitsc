@@ -7,22 +7,22 @@
 
 namespace hitsc {
 
-enum class KvmCaptureRecordType : std::uint16_t {
+enum class MegaracCaptureRecordType : std::uint16_t {
     Metadata = 1,
     IncomingPacket = 2,
     OutgoingMessage = 3,
     Note = 4,
 };
 
-class KvmCaptureWriter {
+class MegaracCaptureWriter {
 public:
-    explicit KvmCaptureWriter(std::string_view path);
-    ~KvmCaptureWriter();
+    explicit MegaracCaptureWriter(std::string_view path);
+    ~MegaracCaptureWriter();
 
-    KvmCaptureWriter(const KvmCaptureWriter&) = delete;
-    KvmCaptureWriter& operator=(const KvmCaptureWriter&) = delete;
-    KvmCaptureWriter(KvmCaptureWriter&&) noexcept;
-    KvmCaptureWriter& operator=(KvmCaptureWriter&&) noexcept;
+    MegaracCaptureWriter(const MegaracCaptureWriter&) = delete;
+    MegaracCaptureWriter& operator=(const MegaracCaptureWriter&) = delete;
+    MegaracCaptureWriter(MegaracCaptureWriter&&) noexcept;
+    MegaracCaptureWriter& operator=(MegaracCaptureWriter&&) noexcept;
 
     void write_metadata(std::string_view json);
     void write_note(std::string_view note);
@@ -33,7 +33,7 @@ public:
     void write_outgoing_message(const std::vector<std::uint8_t>& bytes);
 
 private:
-    void write_record(KvmCaptureRecordType type, const std::vector<std::uint8_t>& payload);
+    void write_record(MegaracCaptureRecordType type, const std::vector<std::uint8_t>& payload);
 
     class Impl;
     std::unique_ptr<Impl> impl_;

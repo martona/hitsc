@@ -1,4 +1,4 @@
-#include "kvm_capture.hpp"
+#include "megarac_capture.hpp"
 
 #include <chrono>
 #include <filesystem>
@@ -74,7 +74,7 @@ void append_u32(std::vector<std::uint8_t>& bytes, std::uint32_t value)
 
 } // namespace
 
-class KvmCaptureWriter::Impl {
+class MegaracCaptureWriter::Impl {
 public:
     explicit Impl(std::string_view path)
         : start_(std::chrono::steady_clock::now())
@@ -96,7 +96,7 @@ public:
         write_u32(output_, kFormatVersion);
     }
 
-    void write_record(KvmCaptureRecordType type, const std::vector<std::uint8_t>& payload)
+    void write_record(MegaracCaptureRecordType type, const std::vector<std::uint8_t>& payload)
     {
         const auto elapsed = std::chrono::steady_clock::now() - start_;
         const auto timestamp_us =
@@ -117,28 +117,28 @@ private:
     std::chrono::steady_clock::time_point start_;
 };
 
-KvmCaptureWriter::KvmCaptureWriter(std::string_view path)
+MegaracCaptureWriter::MegaracCaptureWriter(std::string_view path)
     : impl_(std::make_unique<Impl>(path))
 {
 }
 
-KvmCaptureWriter::~KvmCaptureWriter() = default;
-KvmCaptureWriter::KvmCaptureWriter(KvmCaptureWriter&&) noexcept = default;
-KvmCaptureWriter& KvmCaptureWriter::operator=(KvmCaptureWriter&&) noexcept = default;
+MegaracCaptureWriter::~MegaracCaptureWriter() = default;
+MegaracCaptureWriter::MegaracCaptureWriter(MegaracCaptureWriter&&) noexcept = default;
+MegaracCaptureWriter& MegaracCaptureWriter::operator=(MegaracCaptureWriter&&) noexcept = default;
 
-void KvmCaptureWriter::write_metadata(std::string_view json)
+void MegaracCaptureWriter::write_metadata(std::string_view json)
 {
     const std::vector<std::uint8_t> payload(json.begin(), json.end());
-    write_record(KvmCaptureRecordType::Metadata, payload);
+    write_record(MegaracCaptureRecordType::Metadata, payload);
 }
 
-void KvmCaptureWriter::write_note(std::string_view note)
+void MegaracCaptureWriter::write_note(std::string_view note)
 {
     const std::vector<std::uint8_t> payload(note.begin(), note.end());
-    write_record(KvmCaptureRecordType::Note, payload);
+    write_record(MegaracCaptureRecordType::Note, payload);
 }
 
-void KvmCaptureWriter::write_incoming_packet(
+void MegaracCaptureWriter::write_incoming_packet(
     std::uint16_t type,
     std::uint16_t status,
     const std::vector<std::uint8_t>& payload)
@@ -149,15 +149,15 @@ void KvmCaptureWriter::write_incoming_packet(
     append_u32(packet, checked_size(payload.size(), "KVM packet payload"));
     append_u16(packet, status);
     packet.insert(packet.end(), payload.begin(), payload.end());
-    write_record(KvmCaptureRecordType::IncomingPacket, packet);
+    write_record(MegaracCaptureRecordType::IncomingPacket, packet);
 }
 
-void KvmCaptureWriter::write_outgoing_message(const std::vector<std::uint8_t>& bytes)
+void MegaracCaptureWriter::write_outgoing_message(const std::vector<std::uint8_t>& bytes)
 {
-    write_record(KvmCaptureRecordType::OutgoingMessage, bytes);
+    write_record(MegaracCaptureRecordType::OutgoingMessage, bytes);
 }
 
-void KvmCaptureWriter::write_record(KvmCaptureRecordType type, const std::vector<std::uint8_t>& payload)
+void MegaracCaptureWriter::write_record(MegaracCaptureRecordType type, const std::vector<std::uint8_t>& payload)
 {
     impl_->write_record(type, payload);
 }

@@ -43,15 +43,15 @@ enum class MegaracCommand : std::uint16_t {
 };
 
 constexpr std::uint8_t kMegaracValidateSessionValid = 1;
-constexpr std::uint16_t kMegaracKvmPrivReqMaster = 1;
-constexpr std::uint16_t kMegaracKvmReqAllowed = 0;
+constexpr std::uint16_t kMegaracViewPrivReqMaster = 1;
+constexpr std::uint16_t kMegaracViewReqAllowed = 0;
 
 constexpr std::uint16_t command_value(MegaracCommand command)
 {
     return static_cast<std::uint16_t>(command);
 }
 
-struct MegaracKvmConfig {
+struct MegaracViewConfig {
     std::string client_ip;
     std::string session;
     std::string token;
@@ -103,7 +103,7 @@ std::vector<std::uint8_t> make_payload_packet(
     const std::vector<std::uint8_t>& payload);
 std::vector<std::uint8_t> make_web_token_packet(std::string_view session);
 std::vector<std::uint8_t> make_validate_video_session_packet(
-    const MegaracKvmConfig& config,
+    const MegaracViewConfig& config,
     std::string_view username);
 
 std::uint16_t packet_status_from_bytes(const std::vector<std::uint8_t>& packet);

@@ -16,18 +16,18 @@
 
 namespace hitsc {
 
-struct MegaracKvmFrame {
+struct MegaracViewFrame {
     int width = 0;
     int height = 0;
     std::uint64_t sequence = 0;
     std::vector<std::uint8_t> rgba;
 };
 
-struct MegaracKvmSessionState {
+struct MegaracViewSessionState {
     std::mutex frame_mutex;
     std::mutex cursor_mutex;
     std::mutex control_mutex;
-    MegaracKvmFrame frame;
+    MegaracViewFrame frame;
     MegaracHardwareCursor cursor;
     std::string status = "starting";
     std::string subprotocol;
@@ -39,7 +39,7 @@ struct MegaracKvmSessionState {
     int mouse_mode = kMegaracAbsoluteMouseMode;
 };
 
-struct MegaracKvmStatusSnapshot {
+struct MegaracViewStatusSnapshot {
     std::string status;
     bool has_frame = false;
 };
@@ -54,30 +54,30 @@ void write_log_line(std::ostream& output, Writer writer)
     output << '\n';
 }
 
-void run_megarac_kvm_session(
-    const KvmViewOptions& options,
-    MegaracKvmSessionState& state,
+void run_megarac_view_session(
+    const MegaracViewOptions& options,
+    MegaracViewSessionState& state,
     const std::atomic_bool& stop_requested);
 
-void stop_megarac_kvm_session(MegaracKvmSessionState& state);
+void stop_megarac_view_session(MegaracViewSessionState& state);
 
-bool queue_megarac_kvm_packet(
-    MegaracKvmSessionState& state,
+bool queue_megarac_view_packet(
+    MegaracViewSessionState& state,
     std::uint16_t type,
     std::vector<std::uint8_t> packet,
     bool coalesce);
 
-int megarac_kvm_mouse_mode_snapshot(MegaracKvmSessionState& state);
+int megarac_view_mouse_mode_snapshot(MegaracViewSessionState& state);
 
-std::optional<MegaracKvmFrame> take_latest_megarac_kvm_frame(
-    MegaracKvmSessionState& state,
+std::optional<MegaracViewFrame> take_latest_megarac_view_frame(
+    MegaracViewSessionState& state,
     std::uint64_t last_sequence);
 
-std::optional<MegaracHardwareCursor> take_latest_megarac_kvm_cursor(
-    MegaracKvmSessionState& state,
+std::optional<MegaracHardwareCursor> take_latest_megarac_view_cursor(
+    MegaracViewSessionState& state,
     std::uint64_t last_sequence);
 
-MegaracKvmStatusSnapshot megarac_kvm_status_snapshot(MegaracKvmSessionState& state);
+MegaracViewStatusSnapshot megarac_view_status_snapshot(MegaracViewSessionState& state);
 
 int sampled_average_rgb(const std::vector<std::uint8_t>& rgba);
 

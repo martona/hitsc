@@ -1,9 +1,9 @@
-#include "kvm_view.hpp"
+#include "megarac_view.hpp"
 
 #include "diagnostics.hpp"
 #include "megarac_cursor.hpp"
 #include "megarac_hid.hpp"
-#include "megarac_kvm_session.hpp"
+#include "megarac_view_session.hpp"
 #include "megarac_protocol.hpp"
 
 #include <SDL3/SDL.h>
@@ -228,7 +228,7 @@ bool has_keyboard_state(std::uint8_t modifiers, const KeyboardKeySlots& keys)
 }
 
 void send_keyboard_report(
-    MegaracKvmSessionState& state,
+    MegaracViewSessionState& state,
     std::uint8_t modifiers,
     const KeyboardKeySlots& keys,
     std::uint32_t& sequence,
@@ -236,7 +236,7 @@ void send_keyboard_report(
 {
     std::vector<std::uint8_t> packet =
         make_megarac_keyboard_packet(MegaracKeyboardReport{modifiers, keys}, sequence++);
-    const bool accepted = queue_megarac_kvm_packet(state, kCmdSendHidPacket, std::move(packet), false);
+    const bool accepted = queue_megarac_view_packet(state, kCmdSendHidPacket, std::move(packet), false);
     if (verbose && accepted) {
         write_log_line(std::cout, [&](std::ostream& output) {
             output << "hitsc: queued keyboard"
@@ -263,7 +263,7 @@ void send_keyboard_report(
 }
 
 void send_mouse_report(
-    MegaracKvmSessionState& state,
+    MegaracViewSessionState& state,
     std::uint8_t buttons,
     const RemoteMousePosition& position,
     int frame_width,
@@ -273,7 +273,7 @@ void send_mouse_report(
     std::uint32_t& sequence,
     bool verbose)
 {
-    const int mouse_mode = megarac_kvm_mouse_mode_snapshot(state);
+    const int mouse_mode = megarac_view_mouse_mode_snapshot(state);
     std::vector<std::uint8_t> packet;
     if (mouse_mode == kRelativeMouseMode || mouse_mode == kOtherMouseMode) {
         const int dx = last_relative_position ? position.x - last_relative_position->x : 0;
@@ -289,7 +289,7 @@ void send_mouse_report(
 
     last_relative_position = position;
     const bool coalesce = buttons == 0 && wheel == 0;
-    const bool accepted = queue_megarac_kvm_packet(state, kCmdSendHidPacket, std::move(packet), coalesce);
+    const bool accepted = queue_megarac_view_packet(state, kCmdSendHidPacket, std::move(packet), coalesce);
     if (verbose && accepted) {
         write_log_line(std::cout, [&](std::ostream& output) {
             output << "hitsc: queued mouse"
@@ -303,13 +303,13 @@ void send_mouse_report(
 }
 
 void stop_network_thread(
-    MegaracKvmSessionState& state,
+    MegaracViewSessionState& state,
     std::atomic_bool& stop_requested,
     std::thread& network_thread,
     const std::atomic_bool& network_done)
 {
     stop_requested.store(true);
-    stop_megarac_kvm_session(state);
+    stop_megarac_view_session(state);
 
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(750);
     while (!network_done.load() && std::chrono::steady_clock::now() < deadline) {
@@ -328,7 +328,7 @@ void stop_network_thread(
 
 } // namespace
 
-void run_kvm_view(const KvmViewOptions& options)
+void run_megarac_view(const MegaracViewOptions& options)
 {
     if (!SDL_Init(SDL_INIT_VIDEO)) {
         throw_sdl_error("SDL_Init");
@@ -341,7 +341,7 @@ void run_kvm_view(const KvmViewOptions& options)
 
     auto stop_requested = std::make_shared<std::atomic_bool>(false);
     auto network_done = std::make_shared<std::atomic_bool>(false);
-    auto state = std::make_shared<MegaracKvmSessionState>();
+    auto state = std::make_shared<MegaracViewSessionState>();
     std::thread network_thread;
 
     try {
@@ -355,9 +355,9 @@ void run_kvm_view(const KvmViewOptions& options)
             throw_sdl_error("SDL_CreateRenderer");
         }
 
-        KvmViewOptions network_options = options;
+        MegaracViewOptions network_options = options;
         network_thread = std::thread([network_options, state, stop_requested, network_done] {
-            run_megarac_kvm_session(network_options, *state, *stop_requested);
+            run_megarac_view_session(network_options, *state, *stop_requested);
             network_done->store(true);
         });
 
@@ -544,14 +544,14 @@ void run_kvm_view(const KvmViewOptions& options)
             }
 
             bool cursor_texture_dirty = false;
-            if (std::optional<SharedCursor> cursor = take_latest_megarac_kvm_cursor(*state, last_cursor_sequence)) {
+            if (std::optional<SharedCursor> cursor = take_latest_megarac_view_cursor(*state, last_cursor_sequence)) {
                 hardware_cursor = std::move(*cursor);
                 last_cursor_sequence = hardware_cursor.sequence;
                 has_hardware_cursor = true;
                 cursor_texture_dirty = true;
             }
 
-            const std::optional<MegaracKvmFrame> frame = take_latest_megarac_kvm_frame(*state, last_sequence);
+            const std::optional<MegaracViewFrame> frame = take_latest_megarac_view_frame(*state, last_sequence);
             if (frame) {
                 last_sequence = frame->sequence;
                 if (texture == nullptr || texture_width != frame->width || texture_height != frame->height) {
@@ -626,13 +626,13 @@ void run_kvm_view(const KvmViewOptions& options)
             const std::uint64_t ticks = SDL_GetTicks();
             if (texture == nullptr && ticks - last_status_tick > 1000) {
                 last_status_tick = ticks;
-                const MegaracKvmStatusSnapshot snapshot = megarac_kvm_status_snapshot(*state);
+                const MegaracViewStatusSnapshot snapshot = megarac_view_status_snapshot(*state);
                 SDL_SetWindowTitle(window, ("hitsc - " + snapshot.status).c_str());
             }
             SDL_Delay(16);
         }
     } catch (...) {
-        print_current_exception_with_stack(std::cerr, "kvm view ui thread");
+        print_current_exception_with_stack(std::cerr, "megarac view ui thread");
         stop_network_thread(*state, *stop_requested, network_thread, *network_done);
         if (cursor_texture != nullptr) {
             SDL_DestroyTexture(cursor_texture);

@@ -1,8 +1,8 @@
-#include "kvm_probe.hpp"
+#include "megarac_probe.hpp"
 
 #include "app_info.hpp"
 #include "http_client.hpp"
-#include "kvm_capture.hpp"
+#include "megarac_capture.hpp"
 #include "megarac_session.hpp"
 #include "text.hpp"
 #include "tls.hpp"
@@ -567,7 +567,7 @@ std::string make_capture_metadata(
 
 } // namespace
 
-void run_kvm_probe(const KvmProbeOptions& options)
+void run_megarac_probe(const MegaracProbeOptions& options)
 {
     MegaRacSession session = login_megarac(options.login);
     MegaRacLogoutGuard logout_guard(options.login);
@@ -622,9 +622,9 @@ void run_kvm_probe(const KvmProbeOptions& options)
               << " subprotocol=" << subprotocol
               << " idle-timeout=" << options.idle_timeout_seconds << "s\n";
 
-    std::unique_ptr<KvmCaptureWriter> capture;
+    std::unique_ptr<MegaracCaptureWriter> capture;
     if (!options.capture_path.empty()) {
-        capture = std::make_unique<KvmCaptureWriter>(options.capture_path);
+        capture = std::make_unique<MegaracCaptureWriter>(options.capture_path);
         capture->write_metadata(make_capture_metadata(options.login, config, subprotocol));
         std::cout << "hitsc: writing KVM capture to " << options.capture_path << '\n';
     }

@@ -272,7 +272,7 @@ std::vector<std::uint8_t> make_web_token_packet(std::string_view session)
 }
 
 std::vector<std::uint8_t> make_validate_video_session_packet(
-    const MegaracKvmConfig& config,
+    const MegaracViewConfig& config,
     std::string_view username)
 {
     std::vector<std::uint8_t> payload;

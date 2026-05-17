@@ -4,12 +4,12 @@
 
 namespace hitsc {
 
-struct KvmCaptureDecodeOptions {
+struct MegaracCaptureDecodeOptions {
     std::string input_path;
     std::string output_directory;
     int frame_limit = 20;
 };
 
-void decode_kvm_capture(const KvmCaptureDecodeOptions& options);
+void decode_megarac_capture(const MegaracCaptureDecodeOptions& options);
 
 } // namespace hitsc

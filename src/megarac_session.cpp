@@ -1,5 +1,6 @@
 #include "megarac_session.hpp"
 
+#include "bmc_session.hpp"
 #include "http_client.hpp"
 #include "text.hpp"
 #include "url.hpp"
@@ -11,6 +12,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace hitsc {
@@ -19,7 +21,7 @@ namespace json = boost::json;
 
 namespace {
 
-std::string csrf_token_from_body(const std::string& body)
+std::string csrf_token_from_body(std::string_view body)
 {
     boost::system::error_code error;
     json::value value = json::parse(body, error);
@@ -49,36 +51,23 @@ std::string csrf_token_from_body(const std::string& body)
 
 MegaRacSession login_megarac(const LoginOptions& options)
 {
-    std::string body = "username=" + form_url_encode(options.username);
-    body += "&password=" + form_url_encode(options.password);
-
-    CookieJar cookies;
-    const std::vector<Header> headers{
-        Header{http::field::origin, {}, make_origin(options.base_url)},
-        Header{http::field::referer, {}, make_origin(options.base_url) + "/"},
+    static const BmcLoginProfile profile{
+        "megarac",
+        "/api/session",
+        {
+            BmcLoginField{"username", BmcCredentialSource::Username},
+            BmcLoginField{"password", BmcCredentialSource::Password},
+        },
+        "application/x-www-form-urlencoded",
+        csrf_token_from_body,
+        "__Host-garc",
+        299,
     };
 
-    auto response = https_request(
-        options.base_url,
-        options.insecure,
-        http::verb::post,
-        "/api/session",
-        std::move(body),
-        "application/x-www-form-urlencoded",
-        &cookies,
-        headers,
-        options.verbose);
-
-    require_success_status(response, "/api/session");
-
-    const std::string decoded_body = decode_response_body(response);
+    BmcWebSession web_session = login_bmc_web_session(options, profile);
     MegaRacSession session;
-    session.cookies = std::move(cookies);
-    session.csrf_token = csrf_token_from_body(decoded_body);
-    if (!session.csrf_token.empty()) {
-        session.cookies.set("__Host-garc", session.csrf_token);
-    }
-
+    session.cookies = std::move(web_session.cookies);
+    session.csrf_token = std::move(web_session.session_token);
     return session;
 }
 

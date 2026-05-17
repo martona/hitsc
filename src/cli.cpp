@@ -1,10 +1,11 @@
 #include "cli.hpp"
 
 #include "app_info.hpp"
+#include "aten_probe.hpp"
 #include "console.hpp"
-#include "kvm_capture_decode.hpp"
-#include "kvm_probe.hpp"
-#include "kvm_view.hpp"
+#include "megarac_capture_decode.hpp"
+#include "megarac_probe.hpp"
+#include "megarac_view.hpp"
 #include "megarac_session.hpp"
 #include "options.hpp"
 #include "text.hpp"
@@ -53,14 +54,14 @@ void configure_login_subcommand(CLI::App& command, LoginOptions& options, std::s
 {
     command.add_flag("-k,--insecure", options.insecure, "Disable certificate and hostname verification.");
     command.add_flag("-v,--verbose", options.verbose, "Log HTTP request/response details to stderr.");
-    command.add_option("-u,--username", options.username, "Username for the MegaRAC /api/session login.");
-    command.add_option("-p,--password", options.password, "Password for the MegaRAC /api/session login.");
+    command.add_option("-u,--username", options.username, "Username for the BMC web login.");
+    command.add_option("-p,--password", options.password, "Password for the BMC web login.");
     command.add_option("--password-env", password_env_name, "Read the password from an environment variable.");
 }
 
-void configure_kvm_probe_subcommand(
+void configure_megarac_probe_subcommand(
     CLI::App& command,
-    KvmProbeOptions& options,
+    MegaracProbeOptions& options,
     std::string& password_env_name)
 {
     configure_login_subcommand(command, options.login, password_env_name);
@@ -81,38 +82,62 @@ int run_cli(int argc, char* argv[])
     app.set_version_flag("--version", std::string(kName) + " " + std::string(kVersion));
     app.require_subcommand(1);
 
-    LoginOptions login_options;
-    std::string login_url;
-    std::string password_env_name;
-    CLI::App* login = app.add_subcommand("login", "Log in to a MegaRAC BMC web session.");
-    configure_login_subcommand(*login, login_options, password_env_name);
-    login->add_option("url", login_url, "https://host[:port]")->required();
+    LoginOptions megarac_login_options;
+    std::string megarac_login_url;
+    std::string megarac_login_password_env_name;
+    CLI::App* megarac_login =
+        app.add_subcommand("megarac-login", "Log in to a MegaRAC BMC web session.");
+    configure_login_subcommand(*megarac_login, megarac_login_options, megarac_login_password_env_name);
+    megarac_login->add_option("url", megarac_login_url, "https://host[:port]")->required();
 
-    KvmProbeOptions kvm_probe_options;
-    std::string kvm_probe_url;
-    std::string kvm_probe_password_env_name;
-    CLI::App* kvm_probe = app.add_subcommand("kvm-probe", "Connect to MegaRAC H5Viewer /kvm and log protocol packets.");
-    configure_kvm_probe_subcommand(*kvm_probe, kvm_probe_options, kvm_probe_password_env_name);
-    kvm_probe->add_option("url", kvm_probe_url, "https://host[:port]")->required();
+    MegaracProbeOptions megarac_probe_options;
+    std::string megarac_probe_url;
+    std::string megarac_probe_password_env_name;
+    CLI::App* megarac_probe = app.add_subcommand(
+        "megarac-probe",
+        "Connect to MegaRAC H5Viewer /kvm and log protocol packets.");
+    configure_megarac_probe_subcommand(*megarac_probe, megarac_probe_options, megarac_probe_password_env_name);
+    megarac_probe->add_option("url", megarac_probe_url, "https://host[:port]")->required();
 
-    KvmViewOptions view_options;
-    std::string view_url;
-    std::string view_password_env_name;
-    CLI::App* view = app.add_subcommand("view", "Open a live SDL viewer for MegaRAC H5Viewer /kvm.");
-    configure_login_subcommand(*view, view_options.login, view_password_env_name);
-    view
-        ->add_option("--idle-timeout", view_options.idle_timeout_seconds, "Stop if no WebSocket message arrives for this many seconds; 0 disables it.")
+    MegaracViewOptions megarac_view_options;
+    std::string megarac_view_url;
+    std::string megarac_view_password_env_name;
+    CLI::App* megarac_view =
+        app.add_subcommand("megarac-view", "Open a live SDL viewer for MegaRAC H5Viewer /kvm.");
+    configure_login_subcommand(*megarac_view, megarac_view_options.login, megarac_view_password_env_name);
+    megarac_view
+        ->add_option("--idle-timeout", megarac_view_options.idle_timeout_seconds, "Stop if no WebSocket message arrives for this many seconds; 0 disables it.")
         ->check(CLI::NonNegativeNumber);
-    view->add_option("url", view_url, "https://host[:port]")->required();
+    megarac_view->add_option("url", megarac_view_url, "https://host[:port]")->required();
 
-    KvmCaptureDecodeOptions decode_options;
-    CLI::App* decode_capture =
-        app.add_subcommand("decode-capture", "Decode a hitsc KVM capture into BMP frames.");
-    decode_capture->add_option("input", decode_options.input_path, "Input .hkv capture file.")->required();
-    decode_capture->add_option("output-dir", decode_options.output_directory, "Directory for decoded BMP frames.")->required();
-    decode_capture
-        ->add_option("--frames", decode_options.frame_limit, "Stop after this many complete frames; 0 decodes all frames.")
+    MegaracCaptureDecodeOptions megarac_decode_options;
+    CLI::App* megarac_decode_capture =
+        app.add_subcommand("megarac-decode-capture", "Decode a hitsc MegaRAC KVM capture into BMP frames.");
+    megarac_decode_capture
+        ->add_option("input", megarac_decode_options.input_path, "Input .hkv capture file.")
+        ->required();
+    megarac_decode_capture
+        ->add_option("output-dir", megarac_decode_options.output_directory, "Directory for decoded BMP frames.")
+        ->required();
+    megarac_decode_capture
+        ->add_option("--frames", megarac_decode_options.frame_limit, "Stop after this many complete frames; 0 decodes all frames.")
         ->check(CLI::NonNegativeNumber);
+
+    AtenProbeOptions aten_options;
+    std::string aten_url;
+    std::string aten_password_env_name;
+    bool aten_skip_bootstrap = false;
+    CLI::App* aten_probe =
+        app.add_subcommand("aten-probe", "Log in to ATEN/Supermicro HTML5 iKVM and read the RFB WebSocket greeting.");
+    configure_login_subcommand(*aten_probe, aten_options.login, aten_password_env_name);
+    aten_probe
+        ->add_option("--idle-timeout", aten_options.idle_timeout_seconds, "Stop if no WebSocket message arrives for this many seconds.")
+        ->check(CLI::PositiveNumber);
+    aten_probe
+        ->add_option("--websocket-path", aten_options.websocket_path, "ATEN iKVM WebSocket path.")
+        ->default_str("/");
+    aten_probe->add_flag("--skip-bootstrap", aten_skip_bootstrap, "Skip the iKVM bootstrap GET before opening the WebSocket.");
+    aten_probe->add_option("url", aten_url, "https://host[:port]")->required();
 
     if (argc == 1) {
         std::cout << app.help();
@@ -125,13 +150,13 @@ int run_cli(int argc, char* argv[])
         return app.exit(error);
     }
 
-    if (*login) {
-        login_options.base_url = parse_https_url(login_url);
-        login_options.base_url.target = "/";
-        fill_default_credentials(login_options, password_env_name);
+    if (*megarac_login) {
+        megarac_login_options.base_url = parse_https_url(megarac_login_url);
+        megarac_login_options.base_url.target = "/";
+        fill_default_credentials(megarac_login_options, megarac_login_password_env_name);
 
-        MegaRacSession session = login_megarac(login_options);
-        MegaRacLogoutGuard logout_guard(login_options);
+        MegaRacSession session = login_megarac(megarac_login_options);
+        MegaRacLogoutGuard logout_guard(megarac_login_options);
         logout_guard.arm(session);
         std::cout << "hitsc: megarac login succeeded\n";
         std::cout << "hitsc: cookies stored: " << session.cookies.size() << '\n';
@@ -139,26 +164,36 @@ int run_cli(int argc, char* argv[])
         return EXIT_SUCCESS;
     }
 
-    if (*kvm_probe) {
-        kvm_probe_options.login.base_url = parse_https_url(kvm_probe_url);
-        kvm_probe_options.login.base_url.target = "/";
-        fill_default_credentials(kvm_probe_options.login, kvm_probe_password_env_name);
+    if (*megarac_probe) {
+        megarac_probe_options.login.base_url = parse_https_url(megarac_probe_url);
+        megarac_probe_options.login.base_url.target = "/";
+        fill_default_credentials(megarac_probe_options.login, megarac_probe_password_env_name);
 
-        run_kvm_probe(kvm_probe_options);
+        run_megarac_probe(megarac_probe_options);
         return EXIT_SUCCESS;
     }
 
-    if (*view) {
-        view_options.login.base_url = parse_https_url(view_url);
-        view_options.login.base_url.target = "/";
-        fill_default_credentials(view_options.login, view_password_env_name);
+    if (*megarac_view) {
+        megarac_view_options.login.base_url = parse_https_url(megarac_view_url);
+        megarac_view_options.login.base_url.target = "/";
+        fill_default_credentials(megarac_view_options.login, megarac_view_password_env_name);
 
-        run_kvm_view(view_options);
+        run_megarac_view(megarac_view_options);
         return EXIT_SUCCESS;
     }
 
-    if (*decode_capture) {
-        decode_kvm_capture(decode_options);
+    if (*megarac_decode_capture) {
+        decode_megarac_capture(megarac_decode_options);
+        return EXIT_SUCCESS;
+    }
+
+    if (*aten_probe) {
+        aten_options.login.base_url = parse_https_url(aten_url);
+        aten_options.login.base_url.target = "/";
+        aten_options.fetch_bootstrap = !aten_skip_bootstrap;
+        fill_default_credentials(aten_options.login, aten_password_env_name);
+
+        run_aten_probe(aten_options);
         return EXIT_SUCCESS;
     }
 

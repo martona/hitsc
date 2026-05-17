@@ -1,7 +1,7 @@
-#include "kvm_capture_decode.hpp"
+#include "megarac_capture_decode.hpp"
 
 #include "aspeed_decoder.hpp"
-#include "kvm_capture.hpp"
+#include "megarac_capture.hpp"
 #include "megarac_protocol.hpp"
 #include "megarac_video.hpp"
 
@@ -26,7 +26,7 @@ constexpr std::array<char, 16> kMagic = {'H', 'I', 'T', 'S', 'C', 'K', 'V', 'M',
 constexpr std::uint32_t kFormatVersion = 1;
 
 struct CaptureRecord {
-    KvmCaptureRecordType type = KvmCaptureRecordType::Note;
+    MegaracCaptureRecordType type = MegaracCaptureRecordType::Note;
     std::uint64_t timestamp_us = 0;
     std::vector<std::uint8_t> payload;
 };
@@ -88,7 +88,7 @@ std::optional<CaptureRecord> read_record(std::ifstream& input)
     }
 
     CaptureRecord record;
-    record.type = static_cast<KvmCaptureRecordType>(read_u16(input));
+    record.type = static_cast<MegaracCaptureRecordType>(read_u16(input));
     (void)read_u16(input);
     record.timestamp_us = read_u64(input);
     record.payload = read_payload(input, read_u32(input));
@@ -195,7 +195,7 @@ void validate_capture_header(std::ifstream& input)
 
 } // namespace
 
-void decode_kvm_capture(const KvmCaptureDecodeOptions& options)
+void decode_megarac_capture(const MegaracCaptureDecodeOptions& options)
 {
     if (options.input_path.empty()) {
         throw std::invalid_argument("missing capture input path");
@@ -227,7 +227,7 @@ void decode_kvm_capture(const KvmCaptureDecodeOptions& options)
     std::vector<std::uint8_t> framebuffer;
 
     while (const std::optional<CaptureRecord> record = read_record(input)) {
-        if (record->type != KvmCaptureRecordType::IncomingPacket) {
+        if (record->type != MegaracCaptureRecordType::IncomingPacket) {
             continue;
         }
 
