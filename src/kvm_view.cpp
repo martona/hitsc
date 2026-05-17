@@ -26,6 +26,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <deque>
 #include <iomanip>
 #include <iostream>
 #include <memory>
@@ -50,12 +51,14 @@ using KvmWebSocket = websocket::stream<beast::ssl_stream<beast::tcp_stream>>;
 
 namespace {
 
+constexpr std::uint16_t kCmdSendHidPacket = 1;
 constexpr std::uint16_t kCmdConnectionAllowed = 23;
 constexpr std::uint16_t kCmdVideoPackets = 25;
 constexpr std::uint16_t kCmdActiveClients = 39;
 constexpr std::uint16_t kCmdKeepAlive = 57;
 constexpr std::uint16_t kCmdValidateVideoSession = 18;
 constexpr std::uint16_t kCmdValidatedVideoSession = 19;
+constexpr std::uint16_t kCmdStopSessionImmediate = 8;
 constexpr std::uint16_t kCmdGetFullScreen = 11;
 constexpr std::uint16_t kCmdResumeRedirection = 6;
 constexpr std::uint16_t kCmdUsbMouseMode = 10;
@@ -75,6 +78,27 @@ constexpr std::size_t kClientOwnIpLength = 65;
 constexpr std::size_t kClientOwnMacLength = 49;
 constexpr std::size_t kVideoPacketSize = 373;
 constexpr std::size_t kWebTokenPayloadLength = 35;
+constexpr int kAbsoluteMouseMode = 2;
+constexpr int kRelativeMouseMode = 1;
+constexpr int kOtherMouseMode = 3;
+constexpr int kAbsoluteMouseMax = 32767;
+constexpr std::size_t kIusbHeaderSize = 32;
+constexpr std::size_t kIusbHidHeaderSize = 34;
+constexpr std::size_t kUsbMouseAbsReportSize = 6;
+constexpr std::size_t kUsbMouseRelReportSize = 4;
+constexpr std::uint8_t kIusbMajor = 1;
+constexpr std::uint8_t kIusbMinor = 0;
+constexpr std::uint8_t kIusbDeviceMouse = 49;
+constexpr std::uint8_t kIusbProtoMouseData = 32;
+constexpr std::uint8_t kIusbFromRemote = 128;
+constexpr std::uint8_t kIusbMouseDeviceNumber = 2;
+constexpr std::uint8_t kIusbMouseInterfaceNumber = 1;
+constexpr std::size_t kIusbChecksumOffset = 11;
+constexpr std::uint8_t kMouseLeftButton = 1;
+constexpr std::uint8_t kMouseRightButton = 2;
+constexpr std::uint8_t kMouseMiddleButton = 4;
+constexpr std::uint64_t kMouseMotionIntervalMilliseconds = 8;
+constexpr int kMaxSdlEventsPerFrame = 96;
 
 struct KvmConfig {
     std::string client_ip;
@@ -98,12 +122,27 @@ struct SharedFrame {
     std::vector<std::uint8_t> rgba;
 };
 
+struct RemoteMousePosition {
+    int x = 0;
+    int y = 0;
+};
+
+struct OutgoingPacket {
+    std::uint16_t type = 0;
+    std::vector<std::uint8_t> bytes;
+};
+
 struct ViewState {
-    std::mutex mutex;
+    std::mutex frame_mutex;
+    std::mutex control_mutex;
+    std::mutex outgoing_mutex;
     SharedFrame frame;
+    std::deque<OutgoingPacket> outgoing_packets;
     std::string status = "starting";
+    std::string subprotocol;
     std::shared_ptr<KvmWebSocket> websocket;
     bool has_frame = false;
+    int mouse_mode = kAbsoluteMouseMode;
 };
 
 struct ViewStatusSnapshot {
@@ -321,6 +360,11 @@ void append_le32(std::vector<std::uint8_t>& bytes, std::uint32_t value)
     bytes.push_back(static_cast<std::uint8_t>((value >> 24) & 0xff));
 }
 
+std::uint8_t to_byte(int value)
+{
+    return static_cast<std::uint8_t>(value & 0xff);
+}
+
 void append_fixed_cstring(std::vector<std::uint8_t>& bytes, std::string_view value, std::size_t fixed_size)
 {
     const std::size_t copy_size = std::min(value.size(), fixed_size);
@@ -367,6 +411,104 @@ std::vector<std::uint8_t> make_web_token_packet(std::string_view session)
     payload.reserve(kWebTokenPayloadLength);
     append_fixed_cstring(payload, session, kWebTokenPayloadLength);
     return make_payload_packet(kCmdGetWebToken, 0, payload);
+}
+
+void append_iusb_mouse_header(
+    std::vector<std::uint8_t>& payload,
+    std::size_t report_size,
+    std::uint32_t sequence)
+{
+    constexpr std::string_view signature = "IUSB    ";
+    payload.insert(payload.end(), signature.begin(), signature.end());
+    payload.push_back(kIusbMajor);
+    payload.push_back(kIusbMinor);
+    payload.push_back(static_cast<std::uint8_t>(kIusbHeaderSize));
+    payload.push_back(0);
+    append_le32(
+        payload,
+        static_cast<std::uint32_t>(kIusbHidHeaderSize - 1 + report_size - kIusbHeaderSize));
+    payload.push_back(0);
+    payload.push_back(kIusbDeviceMouse);
+    payload.push_back(kIusbProtoMouseData);
+    payload.push_back(kIusbFromRemote);
+    payload.push_back(kIusbMouseDeviceNumber);
+    payload.push_back(kIusbMouseInterfaceNumber);
+    payload.push_back(0);
+    payload.push_back(0);
+    append_le32(payload, sequence);
+    payload.push_back(0);
+    payload.push_back(0);
+    payload.push_back(0);
+    payload.push_back(0);
+}
+
+void set_iusb_checksum(std::vector<std::uint8_t>& payload)
+{
+    if (payload.size() < kIusbHeaderSize) {
+        return;
+    }
+
+    payload[kIusbChecksumOffset] = 0;
+    int sum = 0;
+    for (std::size_t index = 0; index < kIusbHeaderSize; ++index) {
+        sum = (sum + payload[index]) & 0xff;
+    }
+    payload[kIusbChecksumOffset] = to_byte(-sum);
+}
+
+std::uint16_t scale_absolute_mouse_coordinate(int value, int size)
+{
+    if (size <= 0) {
+        return 0;
+    }
+
+    const int clamped = std::clamp(value, 0, size);
+    const double scaled =
+        static_cast<double>(clamped) * static_cast<double>(kAbsoluteMouseMax) / static_cast<double>(size);
+    return static_cast<std::uint16_t>(std::clamp(
+        static_cast<int>(std::floor(scaled + 0.5)),
+        0,
+        kAbsoluteMouseMax));
+}
+
+std::vector<std::uint8_t> make_absolute_mouse_packet(
+    std::uint8_t buttons,
+    int x,
+    int y,
+    int width,
+    int height,
+    int wheel,
+    std::uint32_t sequence)
+{
+    std::vector<std::uint8_t> payload;
+    payload.reserve(kIusbHidHeaderSize - 1 + kUsbMouseAbsReportSize);
+    append_iusb_mouse_header(payload, kUsbMouseAbsReportSize, sequence);
+    payload.push_back(static_cast<std::uint8_t>(kUsbMouseAbsReportSize));
+    payload.push_back(buttons);
+    append_le16(payload, scale_absolute_mouse_coordinate(x, width));
+    append_le16(payload, scale_absolute_mouse_coordinate(y, height));
+    payload.push_back(to_byte(wheel));
+    set_iusb_checksum(payload);
+    return make_payload_packet(kCmdSendHidPacket, 0, payload);
+}
+
+std::vector<std::uint8_t> make_relative_mouse_packet(
+    std::uint8_t buttons,
+    int dx,
+    int dy,
+    int wheel,
+    std::uint32_t sequence)
+{
+    std::vector<std::uint8_t> payload;
+    payload.reserve(kIusbHidHeaderSize - 1 + kUsbMouseRelReportSize);
+    append_iusb_mouse_header(payload, kUsbMouseRelReportSize, sequence);
+    payload.push_back(static_cast<std::uint8_t>(kUsbMouseAbsReportSize));
+    payload.push_back(buttons);
+    payload.push_back(to_byte(std::clamp(dx, -127, 127)));
+    payload.push_back(to_byte(std::clamp(dy, -127, 127)));
+    payload.push_back(to_byte(wheel));
+    set_iusb_checksum(payload);
+    return make_payload_packet(kCmdSendHidPacket, 0, payload);
 }
 
 std::vector<std::uint8_t> make_validate_packet(const KvmConfig& config, std::string_view username)
@@ -511,13 +653,13 @@ std::string selected_subprotocol(const websocket::response_type& response)
 
 void set_status(ViewState& state, std::string status)
 {
-    std::lock_guard lock(state.mutex);
+    std::lock_guard lock(state.control_mutex);
     state.status = std::move(status);
 }
 
 void publish_frame(ViewState& state, int width, int height, std::vector<std::uint8_t> rgba)
 {
-    std::lock_guard lock(state.mutex);
+    std::lock_guard lock(state.frame_mutex);
     state.frame.width = width;
     state.frame.height = height;
     state.frame.rgba = std::move(rgba);
@@ -525,9 +667,99 @@ void publish_frame(ViewState& state, int width, int height, std::vector<std::uin
     state.has_frame = true;
 }
 
+void set_subprotocol(ViewState& state, std::string subprotocol)
+{
+    std::lock_guard lock(state.control_mutex);
+    state.subprotocol = std::move(subprotocol);
+}
+
+void set_mouse_mode(ViewState& state, int mouse_mode)
+{
+    std::lock_guard lock(state.control_mutex);
+    state.mouse_mode = mouse_mode;
+}
+
+int mouse_mode_snapshot(ViewState& state)
+{
+    std::lock_guard lock(state.control_mutex);
+    return state.mouse_mode;
+}
+
+void queue_outgoing_packet(
+    ViewState& state,
+    std::uint16_t type,
+    std::vector<std::uint8_t> packet,
+    bool coalesce)
+{
+    {
+        std::lock_guard lock(state.control_mutex);
+        if (state.websocket == nullptr || state.subprotocol.empty()) {
+            return;
+        }
+    }
+
+    std::lock_guard lock(state.outgoing_mutex);
+    if (coalesce) {
+        for (auto it = state.outgoing_packets.rbegin(); it != state.outgoing_packets.rend(); ++it) {
+            if (it->type == type) {
+                it->bytes = std::move(packet);
+                return;
+            }
+        }
+    }
+
+    constexpr std::size_t max_queued_packets = 128;
+    while (state.outgoing_packets.size() >= max_queued_packets) {
+        auto removable = std::find_if(
+            state.outgoing_packets.begin(),
+            state.outgoing_packets.end(),
+            [](const OutgoingPacket& outgoing) {
+                return outgoing.type == kCmdSendHidPacket;
+            });
+        if (removable == state.outgoing_packets.end()) {
+            break;
+        }
+        state.outgoing_packets.erase(removable);
+    }
+
+    state.outgoing_packets.push_back(OutgoingPacket{type, std::move(packet)});
+}
+
+std::deque<OutgoingPacket> take_outgoing_packets(ViewState& state)
+{
+    std::lock_guard lock(state.outgoing_mutex);
+    std::deque<OutgoingPacket> packets;
+    packets.swap(state.outgoing_packets);
+    return packets;
+}
+
+void drain_outgoing_packets(
+    ViewState& state,
+    KvmWebSocket& ws,
+    std::string_view subprotocol,
+    bool verbose)
+{
+    std::deque<OutgoingPacket> packets = take_outgoing_packets(state);
+    for (const OutgoingPacket& packet : packets) {
+        write_packet(ws, packet.bytes, subprotocol);
+        if (verbose && packet.type == kCmdStopSessionImmediate) {
+            std::cout << "hitsc: sent stop session packet\n";
+        }
+    }
+}
+
+void queue_stop_session(ViewState& state)
+{
+    queue_outgoing_packet(
+        state,
+        kCmdStopSessionImmediate,
+        make_simple_packet(kCmdStopSessionImmediate),
+        false);
+}
+
 std::optional<SharedFrame> take_latest_frame(ViewState& state, std::uint64_t last_sequence)
 {
-    std::lock_guard lock(state.mutex);
+    std::lock_guard lock(state.frame_mutex);
     if (!state.has_frame || state.frame.sequence == last_sequence) {
         return std::nullopt;
     }
@@ -537,13 +769,13 @@ std::optional<SharedFrame> take_latest_frame(ViewState& state, std::uint64_t las
 std::string packet_name(std::uint16_t type)
 {
     switch (type) {
-    case 1:
+    case kCmdSendHidPacket:
         return "CMD_SEND_HID_PACKET";
     case 4:
         return "CMD_PAUSE_REDIRECTION";
     case kCmdResumeRedirection:
         return "CMD_RESUME_REDIRECTION";
-    case 8:
+    case kCmdStopSessionImmediate:
         return "CMD_STOP_SESSION_IMMEDIATE";
     case kCmdUsbMouseMode:
         return "CMD_USB_MOUSE_MODE";
@@ -646,15 +878,26 @@ void log_sent_packet(std::uint16_t type, std::uint16_t status, std::size_t paylo
 
 void store_websocket(ViewState& state, std::shared_ptr<KvmWebSocket> ws)
 {
-    std::lock_guard lock(state.mutex);
-    state.websocket = std::move(ws);
+    const bool clear_queue = ws == nullptr;
+    {
+        std::lock_guard lock(state.control_mutex);
+        state.websocket = std::move(ws);
+        if (!state.websocket) {
+            state.subprotocol.clear();
+        }
+    }
+
+    if (clear_queue) {
+        std::lock_guard lock(state.outgoing_mutex);
+        state.outgoing_packets.clear();
+    }
 }
 
 void cancel_network(ViewState& state)
 {
     std::shared_ptr<KvmWebSocket> ws;
     {
-        std::lock_guard lock(state.mutex);
+        std::lock_guard lock(state.control_mutex);
         ws = state.websocket;
     }
 
@@ -664,14 +907,45 @@ void cancel_network(ViewState& state)
 
     beast::error_code error;
     beast::get_lowest_layer(*ws).socket().cancel(error);
+}
+
+void force_close_network(ViewState& state)
+{
+    std::shared_ptr<KvmWebSocket> ws;
+    {
+        std::lock_guard lock(state.control_mutex);
+        ws = state.websocket;
+        state.websocket.reset();
+        state.subprotocol.clear();
+    }
+
+    {
+        std::lock_guard lock(state.outgoing_mutex);
+        state.outgoing_packets.clear();
+    }
+
+    if (!ws) {
+        return;
+    }
+
+    beast::error_code error;
+    beast::get_lowest_layer(*ws).socket().shutdown(tcp::socket::shutdown_both, error);
     error.clear();
     beast::get_lowest_layer(*ws).socket().close(error);
 }
 
 ViewStatusSnapshot status_snapshot(ViewState& state)
 {
-    std::lock_guard lock(state.mutex);
-    return ViewStatusSnapshot{state.status, state.has_frame};
+    ViewStatusSnapshot snapshot;
+    {
+        std::lock_guard lock(state.control_mutex);
+        snapshot.status = state.status;
+    }
+    {
+        std::lock_guard lock(state.frame_mutex);
+        snapshot.has_frame = state.has_frame;
+    }
+    return snapshot;
 }
 
 int sampled_average_rgb(const std::vector<std::uint8_t>& rgba)
@@ -745,6 +1019,7 @@ void network_thread_main(const KvmViewOptions& options, ViewState& state, const 
         websocket::response_type response;
         ws->handshake(response, host, "/kvm");
         const std::string subprotocol = selected_subprotocol(response);
+        set_subprotocol(state, subprotocol);
         set_status(state, "connected");
         std::cout << "hitsc: kvm websocket connected"
                   << " subprotocol=" << subprotocol
@@ -774,6 +1049,7 @@ void network_thread_main(const KvmViewOptions& options, ViewState& state, const 
                 bytes = read_message_bytes(*ws, read_buffer, subprotocol);
             } catch (const beast::system_error& error) {
                 if (stop_requested.load()) {
+                    drain_outgoing_packets(state, *ws, subprotocol, options.login.verbose);
                     break;
                 }
                 if (error.code() == beast::error::timeout) {
@@ -807,6 +1083,11 @@ void network_thread_main(const KvmViewOptions& options, ViewState& state, const 
                     std::cout << "hitsc: sent KVM validation packet\n";
                 } else if (packet->type == kCmdKeepAlive) {
                     write_packet(*ws, make_simple_packet(kCmdKeepAlive), subprotocol);
+                } else if (packet->type == kCmdUsbMouseMode && !packet->payload.empty()) {
+                    set_mouse_mode(state, packet->payload[0]);
+                    if (options.login.verbose) {
+                        std::cout << "hitsc: mouse mode=" << static_cast<int>(packet->payload[0]) << '\n';
+                    }
                 } else if (packet->type == kCmdMediaLicenseStatus) {
                     const std::vector<std::uint8_t> display_lock =
                         make_payload_packet(kCmdDisplayLockSet, 0, std::vector<std::uint8_t>{2});
@@ -830,11 +1111,12 @@ void network_thread_main(const KvmViewOptions& options, ViewState& state, const 
                     ++video_packets_seen;
                     const std::optional<KvmVideoFrame> frame = video_assembler.ingest(packet->payload);
                     if (!frame) {
-                        if (video_packets_seen <= 20) {
+                        if (options.login.verbose && video_packets_seen <= 20) {
                             std::cout << "hitsc: video packet #" << video_packets_seen
                                       << " payload=" << packet->payload.size()
                                       << " complete=no\n";
                         }
+                        drain_outgoing_packets(state, *ws, subprotocol, options.login.verbose);
                         continue;
                     }
 
@@ -847,6 +1129,7 @@ void network_thread_main(const KvmViewOptions& options, ViewState& state, const 
                                   << '\n';
                         ++frames_received_since_report;
                         fps_reporting_started = true;
+                        drain_outgoing_packets(state, *ws, subprotocol, options.login.verbose);
                         continue;
                     }
 
@@ -860,7 +1143,7 @@ void network_thread_main(const KvmViewOptions& options, ViewState& state, const 
                         frame->advance_table_selector,
                     };
                     const int next_frame_number = frames_seen + 1;
-                    if (next_frame_number <= 20 || next_frame_number % 60 == 0) {
+                    if (options.login.verbose && (next_frame_number <= 20 || next_frame_number % 60 == 0)) {
                         std::cout << "hitsc: decoding frame #" << next_frame_number
                                   << " packets=" << packets_seen
                                   << " video-packets=" << video_packets_seen
@@ -887,7 +1170,7 @@ void network_thread_main(const KvmViewOptions& options, ViewState& state, const 
                     ++frames_processed_since_report;
 
                     ++frames_seen;
-                    if (frames_seen <= 20 || frames_seen % 60 == 0) {
+                    if (options.login.verbose && (frames_seen <= 20 || frames_seen % 60 == 0)) {
                         std::cout << "hitsc: rendered frame #" << frames_seen
                                   << " packets=" << packets_seen
                                   << " video-packets=" << video_packets_seen
@@ -910,13 +1193,14 @@ void network_thread_main(const KvmViewOptions& options, ViewState& state, const 
                     frames_processed_since_report = 0;
                     last_fps_report = now;
                 }
+
+                drain_outgoing_packets(state, *ws, subprotocol, options.login.verbose);
             }
+            drain_outgoing_packets(state, *ws, subprotocol, options.login.verbose);
         }
 
-        if (!stop_requested.load() && ws->is_open()) {
-            beast::error_code close_error;
-            ws->close(websocket::close_code::normal, close_error);
-        }
+        drain_outgoing_packets(state, *ws, subprotocol, options.login.verbose);
+        force_close_network(state);
         set_status(state, "stopped");
     } catch (const std::exception& ex) {
         set_status(state, std::string("error: ") + ex.what());
@@ -942,6 +1226,90 @@ SDL_FRect centered_target_rect(int window_width, int window_height, int frame_wi
     rect.x = std::floor((static_cast<float>(window_width) - rect.w) / 2.0f);
     rect.y = std::floor((static_cast<float>(window_height) - rect.h) / 2.0f);
     return rect;
+}
+
+SDL_FRect current_target_rect(SDL_Window* window, int frame_width, int frame_height)
+{
+    int window_width = 0;
+    int window_height = 0;
+    if (!SDL_GetWindowSizeInPixels(window, &window_width, &window_height)) {
+        SDL_GetWindowSize(window, &window_width, &window_height);
+    }
+    return centered_target_rect(window_width, window_height, frame_width, frame_height);
+}
+
+std::optional<RemoteMousePosition> remote_mouse_position(
+    float window_x,
+    float window_y,
+    const SDL_FRect& target,
+    int frame_width,
+    int frame_height)
+{
+    if (frame_width <= 0 || frame_height <= 0 || target.w <= 0.0f || target.h <= 0.0f) {
+        return std::nullopt;
+    }
+    if (window_x < target.x || window_y < target.y ||
+        window_x > target.x + target.w || window_y > target.y + target.h) {
+        return std::nullopt;
+    }
+
+    const double normalized_x =
+        (static_cast<double>(window_x) - static_cast<double>(target.x)) / static_cast<double>(target.w);
+    const double normalized_y =
+        (static_cast<double>(window_y) - static_cast<double>(target.y)) / static_cast<double>(target.h);
+    return RemoteMousePosition{
+        std::clamp(static_cast<int>(std::floor(normalized_x * frame_width + 0.5)), 0, frame_width),
+        std::clamp(static_cast<int>(std::floor(normalized_y * frame_height + 0.5)), 0, frame_height),
+    };
+}
+
+std::uint8_t button_mask_for_sdl_button(std::uint8_t button)
+{
+    switch (button) {
+    case SDL_BUTTON_LEFT:
+        return kMouseLeftButton;
+    case SDL_BUTTON_RIGHT:
+        return kMouseRightButton;
+    case SDL_BUTTON_MIDDLE:
+        return kMouseMiddleButton;
+    default:
+        return 0;
+    }
+}
+
+void send_mouse_report(
+    ViewState& state,
+    std::uint8_t buttons,
+    const RemoteMousePosition& position,
+    int frame_width,
+    int frame_height,
+    int wheel,
+    std::optional<RemoteMousePosition>& last_relative_position,
+    std::uint32_t& sequence,
+    bool verbose)
+{
+    const int mouse_mode = mouse_mode_snapshot(state);
+    std::vector<std::uint8_t> packet;
+    if (mouse_mode == kRelativeMouseMode || mouse_mode == kOtherMouseMode) {
+        const int dx = last_relative_position ? position.x - last_relative_position->x : 0;
+        const int dy = last_relative_position ? position.y - last_relative_position->y : 0;
+        packet = make_relative_mouse_packet(buttons, dx, dy, wheel, sequence++);
+    } else {
+        packet = make_absolute_mouse_packet(buttons, position.x, position.y, frame_width, frame_height, wheel, sequence++);
+    }
+
+    last_relative_position = position;
+    const bool coalesce = buttons == 0 && wheel == 0;
+    queue_outgoing_packet(state, kCmdSendHidPacket, std::move(packet), coalesce);
+    if (verbose) {
+        std::cout << "hitsc: sent mouse"
+                  << " mode=" << mouse_mode
+                  << " buttons=" << static_cast<int>(buttons)
+                  << " x=" << position.x
+                  << " y=" << position.y
+                  << " wheel=" << wheel
+                  << '\n';
+    }
 }
 
 } // namespace
@@ -982,27 +1350,124 @@ void run_kvm_view(const KvmViewOptions& options)
         int presented_frames = 0;
         int texture_width = 0;
         int texture_height = 0;
+        std::uint8_t mouse_buttons = 0;
+        std::uint32_t mouse_sequence = 0;
+        std::uint64_t last_mouse_motion_ticks = 0;
+        std::optional<RemoteMousePosition> last_relative_mouse_position;
 
         while (running) {
             SDL_Event event{};
-            while (SDL_PollEvent(&event)) {
+            std::optional<RemoteMousePosition> pending_mouse_motion;
+            std::uint64_t pending_mouse_motion_ticks = 0;
+            int events_processed = 0;
+            while (events_processed < kMaxSdlEventsPerFrame && SDL_PollEvent(&event)) {
+                ++events_processed;
                 if (event.type == SDL_EVENT_QUIT ||
                     event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED) {
                     running = false;
                 } else if (event.type == SDL_EVENT_KEY_DOWN) {
-                    std::cout << "hitsc: key down scancode=" << event.key.scancode
-                              << " key=" << event.key.key << '\n';
+                    if (options.login.verbose) {
+                        std::cout << "hitsc: key down scancode=" << event.key.scancode
+                                  << " key=" << event.key.key << '\n';
+                    }
                     if (event.key.key == SDLK_ESCAPE) {
                         running = false;
                     }
                 } else if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
                            event.type == SDL_EVENT_MOUSE_BUTTON_UP) {
-                    std::cout << "hitsc: mouse button "
-                              << (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN ? "down" : "up")
-                              << " button=" << static_cast<int>(event.button.button)
-                              << " x=" << event.button.x
-                              << " y=" << event.button.y << '\n';
+                    if (texture_width > 0 && texture_height > 0) {
+                        const std::uint8_t mask = button_mask_for_sdl_button(event.button.button);
+                        if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
+                            mouse_buttons |= mask;
+                        } else {
+                            mouse_buttons &= static_cast<std::uint8_t>(~mask);
+                        }
+                        if (mouse_buttons != 0) {
+                            SDL_CaptureMouse(true);
+                        } else {
+                            SDL_CaptureMouse(false);
+                        }
+
+                        const SDL_FRect target = current_target_rect(window, texture_width, texture_height);
+                        const std::optional<RemoteMousePosition> position = remote_mouse_position(
+                            event.button.x,
+                            event.button.y,
+                            target,
+                            texture_width,
+                            texture_height);
+                        if (position) {
+                            send_mouse_report(
+                                *state,
+                                mouse_buttons,
+                                *position,
+                                texture_width,
+                                texture_height,
+                                0,
+                                last_relative_mouse_position,
+                                mouse_sequence,
+                                options.login.verbose);
+                        }
+                    }
+                } else if (event.type == SDL_EVENT_MOUSE_MOTION) {
+                    if (texture_width > 0 && texture_height > 0) {
+                        const std::uint64_t ticks = SDL_GetTicks();
+                        if (mouse_buttons == 0 &&
+                            ticks - last_mouse_motion_ticks < kMouseMotionIntervalMilliseconds) {
+                            continue;
+                        }
+
+                        const SDL_FRect target = current_target_rect(window, texture_width, texture_height);
+                        const std::optional<RemoteMousePosition> position = remote_mouse_position(
+                            event.motion.x,
+                            event.motion.y,
+                            target,
+                            texture_width,
+                            texture_height);
+                        if (position) {
+                            pending_mouse_motion = *position;
+                            pending_mouse_motion_ticks = ticks;
+                        }
+                    }
+                } else if (event.type == SDL_EVENT_MOUSE_WHEEL) {
+                    if (texture_width > 0 && texture_height > 0) {
+                        const SDL_FRect target = current_target_rect(window, texture_width, texture_height);
+                        const std::optional<RemoteMousePosition> position = remote_mouse_position(
+                            event.wheel.mouse_x,
+                            event.wheel.mouse_y,
+                            target,
+                            texture_width,
+                            texture_height);
+                        if (position) {
+                            const int wheel = event.wheel.direction == SDL_MOUSEWHEEL_FLIPPED
+                                ? static_cast<int>(-event.wheel.y)
+                                : static_cast<int>(event.wheel.y);
+                            send_mouse_report(
+                                *state,
+                                mouse_buttons,
+                                *position,
+                                texture_width,
+                                texture_height,
+                                wheel,
+                                last_relative_mouse_position,
+                                mouse_sequence,
+                                options.login.verbose);
+                        }
+                    }
                 }
+            }
+
+            if (pending_mouse_motion) {
+                send_mouse_report(
+                    *state,
+                    mouse_buttons,
+                    *pending_mouse_motion,
+                    texture_width,
+                    texture_height,
+                    0,
+                    last_relative_mouse_position,
+                    mouse_sequence,
+                    options.login.verbose);
+                last_mouse_motion_ticks = pending_mouse_motion_ticks;
             }
 
             const std::optional<SharedFrame> frame = take_latest_frame(*state, last_sequence);
@@ -1035,7 +1500,7 @@ void run_kvm_view(const KvmViewOptions& options)
                 }
 
                 ++presented_frames;
-                if (presented_frames <= 20 || presented_frames % 60 == 0) {
+                if (options.login.verbose && (presented_frames <= 20 || presented_frames % 60 == 0)) {
                     std::cout << "hitsc: presented frame #" << presented_frames
                               << " sequence=" << frame->sequence
                               << " avg-rgb=" << sampled_average_rgb(frame->rgba)
@@ -1046,13 +1511,7 @@ void run_kvm_view(const KvmViewOptions& options)
             SDL_SetRenderDrawColor(renderer, 12, 14, 18, 255);
             SDL_RenderClear(renderer);
             if (texture != nullptr) {
-                int window_width = 0;
-                int window_height = 0;
-                if (!SDL_GetWindowSizeInPixels(window, &window_width, &window_height)) {
-                    SDL_GetWindowSize(window, &window_width, &window_height);
-                }
-                const SDL_FRect target =
-                    centered_target_rect(window_width, window_height, texture_width, texture_height);
+                const SDL_FRect target = current_target_rect(window, texture_width, texture_height);
                 SDL_RenderTexture(renderer, texture, nullptr, &target);
             }
             SDL_RenderPresent(renderer);
@@ -1067,6 +1526,7 @@ void run_kvm_view(const KvmViewOptions& options)
         }
     } catch (...) {
         stop_requested->store(true);
+        queue_stop_session(*state);
         cancel_network(*state);
         if (network_thread.joinable()) {
             network_thread.detach();
@@ -1085,6 +1545,7 @@ void run_kvm_view(const KvmViewOptions& options)
     }
 
     stop_requested->store(true);
+    queue_stop_session(*state);
     cancel_network(*state);
     if (network_thread.joinable()) {
         network_thread.detach();
