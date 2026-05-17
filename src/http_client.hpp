@@ -30,7 +30,8 @@ StringResponse https_request(
     std::string_view content_type,
     CookieJar* cookies,
     const std::vector<Header>& extra_headers = {},
-    bool verbose = false);
+    bool verbose = false,
+    int timeout_seconds = 30);
 
 std::string decode_response_body(const StringResponse& response);
 void require_success_status(const StringResponse& response, std::string_view context);

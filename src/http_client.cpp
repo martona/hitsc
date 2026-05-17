@@ -141,7 +141,8 @@ StringResponse https_request(
     std::string_view content_type,
     CookieJar* cookies,
     const std::vector<Header>& extra_headers,
-    bool verbose)
+    bool verbose,
+    int timeout_seconds)
 {
     asio::io_context io;
     ssl::context tls_context(ssl::context::tls_client);
@@ -152,7 +153,7 @@ StringResponse https_request(
     set_server_name_indication(stream, url.host);
 
     const auto endpoints = resolver.resolve(url.host, url.port);
-    beast::get_lowest_layer(stream).expires_after(std::chrono::seconds(30));
+    beast::get_lowest_layer(stream).expires_after(std::chrono::seconds(timeout_seconds));
     beast::get_lowest_layer(stream).connect(endpoints);
     stream.handshake(ssl::stream_base::client);
 

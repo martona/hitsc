@@ -568,6 +568,8 @@ std::string make_capture_metadata(
 void run_kvm_probe(const KvmProbeOptions& options)
 {
     MegaRacSession session = login_megarac(options.login);
+    MegaRacLogoutGuard logout_guard(options.login);
+    logout_guard.arm(session);
     std::cout << "hitsc: megarac login succeeded\n";
 
     KvmConfig config = fetch_kvm_config(options.login, session.cookies, session.csrf_token);

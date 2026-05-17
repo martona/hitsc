@@ -1386,6 +1386,8 @@ void network_thread_main(const KvmViewOptions& options, ViewState& state, const 
     try {
         set_status(state, "logging in");
         MegaRacSession session = login_megarac(options.login);
+        MegaRacLogoutGuard logout_guard(options.login);
+        logout_guard.arm(session);
         std::cout << "hitsc: megarac login succeeded\n";
 
         set_status(state, "fetching KVM config");

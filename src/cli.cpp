@@ -130,7 +130,9 @@ int run_cli(int argc, char* argv[])
         login_options.base_url.target = "/";
         fill_default_credentials(login_options, password_env_name);
 
-        const MegaRacSession session = login_megarac(login_options);
+        MegaRacSession session = login_megarac(login_options);
+        MegaRacLogoutGuard logout_guard(login_options);
+        logout_guard.arm(session);
         std::cout << "hitsc: megarac login succeeded\n";
         std::cout << "hitsc: cookies stored: " << session.cookies.size() << '\n';
         std::cout << "hitsc: csrf token: " << (session.csrf_token.empty() ? "not present" : "present") << '\n';

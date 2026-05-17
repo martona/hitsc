@@ -7,8 +7,10 @@
 #include <boost/beast/http.hpp>
 #include <boost/json.hpp>
 
+#include <iostream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace hitsc {
@@ -78,6 +80,66 @@ MegaRacSession login_megarac(const LoginOptions& options)
     }
 
     return session;
+}
+
+bool logout_megarac(const LoginOptions& options, CookieJar& cookies, std::string_view csrf_token)
+{
+    std::vector<Header> headers{
+        Header{http::field::origin, {}, make_origin(options.base_url)},
+        Header{http::field::referer, {}, make_origin(options.base_url) + "/"},
+    };
+    if (!csrf_token.empty()) {
+        headers.push_back(Header{http::field::unknown, "X-CSRFTOKEN", std::string(csrf_token)});
+    }
+
+    try {
+        auto response = https_request(
+            options.base_url,
+            options.insecure,
+            http::verb::delete_,
+            "/api/session",
+            {},
+            {},
+            &cookies,
+            headers,
+            options.verbose,
+            5);
+
+        if (response.result_int() >= 200 && response.result_int() < 300) {
+            std::cout << "hitsc: megarac logout succeeded\n";
+            return true;
+        }
+
+        std::cerr << "hitsc: megarac logout warning: HTTP "
+                  << response.result_int() << ": "
+                  << body_snippet(decode_response_body(response)) << '\n';
+    } catch (const std::exception& ex) {
+        std::cerr << "hitsc: megarac logout warning: " << ex.what() << '\n';
+    }
+
+    return false;
+}
+
+MegaRacLogoutGuard::MegaRacLogoutGuard(const LoginOptions& options)
+    : options_(options)
+{
+}
+
+MegaRacLogoutGuard::~MegaRacLogoutGuard()
+{
+    if (active_ && session_ != nullptr) {
+        logout_megarac(options_, session_->cookies, session_->csrf_token);
+    }
+}
+
+void MegaRacLogoutGuard::arm(MegaRacSession& session)
+{
+    session_ = &session;
+}
+
+void MegaRacLogoutGuard::dismiss()
+{
+    active_ = false;
 }
 
 } // namespace hitsc
