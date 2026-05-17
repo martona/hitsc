@@ -4,6 +4,7 @@
 #include "console.hpp"
 #include "kvm_capture_decode.hpp"
 #include "kvm_probe.hpp"
+#include "kvm_view.hpp"
 #include "megarac_session.hpp"
 #include "options.hpp"
 #include "text.hpp"
@@ -94,6 +95,16 @@ int run_cli(int argc, char* argv[])
     configure_kvm_probe_subcommand(*kvm_probe, kvm_probe_options, kvm_probe_password_env_name);
     kvm_probe->add_option("url", kvm_probe_url, "https://host[:port]")->required();
 
+    KvmViewOptions view_options;
+    std::string view_url;
+    std::string view_password_env_name;
+    CLI::App* view = app.add_subcommand("view", "Open a live SDL viewer for MegaRAC H5Viewer /kvm.");
+    configure_login_subcommand(*view, view_options.login, view_password_env_name);
+    view
+        ->add_option("--idle-timeout", view_options.idle_timeout_seconds, "Stop if no WebSocket message arrives for this many seconds.")
+        ->check(CLI::PositiveNumber);
+    view->add_option("url", view_url, "https://host[:port]")->required();
+
     KvmCaptureDecodeOptions decode_options;
     CLI::App* decode_capture =
         app.add_subcommand("decode-capture", "Decode a hitsc KVM capture into BMP frames.");
@@ -132,6 +143,15 @@ int run_cli(int argc, char* argv[])
         fill_default_credentials(kvm_probe_options.login, kvm_probe_password_env_name);
 
         run_kvm_probe(kvm_probe_options);
+        return EXIT_SUCCESS;
+    }
+
+    if (*view) {
+        view_options.login.base_url = parse_https_url(view_url);
+        view_options.login.base_url.target = "/";
+        fill_default_credentials(view_options.login, view_password_env_name);
+
+        run_kvm_view(view_options);
         return EXIT_SUCCESS;
     }
 

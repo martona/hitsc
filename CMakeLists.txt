@@ -10,6 +10,7 @@ project(
 find_package(Boost REQUIRED CONFIG COMPONENTS json system)
 find_package(CLI11 CONFIG REQUIRED)
 find_package(OpenSSL REQUIRED)
+find_package(SDL3 CONFIG REQUIRED)
 find_package(ZLIB REQUIRED)
 
 add_library(
@@ -41,6 +42,8 @@ add_executable(
   src/kvm_capture.cpp
   src/kvm_capture_decode.cpp
   src/kvm_probe.cpp
+  src/kvm_video.cpp
+  src/kvm_view.cpp
   src/main.cpp
   src/megarac_session.cpp
   src/text.cpp
@@ -57,6 +60,7 @@ target_compile_definitions(
     BOOST_ASIO_NO_DEPRECATED
     BOOST_BEAST_USE_STD_STRING_VIEW
     NOMINMAX
+    SDL_MAIN_HANDLED
     WIN32_LEAN_AND_MEAN
     _CRT_SECURE_NO_WARNINGS
     _WIN32_WINNT=0x0A00
@@ -86,5 +90,6 @@ target_link_libraries(
     CLI11::CLI11
     OpenSSL::SSL
     OpenSSL::Crypto
+    SDL3::SDL3
     ZLIB::ZLIB
 )

@@ -969,8 +969,14 @@ static void UpdateXY(int *mbx, int *mby)
 static void DecodeBuffer(int len, BYTE *out_buf)
 {
     int mbx = 0, mby = 0;
+    int iterations = 0;
+    int max_iterations = mbwidth * mbheight * 8 + 1024;
 
     do {
+        if (++iterations > max_iterations) {
+            return;
+        }
+
         switch (((cur_data >> 28) & (long)BLOCK_HEADER_MASK)) {
         case JPEG_NO_SKIP_CODE:
             //pr_dbg("(%d, %d): No_skip\n", mbx, mby);
@@ -1001,6 +1007,10 @@ static void DecodeBuffer(int len, BYTE *out_buf)
 
             SkipBits(BLOCK_AST2100_SKIP_LENGTH);
             DecompressPASS2(mbx, mby, out_buf, 2);
+            MoveBlockIndex(&mbx, &mby);
+            break;
+        default:
+            SkipBits(3);
             MoveBlockIndex(&mbx, &mby);
             break;
         }

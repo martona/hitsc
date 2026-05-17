@@ -2,6 +2,7 @@
 
 #include "aspeed_decoder.hpp"
 #include "kvm_capture.hpp"
+#include "kvm_video.hpp"
 
 #include <algorithm>
 #include <array>
@@ -34,18 +35,6 @@ struct KvmPacket {
     std::uint16_t type = 0;
     std::uint16_t status = 0;
     std::vector<std::uint8_t> payload;
-};
-
-struct VideoFrame {
-    int width = 0;
-    int height = 0;
-    std::uint8_t compression_mode = 0;
-    std::uint8_t jpeg_table_selector = 0;
-    std::uint8_t advance_table_selector = 0;
-    std::uint8_t rc4_enable = 0;
-    std::uint8_t mode420 = 0;
-    std::uint32_t compressed_size = 0;
-    std::vector<std::uint8_t> compressed;
 };
 
 std::uint16_t read_le16(const std::vector<std::uint8_t>& bytes, std::size_t offset)
@@ -232,89 +221,6 @@ void write_bmp(
     }
 }
 
-std::uint8_t first_block_header(const std::vector<std::uint8_t>& compressed)
-{
-    if (compressed.size() < 4) {
-        return 0xff;
-    }
-    const std::uint32_t word = static_cast<std::uint32_t>(compressed[0])
-        | (static_cast<std::uint32_t>(compressed[1]) << 8)
-        | (static_cast<std::uint32_t>(compressed[2]) << 16)
-        | (static_cast<std::uint32_t>(compressed[3]) << 24);
-    return static_cast<std::uint8_t>((word >> 28) & 0x0f);
-}
-
-bool is_supported_first_block(std::uint8_t header)
-{
-    switch (header) {
-    case 0x00:
-    case 0x02:
-    case 0x04:
-    case 0x08:
-    case 0x09:
-    case 0x0a:
-    case 0x0c:
-        return true;
-    default:
-        return false;
-    }
-}
-
-class VideoAssembler {
-public:
-    std::optional<VideoFrame> ingest(const std::vector<std::uint8_t>& payload)
-    {
-        if (payload.size() < 2) {
-            throw std::runtime_error("video packet is too short");
-        }
-
-        if (expecting_new_frame_) {
-            if (payload.size() < 88) {
-                throw std::runtime_error("initial video packet is too short");
-            }
-
-            const std::size_t header_base = 2;
-            current_ = VideoFrame{};
-            current_.width = read_le16(payload, header_base + 13);
-            current_.height = read_le16(payload, header_base + 15);
-            current_.compression_mode = payload[header_base + 42];
-            current_.jpeg_table_selector = payload[header_base + 44];
-            current_.advance_table_selector = payload[header_base + 47];
-            current_.rc4_enable = payload[header_base + 53];
-            current_.mode420 = payload[header_base + 55];
-            current_.compressed_size = read_le32(payload, header_base + 69);
-            current_.compressed.reserve(current_.compressed_size);
-            append_fragment(payload, 88);
-        } else {
-            append_fragment(payload, 2);
-        }
-
-        if (current_.compressed.size() > current_.compressed_size) {
-            throw std::runtime_error("assembled video frame exceeded declared compressed size");
-        }
-
-        if (current_.compressed.size() == current_.compressed_size) {
-            expecting_new_frame_ = true;
-            return current_;
-        }
-
-        expecting_new_frame_ = false;
-        return std::nullopt;
-    }
-
-private:
-    void append_fragment(const std::vector<std::uint8_t>& payload, std::size_t offset)
-    {
-        if (offset > payload.size()) {
-            throw std::runtime_error("invalid video fragment offset");
-        }
-        current_.compressed.insert(current_.compressed.end(), payload.begin() + static_cast<std::ptrdiff_t>(offset), payload.end());
-    }
-
-    bool expecting_new_frame_ = true;
-    VideoFrame current_;
-};
-
 void validate_capture_header(std::ifstream& input)
 {
     std::array<char, 16> magic{};
@@ -353,7 +259,7 @@ void decode_kvm_capture(const KvmCaptureDecodeOptions& options)
     std::filesystem::create_directories(output_directory);
 
     AspeedDecoder decoder;
-    VideoAssembler assembler;
+    KvmVideoAssembler assembler;
     int video_packet_count = 0;
     int frame_count = 0;
     int decoded_frame_count = 0;
@@ -373,14 +279,14 @@ void decode_kvm_capture(const KvmCaptureDecodeOptions& options)
         }
 
         ++video_packet_count;
-        const std::optional<VideoFrame> frame = assembler.ingest(packet.payload);
+        const std::optional<KvmVideoFrame> frame = assembler.ingest(packet.payload);
         if (!frame) {
             continue;
         }
 
         ++frame_count;
-        const std::uint8_t block_header = first_block_header(frame->compressed);
-        if (frame->rc4_enable != 0 || !is_supported_first_block(block_header)) {
+        const std::uint8_t block_header = kvm_video_first_block_header(frame->compressed);
+        if (frame->rc4_enable != 0 || !kvm_video_is_supported_first_block(block_header)) {
             ++skipped_frame_count;
             std::cerr << "hitsc: skipped frame #" << frame_count
                       << " " << frame->width << "x" << frame->height
