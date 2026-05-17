@@ -25,6 +25,7 @@ struct BmcLoginField {
     BmcCredentialSource source = BmcCredentialSource::Literal;
     std::string literal;
     BmcCredentialTransform transform = BmcCredentialTransform::None;
+    bool encode_name = true;
 };
 
 using BmcSessionTokenParser = std::string (*)(std::string_view body);

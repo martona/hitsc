@@ -54,7 +54,7 @@ static BYTE block_buf[768]; // temporary yuv buffer for each block
 static struct YUV* yuv_buf;    // yuv buffer of whole frame For Pass2
 
 // compression parameters
-static unsigned char selector, advance_selector;
+static unsigned char selector, chroma_selector, advance_selector, advance_chroma_selector;
 static unsigned char mode420;
 
 static int SCALEFACTOR = 16, SCALEFACTORUV = 16;
@@ -261,7 +261,7 @@ static void load_quant_tableCb(long* quant_table)
     // Load quantization coefficients from JPG file, scale them for DCT and reorder
     // from zig-zag order
     if (Mapping == 1) {
-        switch (selector) {
+        switch (chroma_selector) {
         case 0:
             std_chrominance_qt = Tbl_000Y;
             break;
@@ -300,7 +300,7 @@ static void load_quant_tableCb(long* quant_table)
             break;
         }
     } else {
-        switch (selector) {
+        switch (chroma_selector) {
         case 0:
             std_chrominance_qt = Tbl_000UV;
             break;
@@ -417,7 +417,7 @@ static void load_advance_quant_tableCb(long* quant_table)
     // Load quantization coefficients from JPG file, scale them for DCT and reorder
     // from zig-zag order
     if (Mapping == 1) {
-        switch (advance_selector) {
+        switch (advance_chroma_selector) {
         case 0:
             std_chrominance_qt = Tbl_000Y;
             break;
@@ -456,7 +456,7 @@ static void load_advance_quant_tableCb(long* quant_table)
             break;
         }
     } else {
-        switch (advance_selector) {
+        switch (advance_chroma_selector) {
         case 0:
             std_chrominance_qt = Tbl_000UV;
             break;
@@ -1025,16 +1025,20 @@ void init(void)
 }
 
 EMSCRIPTEN_KEEPALIVE
-void decode(unsigned long* _in_buf, int _len, unsigned char* _out_buf, int _width, int _height,
-    unsigned _mode420, unsigned _sel, unsigned _adv_sel)
+void decode_ext(unsigned long* _in_buf, int _len, unsigned char* _out_buf, int _width, int _height,
+    unsigned _mode420, unsigned _sel, unsigned _chroma_sel, unsigned _adv_sel, unsigned _adv_chroma_sel)
 {
     pr_dbg("len(%d) 420(%d) width(%d) height(%d)\n", _len, _mode420, _width, _height);
 
-    if (first_frame == 1 || _sel != selector || _adv_sel != advance_selector) {
-        pr_dbg("init table for sel(%d) adv_sel(%d)\n", selector, advance_selector);
+    if (first_frame == 1 || _sel != selector || _chroma_sel != chroma_selector ||
+        _adv_sel != advance_selector || _adv_chroma_sel != advance_chroma_selector) {
+        pr_dbg("init table for sel(%d/%d) adv_sel(%d/%d)\n",
+            selector, chroma_selector, advance_selector, advance_chroma_selector);
 
         selector = _sel;
+        chroma_selector = _chroma_sel;
         advance_selector = _adv_sel;
+        advance_chroma_selector = _adv_chroma_sel;
 
         load_quant_table(QT[0]);
         load_quant_tableCb(QT[1]);
@@ -1063,4 +1067,11 @@ void decode(unsigned long* _in_buf, int _len, unsigned char* _out_buf, int _widt
     newbits = 32;
     DCY = DCCb = DCCr = 0;
     DecodeBuffer(_len, _out_buf);
+}
+
+EMSCRIPTEN_KEEPALIVE
+void decode(unsigned long* _in_buf, int _len, unsigned char* _out_buf, int _width, int _height,
+    unsigned _mode420, unsigned _sel, unsigned _adv_sel)
+{
+    decode_ext(_in_buf, _len, _out_buf, _width, _height, _mode420, _sel, _sel, _adv_sel, _adv_sel);
 }

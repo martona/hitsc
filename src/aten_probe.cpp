@@ -101,6 +101,8 @@ void print_hex_preview(const std::vector<std::uint8_t>& bytes)
 void run_aten_probe(const AtenProbeOptions& options)
 {
     AtenSession session = login_aten(options.login);
+    AtenLogoutGuard logout_guard(options.login);
+    logout_guard.arm(session);
     std::cout << "hitsc: aten login succeeded\n";
     std::cout << "hitsc: cookies stored: " << session.cookies.size() << '\n';
 

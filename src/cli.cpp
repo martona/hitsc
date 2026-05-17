@@ -2,6 +2,7 @@
 
 #include "app_info.hpp"
 #include "aten_probe.hpp"
+#include "aten_view.hpp"
 #include "console.hpp"
 #include "megarac_capture_decode.hpp"
 #include "megarac_probe.hpp"
@@ -139,6 +140,28 @@ int run_cli(int argc, char* argv[])
     aten_probe->add_flag("--skip-bootstrap", aten_skip_bootstrap, "Skip the iKVM bootstrap GET before opening the WebSocket.");
     aten_probe->add_option("url", aten_url, "https://host[:port]")->required();
 
+    AtenViewOptions aten_view_options;
+    std::string aten_view_url;
+    std::string aten_view_password_env_name;
+    bool aten_view_skip_bootstrap = false;
+    bool aten_view_exclusive = false;
+    CLI::App* aten_view = app.add_subcommand(
+        "aten-view",
+        "Open an ATEN/Supermicro RFB-over-WebSocket KVM window.");
+    configure_login_subcommand(*aten_view, aten_view_options.login, aten_view_password_env_name);
+    aten_view
+        ->add_option("--idle-timeout", aten_view_options.idle_timeout_seconds, "Stop if no WebSocket message arrives for this many seconds.")
+        ->check(CLI::PositiveNumber);
+    aten_view
+        ->add_option("--websocket-path", aten_view_options.websocket_path, "ATEN iKVM WebSocket path.")
+        ->default_str("/");
+    aten_view
+        ->add_option("--updates", aten_view_options.framebuffer_update_limit, "Stop after this many framebuffer updates; 0 keeps reading.")
+        ->check(CLI::NonNegativeNumber);
+    aten_view->add_flag("--exclusive", aten_view_exclusive, "Request an exclusive RFB session.");
+    aten_view->add_flag("--skip-bootstrap", aten_view_skip_bootstrap, "Skip the iKVM bootstrap GET before opening the WebSocket.");
+    aten_view->add_option("url", aten_view_url, "https://host[:port]")->required();
+
     if (argc == 1) {
         std::cout << app.help();
         return EXIT_SUCCESS;
@@ -194,6 +217,17 @@ int run_cli(int argc, char* argv[])
         fill_default_credentials(aten_options.login, aten_password_env_name);
 
         run_aten_probe(aten_options);
+        return EXIT_SUCCESS;
+    }
+
+    if (*aten_view) {
+        aten_view_options.login.base_url = parse_https_url(aten_view_url);
+        aten_view_options.login.base_url.target = "/";
+        aten_view_options.fetch_bootstrap = !aten_view_skip_bootstrap;
+        aten_view_options.shared = !aten_view_exclusive;
+        fill_default_credentials(aten_view_options.login, aten_view_password_env_name);
+
+        run_aten_view(aten_view_options);
         return EXIT_SUCCESS;
     }
 

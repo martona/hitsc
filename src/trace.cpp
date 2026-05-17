@@ -36,6 +36,7 @@ bool is_sensitive_name(std::string_view name)
         "csrf",
         "password",
         "passwd",
+        "pwd",
         "qsession",
         "session",
         "token",

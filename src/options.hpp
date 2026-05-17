@@ -33,4 +33,13 @@ struct AtenProbeOptions {
     int idle_timeout_seconds = 10;
 };
 
+struct AtenViewOptions {
+    LoginOptions login;
+    bool fetch_bootstrap = true;
+    std::string websocket_path = "/";
+    int idle_timeout_seconds = 10;
+    int framebuffer_update_limit = 0;
+    bool shared = true;
+};
+
 } // namespace hitsc

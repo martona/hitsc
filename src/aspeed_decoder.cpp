@@ -15,6 +15,17 @@ void decode(
     unsigned mode420,
     unsigned selector,
     unsigned advance_selector);
+void decode_ext(
+    unsigned long* input,
+    int length,
+    unsigned char* output,
+    int width,
+    int height,
+    unsigned mode420,
+    unsigned selector,
+    unsigned chroma_selector,
+    unsigned advance_selector,
+    unsigned advance_chroma_selector);
 }
 
 namespace hitsc {
@@ -67,7 +78,13 @@ std::vector<std::uint8_t> AspeedDecoder::decode_rgba(
         output = *previous_rgba;
     }
 
-    decode(
+    const unsigned chroma_selector =
+        options.use_separate_chroma_selectors ? options.chroma_table_selector : options.jpeg_table_selector;
+    const unsigned advance_chroma_selector = options.use_separate_chroma_selectors
+        ? options.advance_chroma_table_selector
+        : options.advance_table_selector;
+
+    decode_ext(
         input_words.data(),
         static_cast<int>(compressed.size()),
         output.data(),
@@ -75,7 +92,9 @@ std::vector<std::uint8_t> AspeedDecoder::decode_rgba(
         options.height,
         options.mode420,
         options.jpeg_table_selector,
-        options.advance_table_selector);
+        chroma_selector,
+        options.advance_table_selector,
+        advance_chroma_selector);
 
     return output;
 }

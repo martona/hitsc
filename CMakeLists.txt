@@ -36,6 +36,7 @@ add_executable(
   hitsc
   src/aten_probe.cpp
   src/aten_session.cpp
+  src/aten_view.cpp
   src/aspeed_decoder.cpp
   src/bmc_session.cpp
   src/cli.cpp

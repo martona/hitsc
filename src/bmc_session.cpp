@@ -79,7 +79,7 @@ std::string build_form_body(const LoginOptions& options, const BmcLoginProfile& 
 
         std::string value = field_source_value(options, field);
         value = transform_value(std::move(value), field.transform);
-        body += form_url_encode(field.name);
+        body += field.encode_name ? form_url_encode(field.name) : field.name;
         body += '=';
         body += form_url_encode(value);
     }
