@@ -26,6 +26,7 @@
 #include <boost/version.hpp>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -80,6 +81,9 @@ constexpr std::uint16_t kCmdDisplayControlStatus = 52;
 constexpr std::uint16_t kCmdMediaLicenseStatus = 53;
 constexpr std::uint16_t kCmdMediaFreeInstanceStatus = 56;
 constexpr std::uint16_t kCmdFpsDiff = 60;
+constexpr std::uint16_t kIvtpHwCursor = 4098;
+constexpr std::uint16_t kIvtpGetVideoEngineConfigs = 4099;
+constexpr std::uint16_t kIvtpSetVideoEngineConfigs = 4100;
 
 constexpr std::size_t kSsiHashSize = 129;
 constexpr std::size_t kClientUsernameLength = 129;
@@ -96,16 +100,36 @@ constexpr std::uint16_t kKvmPrivReqMaster = 1;
 constexpr std::uint16_t kKvmReqAllowed = 0;
 constexpr std::size_t kIusbHeaderSize = 32;
 constexpr std::size_t kIusbHidHeaderSize = 34;
+constexpr std::size_t kHardwareCursorHeaderSize = 13;
+constexpr std::size_t kHardwareCursorPatternSize = 64;
+constexpr std::size_t kHardwareCursorPatternPixels =
+    kHardwareCursorPatternSize * kHardwareCursorPatternSize;
+constexpr int kHardwareCursorFallbackWidth = 15;
+constexpr int kHardwareCursorFallbackHeight = 15;
+constexpr std::size_t kUsbKeyboardReportSize = 8;
+constexpr std::size_t kUsbKeyboardKeySlots = 6;
 constexpr std::size_t kUsbMouseAbsReportSize = 6;
 constexpr std::size_t kUsbMouseRelReportSize = 4;
 constexpr std::uint8_t kIusbMajor = 1;
 constexpr std::uint8_t kIusbMinor = 0;
+constexpr std::uint8_t kIusbDeviceKeyboard = 48;
 constexpr std::uint8_t kIusbDeviceMouse = 49;
+constexpr std::uint8_t kIusbProtoKeyboardData = 16;
 constexpr std::uint8_t kIusbProtoMouseData = 32;
 constexpr std::uint8_t kIusbFromRemote = 128;
+constexpr std::uint8_t kIusbKeyboardDeviceNumber = 2;
+constexpr std::uint8_t kIusbKeyboardInterfaceNumber = 0;
 constexpr std::uint8_t kIusbMouseDeviceNumber = 2;
 constexpr std::uint8_t kIusbMouseInterfaceNumber = 1;
 constexpr std::size_t kIusbChecksumOffset = 11;
+constexpr std::uint8_t kKeyboardLeftCtrl = 0x01;
+constexpr std::uint8_t kKeyboardLeftShift = 0x02;
+constexpr std::uint8_t kKeyboardLeftAlt = 0x04;
+constexpr std::uint8_t kKeyboardLeftGui = 0x08;
+constexpr std::uint8_t kKeyboardRightCtrl = 0x10;
+constexpr std::uint8_t kKeyboardRightShift = 0x20;
+constexpr std::uint8_t kKeyboardRightAlt = 0x40;
+constexpr std::uint8_t kKeyboardRightGui = 0x80;
 constexpr std::uint8_t kMouseLeftButton = 1;
 constexpr std::uint8_t kMouseRightButton = 2;
 constexpr std::uint8_t kMouseMiddleButton = 4;
@@ -138,10 +162,34 @@ struct SharedFrame {
     std::vector<std::uint8_t> rgba;
 };
 
+struct SharedCursor {
+    bool visible = false;
+    bool has_pattern = false;
+    bool pattern_from_packet = false;
+    int type = 0;
+    std::uint32_t checksum = 0;
+    int x = 0;
+    int y = 0;
+    int x_offset = 0;
+    int y_offset = 0;
+    int width = 0;
+    int height = 0;
+    std::uint64_t sequence = 0;
+    std::vector<std::uint16_t> pattern;
+};
+
+struct CursorImage {
+    int width = 0;
+    int height = 0;
+    std::vector<std::uint8_t> rgba;
+};
+
 struct RemoteMousePosition {
     int x = 0;
     int y = 0;
 };
+
+using KeyboardKeySlots = std::array<std::uint8_t, kUsbKeyboardKeySlots>;
 
 struct OutgoingPacket {
     std::uint16_t type = 0;
@@ -151,14 +199,17 @@ struct OutgoingPacket {
 
 struct ViewState {
     std::mutex frame_mutex;
+    std::mutex cursor_mutex;
     std::mutex control_mutex;
     SharedFrame frame;
+    SharedCursor cursor;
     std::string status = "starting";
     std::string subprotocol;
     std::function<void(std::uint16_t, std::vector<std::uint8_t>, bool)> send_packet;
     std::function<void()> stop_network;
     std::weak_ptr<KvmWebSocket> websocket;
     bool has_frame = false;
+    bool has_cursor = false;
     int mouse_mode = kAbsoluteMouseMode;
 };
 
@@ -385,6 +436,20 @@ std::uint8_t to_byte(int value)
     return static_cast<std::uint8_t>(value & 0xff);
 }
 
+std::uint16_t load_le16(const std::vector<std::uint8_t>& bytes, std::size_t offset)
+{
+    return static_cast<std::uint16_t>(bytes[offset]) |
+           static_cast<std::uint16_t>(bytes[offset + 1] << 8);
+}
+
+std::uint32_t load_le32(const std::vector<std::uint8_t>& bytes, std::size_t offset)
+{
+    return static_cast<std::uint32_t>(bytes[offset]) |
+           (static_cast<std::uint32_t>(bytes[offset + 1]) << 8) |
+           (static_cast<std::uint32_t>(bytes[offset + 2]) << 16) |
+           (static_cast<std::uint32_t>(bytes[offset + 3]) << 24);
+}
+
 void append_fixed_cstring(std::vector<std::uint8_t>& bytes, std::string_view value, std::size_t fixed_size)
 {
     const std::size_t copy_size = std::min(value.size(), fixed_size);
@@ -433,10 +498,14 @@ std::vector<std::uint8_t> make_web_token_packet(std::string_view session)
     return make_payload_packet(kCmdGetWebToken, 0, payload);
 }
 
-void append_iusb_mouse_header(
+void append_iusb_hid_header(
     std::vector<std::uint8_t>& payload,
     std::size_t report_size,
-    std::uint32_t sequence)
+    std::uint32_t sequence,
+    std::uint8_t device,
+    std::uint8_t protocol,
+    std::uint8_t device_number,
+    std::uint8_t interface_number)
 {
     constexpr std::string_view signature = "IUSB    ";
     payload.insert(payload.end(), signature.begin(), signature.end());
@@ -448,11 +517,11 @@ void append_iusb_mouse_header(
         payload,
         static_cast<std::uint32_t>(kIusbHidHeaderSize - 1 + report_size - kIusbHeaderSize));
     payload.push_back(0);
-    payload.push_back(kIusbDeviceMouse);
-    payload.push_back(kIusbProtoMouseData);
+    payload.push_back(device);
+    payload.push_back(protocol);
     payload.push_back(kIusbFromRemote);
-    payload.push_back(kIusbMouseDeviceNumber);
-    payload.push_back(kIusbMouseInterfaceNumber);
+    payload.push_back(device_number);
+    payload.push_back(interface_number);
     payload.push_back(0);
     payload.push_back(0);
     append_le32(payload, sequence);
@@ -460,6 +529,21 @@ void append_iusb_mouse_header(
     payload.push_back(0);
     payload.push_back(0);
     payload.push_back(0);
+}
+
+void append_iusb_mouse_header(
+    std::vector<std::uint8_t>& payload,
+    std::size_t report_size,
+    std::uint32_t sequence)
+{
+    append_iusb_hid_header(
+        payload,
+        report_size,
+        sequence,
+        kIusbDeviceMouse,
+        kIusbProtoMouseData,
+        kIusbMouseDeviceNumber,
+        kIusbMouseInterfaceNumber);
 }
 
 void set_iusb_checksum(std::vector<std::uint8_t>& payload)
@@ -527,6 +611,29 @@ std::vector<std::uint8_t> make_relative_mouse_packet(
     payload.push_back(to_byte(std::clamp(dx, -127, 127)));
     payload.push_back(to_byte(std::clamp(dy, -127, 127)));
     payload.push_back(to_byte(wheel));
+    set_iusb_checksum(payload);
+    return make_payload_packet(kCmdSendHidPacket, 0, payload);
+}
+
+std::vector<std::uint8_t> make_keyboard_packet(
+    std::uint8_t modifiers,
+    const KeyboardKeySlots& keys,
+    std::uint32_t sequence)
+{
+    std::vector<std::uint8_t> payload;
+    payload.reserve(kIusbHidHeaderSize - 1 + kUsbKeyboardReportSize);
+    append_iusb_hid_header(
+        payload,
+        kUsbKeyboardReportSize,
+        sequence,
+        kIusbDeviceKeyboard,
+        kIusbProtoKeyboardData,
+        kIusbKeyboardDeviceNumber,
+        kIusbKeyboardInterfaceNumber);
+    payload.push_back(static_cast<std::uint8_t>(kUsbKeyboardReportSize));
+    payload.push_back(modifiers);
+    payload.push_back(0);
+    payload.insert(payload.end(), keys.begin(), keys.end());
     set_iusb_checksum(payload);
     return make_payload_packet(kCmdSendHidPacket, 0, payload);
 }
@@ -670,6 +777,14 @@ void publish_frame(ViewState& state, int width, int height, std::vector<std::uin
     state.has_frame = true;
 }
 
+void publish_cursor(ViewState& state, SharedCursor cursor)
+{
+    std::lock_guard lock(state.cursor_mutex);
+    cursor.sequence = state.cursor.sequence + 1;
+    state.cursor = std::move(cursor);
+    state.has_cursor = true;
+}
+
 void set_subprotocol(ViewState& state, std::string subprotocol)
 {
     std::lock_guard lock(state.control_mutex);
@@ -714,6 +829,15 @@ std::optional<SharedFrame> take_latest_frame(ViewState& state, std::uint64_t las
         return std::nullopt;
     }
     return state.frame;
+}
+
+std::optional<SharedCursor> take_latest_cursor(ViewState& state, std::uint64_t last_sequence)
+{
+    std::lock_guard lock(state.cursor_mutex);
+    if (!state.has_cursor || state.cursor.sequence == last_sequence) {
+        return std::nullopt;
+    }
+    return state.cursor;
 }
 
 std::string packet_name(std::uint16_t type)
@@ -779,11 +903,11 @@ std::string packet_name(std::uint16_t type)
         return "CMD_FPS_DIFF";
     case 61:
         return "CMD_KBD_QUEUE_STATUS";
-    case 4098:
+    case kIvtpHwCursor:
         return "IVTP_HW_CURSOR";
-    case 4099:
+    case kIvtpGetVideoEngineConfigs:
         return "IVTP_GET_VIDEO_ENGINE_CONFIGS";
-    case 4100:
+    case kIvtpSetVideoEngineConfigs:
         return "IVTP_SET_VIDEO_ENGINE_CONFIGS";
     default:
         return "UNKNOWN";
@@ -998,6 +1122,187 @@ std::string validation_response_name(std::uint8_t response)
     }
 }
 
+std::vector<std::uint16_t> parse_hardware_cursor_pattern(const std::vector<std::uint8_t>& payload)
+{
+    std::vector<std::uint16_t> pattern(kHardwareCursorPatternPixels, 0);
+    const std::size_t available_words = (payload.size() - kHardwareCursorHeaderSize) / 2;
+    const std::size_t words = std::min(available_words, kHardwareCursorPatternPixels);
+    for (std::size_t index = 0; index < words; ++index) {
+        pattern[index] = load_le16(payload, kHardwareCursorHeaderSize + index * 2);
+    }
+    return pattern;
+}
+
+std::optional<SharedCursor> parse_hardware_cursor_packet(
+    const std::vector<std::uint8_t>& payload,
+    const std::vector<std::uint16_t>& cached_pattern,
+    int source_width,
+    int source_height)
+{
+    if (payload.size() < kHardwareCursorHeaderSize) {
+        return std::nullopt;
+    }
+
+    if (source_width <= 0) {
+        source_width = kInitialFramebufferWidth;
+    }
+    if (source_height <= 0) {
+        source_height = kInitialFramebufferHeight;
+    }
+
+    SharedCursor cursor;
+    cursor.type = payload[0];
+    cursor.checksum = load_le32(payload, 1);
+    cursor.x = load_le16(payload, 5);
+    cursor.y = load_le16(payload, 7);
+    cursor.x_offset = std::min<int>(load_le16(payload, 9), static_cast<int>(kHardwareCursorPatternSize - 1));
+    cursor.y_offset = std::min<int>(load_le16(payload, 11), static_cast<int>(kHardwareCursorPatternSize - 1));
+
+    if (payload.size() > kHardwareCursorHeaderSize) {
+        cursor.pattern = parse_hardware_cursor_pattern(payload);
+        cursor.pattern_from_packet = true;
+    } else if (!cached_pattern.empty()) {
+        cursor.pattern = cached_pattern;
+    }
+
+    cursor.has_pattern = !cursor.pattern.empty();
+    if (cursor.x >= source_width || cursor.y >= source_height) {
+        cursor.visible = false;
+        return cursor;
+    }
+
+    cursor.width = std::min(
+        source_width - cursor.x,
+        static_cast<int>(kHardwareCursorPatternSize) - cursor.x_offset);
+    if (cursor.type != 1) {
+        cursor.width = std::min(cursor.width, 32);
+    }
+    cursor.height = std::min(
+        source_height - cursor.y,
+        static_cast<int>(kHardwareCursorPatternSize) - cursor.y_offset);
+    cursor.visible = cursor.width > 0 && cursor.height > 0;
+    return cursor;
+}
+
+void set_cursor_pixel(
+    CursorImage& image,
+    int x,
+    int y,
+    std::uint8_t red,
+    std::uint8_t green,
+    std::uint8_t blue,
+    std::uint8_t alpha)
+{
+    if (x < 0 || y < 0 || x >= image.width || y >= image.height) {
+        return;
+    }
+
+    const std::size_t offset = (static_cast<std::size_t>(y) * image.width + x) * 4;
+    image.rgba[offset + 0] = red;
+    image.rgba[offset + 1] = green;
+    image.rgba[offset + 2] = blue;
+    image.rgba[offset + 3] = alpha;
+}
+
+CursorImage make_fallback_cursor_image(const SharedCursor& cursor, int frame_width, int frame_height)
+{
+    CursorImage image;
+    image.width = std::min(kHardwareCursorFallbackWidth, std::max(0, frame_width - cursor.x));
+    image.height = std::min(kHardwareCursorFallbackHeight, std::max(0, frame_height - cursor.y));
+    if (image.width <= 0 || image.height <= 0) {
+        return {};
+    }
+
+    image.rgba.assign(static_cast<std::size_t>(image.width) * image.height * 4, 0);
+    const int center_x = std::min(7, image.width - 1);
+    const int center_y = std::min(7, image.height - 1);
+    for (int x = 0; x < image.width; ++x) {
+        set_cursor_pixel(image, x, center_y, 0, 0, 0, 255);
+        set_cursor_pixel(image, x, center_y - 1, 255, 255, 255, 255);
+    }
+    for (int y = 0; y < image.height; ++y) {
+        set_cursor_pixel(image, center_x, y, 0, 0, 0, 255);
+        set_cursor_pixel(image, center_x - 1, y, 255, 255, 255, 255);
+    }
+    return image;
+}
+
+CursorImage make_cursor_image(
+    const SharedCursor& cursor,
+    const std::vector<std::uint8_t>& framebuffer,
+    int frame_width,
+    int frame_height)
+{
+    if (!cursor.visible || frame_width <= 0 || frame_height <= 0) {
+        return {};
+    }
+    if (!cursor.has_pattern || cursor.pattern.size() < kHardwareCursorPatternPixels) {
+        return make_fallback_cursor_image(cursor, frame_width, frame_height);
+    }
+
+    CursorImage image;
+    image.width = std::min(cursor.width, std::max(0, frame_width - cursor.x));
+    image.height = std::min(cursor.height, std::max(0, frame_height - cursor.y));
+    if (image.width <= 0 || image.height <= 0) {
+        return {};
+    }
+
+    image.rgba.assign(static_cast<std::size_t>(image.width) * image.height * 4, 0);
+    const bool has_framebuffer =
+        framebuffer.size() == static_cast<std::size_t>(frame_width) * frame_height * 4;
+
+    for (int row = 0; row < image.height; ++row) {
+        for (int column = 0; column < image.width; ++column) {
+            const std::size_t pattern_index =
+                static_cast<std::size_t>(row + cursor.y_offset) * kHardwareCursorPatternSize
+                + static_cast<std::size_t>(column + cursor.x_offset);
+            const std::uint16_t cursor_data = cursor.pattern[pattern_index];
+            const std::uint8_t red = static_cast<std::uint8_t>((cursor_data & 0x0f00) >> 4);
+            const std::uint8_t green = static_cast<std::uint8_t>(cursor_data & 0x00f0);
+            const std::uint8_t blue = static_cast<std::uint8_t>((cursor_data & 0x000f) << 4);
+
+            if (cursor.type == 1) {
+                const auto alpha_nibble = static_cast<std::uint8_t>((cursor_data & 0xf000) >> 12);
+                if (alpha_nibble == 0) {
+                    continue;
+                }
+                set_cursor_pixel(
+                    image,
+                    column,
+                    row,
+                    red,
+                    green,
+                    blue,
+                    static_cast<std::uint8_t>(alpha_nibble * 17));
+                continue;
+            }
+
+            const bool and_bit = (cursor_data & 0x8000) != 0;
+            const bool xor_bit = (cursor_data & 0x4000) != 0;
+            if (!and_bit) {
+                set_cursor_pixel(image, column, row, red, green, blue, 255);
+            } else if (xor_bit) {
+                if (has_framebuffer) {
+                    const std::size_t source =
+                        (static_cast<std::size_t>(cursor.y + row) * frame_width + cursor.x + column) * 4;
+                    set_cursor_pixel(
+                        image,
+                        column,
+                        row,
+                        static_cast<std::uint8_t>(255 - framebuffer[source + 0]),
+                        static_cast<std::uint8_t>(255 - framebuffer[source + 1]),
+                        static_cast<std::uint8_t>(255 - framebuffer[source + 2]),
+                        255);
+                } else {
+                    set_cursor_pixel(image, column, row, 255, 255, 255, 255);
+                }
+            }
+        }
+    }
+
+    return image;
+}
+
 class KvmAsyncSession : public std::enable_shared_from_this<KvmAsyncSession> {
 public:
     KvmAsyncSession(
@@ -1189,6 +1494,8 @@ private:
             handle_blank_screen_packet(packet);
         } else if (packet.type == kCmdPowerStatus) {
             handle_power_status(packet.status);
+        } else if (packet.type == kIvtpHwCursor) {
+            handle_hardware_cursor_packet(packet);
         } else if (packet.type == kCmdVideoPackets) {
             handle_video_packet(packet);
         }
@@ -1336,6 +1643,37 @@ private:
         }
         if (blank_screen_packets_ > 0 && status == 1) {
             request_full_screen_retry("power-on-after-blank");
+        }
+    }
+
+    void handle_hardware_cursor_packet(const KvmPacket& packet)
+    {
+        std::optional<SharedCursor> cursor = parse_hardware_cursor_packet(
+            packet.payload,
+            cursor_pattern_,
+            framebuffer_width_,
+            framebuffer_height_);
+        if (!cursor) {
+            return;
+        }
+
+        if (cursor->pattern_from_packet) {
+            cursor_pattern_ = cursor->pattern;
+        }
+        const SharedCursor cursor_for_log = *cursor;
+        publish_cursor(state_, std::move(*cursor));
+
+        if (options_.login.verbose) {
+            write_log_line(std::cout, [&](std::ostream& output) {
+                output << "hitsc: hardware cursor"
+                       << " type=" << cursor_for_log.type
+                       << " x=" << cursor_for_log.x
+                       << " y=" << cursor_for_log.y
+                       << " offset=" << cursor_for_log.x_offset << ',' << cursor_for_log.y_offset
+                       << " size=" << cursor_for_log.width << 'x' << cursor_for_log.height
+                       << " pattern=" << (cursor_for_log.has_pattern ? "yes" : "no")
+                       << " checksum=0x" << std::hex << cursor_for_log.checksum << std::dec;
+            });
         }
     }
 
@@ -1602,6 +1940,7 @@ private:
     AspeedDecoder decoder_;
     KvmVideoAssembler video_assembler_;
     std::vector<std::uint8_t> framebuffer_;
+    std::vector<std::uint16_t> cursor_pattern_;
     std::deque<OutgoingPacket> outgoing_packets_;
     std::optional<OutgoingPacket> deferred_hid_packet_;
     std::uint32_t synthetic_mouse_sequence_ = 0;
@@ -1758,6 +2097,46 @@ SDL_FRect current_target_rect(SDL_Window* window, int frame_width, int frame_hei
     return centered_target_rect(window_width, window_height, frame_width, frame_height);
 }
 
+void update_cursor_texture(
+    SDL_Renderer* renderer,
+    SDL_Texture*& texture,
+    int& texture_width,
+    int& texture_height,
+    const CursorImage& image)
+{
+    if (image.rgba.empty() || image.width <= 0 || image.height <= 0) {
+        if (texture != nullptr) {
+            SDL_DestroyTexture(texture);
+            texture = nullptr;
+        }
+        texture_width = 0;
+        texture_height = 0;
+        return;
+    }
+
+    if (texture == nullptr || texture_width != image.width || texture_height != image.height) {
+        if (texture != nullptr) {
+            SDL_DestroyTexture(texture);
+        }
+        texture = SDL_CreateTexture(
+            renderer,
+            SDL_PIXELFORMAT_RGBA32,
+            SDL_TEXTUREACCESS_STREAMING,
+            image.width,
+            image.height);
+        if (texture == nullptr) {
+            throw_sdl_error("SDL_CreateTexture(cursor)");
+        }
+        SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_BLEND);
+        texture_width = image.width;
+        texture_height = image.height;
+    }
+
+    if (!SDL_UpdateTexture(texture, nullptr, image.rgba.data(), image.width * 4)) {
+        throw_sdl_error("SDL_UpdateTexture(cursor)");
+    }
+}
+
 std::optional<RemoteMousePosition> remote_mouse_position(
     float window_x,
     float window_y,
@@ -1794,6 +2173,107 @@ std::uint8_t button_mask_for_sdl_button(std::uint8_t button)
         return kMouseMiddleButton;
     default:
         return 0;
+    }
+}
+
+std::optional<std::uint8_t> keyboard_modifier_bit(SDL_Scancode scancode)
+{
+    switch (scancode) {
+    case SDL_SCANCODE_LCTRL:
+        return kKeyboardLeftCtrl;
+    case SDL_SCANCODE_LSHIFT:
+        return kKeyboardLeftShift;
+    case SDL_SCANCODE_LALT:
+        return kKeyboardLeftAlt;
+    case SDL_SCANCODE_LGUI:
+        return kKeyboardLeftGui;
+    case SDL_SCANCODE_RCTRL:
+        return kKeyboardRightCtrl;
+    case SDL_SCANCODE_RSHIFT:
+        return kKeyboardRightShift;
+    case SDL_SCANCODE_RALT:
+        return kKeyboardRightAlt;
+    case SDL_SCANCODE_RGUI:
+        return kKeyboardRightGui;
+    default:
+        return std::nullopt;
+    }
+}
+
+std::optional<std::uint8_t> keyboard_usage_from_sdl_scancode(SDL_Scancode scancode)
+{
+    const auto usage = static_cast<int>(scancode);
+    if ((usage >= SDL_SCANCODE_A && usage <= SDL_SCANCODE_APPLICATION) ||
+        (usage >= SDL_SCANCODE_KP_EQUALS && usage <= SDL_SCANCODE_F24)) {
+        return static_cast<std::uint8_t>(usage);
+    }
+
+    return std::nullopt;
+}
+
+bool set_keyboard_usage(KeyboardKeySlots& keys, std::uint8_t usage, bool pressed)
+{
+    const auto existing = std::find(keys.begin(), keys.end(), usage);
+    if (pressed) {
+        if (existing != keys.end()) {
+            return false;
+        }
+
+        const auto empty = std::find(keys.begin(), keys.end(), 0);
+        if (empty == keys.end()) {
+            return false;
+        }
+
+        *empty = usage;
+        return true;
+    }
+
+    if (existing == keys.end()) {
+        return false;
+    }
+
+    *existing = 0;
+    return true;
+}
+
+bool has_keyboard_state(std::uint8_t modifiers, const KeyboardKeySlots& keys)
+{
+    return modifiers != 0 || std::any_of(keys.begin(), keys.end(), [](std::uint8_t key) {
+        return key != 0;
+    });
+}
+
+void send_keyboard_report(
+    ViewState& state,
+    std::uint8_t modifiers,
+    const KeyboardKeySlots& keys,
+    std::uint32_t& sequence,
+    bool verbose)
+{
+    std::vector<std::uint8_t> packet = make_keyboard_packet(modifiers, keys, sequence++);
+    const bool accepted = queue_outgoing_packet(state, kCmdSendHidPacket, std::move(packet), false);
+    if (verbose && accepted) {
+        write_log_line(std::cout, [&](std::ostream& output) {
+            output << "hitsc: queued keyboard"
+                   << " modifiers=0x" << std::hex << std::setw(2) << std::setfill('0')
+                   << static_cast<int>(modifiers)
+                   << std::dec << std::setfill(' ')
+                   << " keys=";
+            bool first = true;
+            for (const std::uint8_t key : keys) {
+                if (key == 0) {
+                    continue;
+                }
+                if (!first) {
+                    output << ',';
+                }
+                first = false;
+                output << static_cast<int>(key);
+            }
+            if (first) {
+                output << "none";
+            }
+        });
     }
 }
 
@@ -1868,6 +2348,7 @@ void run_kvm_view(const KvmViewOptions& options)
     SDL_Window* window = nullptr;
     SDL_Renderer* renderer = nullptr;
     SDL_Texture* texture = nullptr;
+    SDL_Texture* cursor_texture = nullptr;
 
     auto stop_requested = std::make_shared<std::atomic_bool>(false);
     auto network_done = std::make_shared<std::atomic_bool>(false);
@@ -1897,8 +2378,17 @@ void run_kvm_view(const KvmViewOptions& options)
         int presented_frames = 0;
         int texture_width = kInitialFramebufferWidth;
         int texture_height = kInitialFramebufferHeight;
+        int cursor_texture_width = 0;
+        int cursor_texture_height = 0;
+        SharedCursor hardware_cursor;
+        bool has_hardware_cursor = false;
+        std::uint64_t last_cursor_sequence = 0;
+        std::vector<std::uint8_t> latest_frame_rgba;
         std::uint8_t mouse_buttons = 0;
         std::uint32_t mouse_sequence = 0;
+        std::uint8_t keyboard_modifiers = 0;
+        KeyboardKeySlots keyboard_keys{};
+        std::uint32_t keyboard_sequence = 0;
         std::uint64_t last_mouse_motion_ticks = 0;
         std::optional<RemoteMousePosition> last_relative_mouse_position;
 
@@ -1917,10 +2407,55 @@ void run_kvm_view(const KvmViewOptions& options)
                 if (event.type == SDL_EVENT_QUIT ||
                     event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED) {
                     running = false;
-                } else if (event.type == SDL_EVENT_KEY_DOWN) {
+                } else if (event.type == SDL_EVENT_WINDOW_FOCUS_LOST) {
+                    if (has_keyboard_state(keyboard_modifiers, keyboard_keys)) {
+                        keyboard_modifiers = 0;
+                        keyboard_keys.fill(0);
+                        send_keyboard_report(
+                            *state,
+                            keyboard_modifiers,
+                            keyboard_keys,
+                            keyboard_sequence,
+                            options.login.verbose);
+                    }
+                } else if (event.type == SDL_EVENT_KEY_DOWN ||
+                           event.type == SDL_EVENT_KEY_UP) {
                     if (options.login.verbose) {
-                        std::cout << "hitsc: key down scancode=" << event.key.scancode
-                                  << " key=" << event.key.key << '\n';
+                        write_log_line(std::cout, [&](std::ostream& output) {
+                            output << "hitsc: key "
+                                   << (event.type == SDL_EVENT_KEY_DOWN ? "down" : "up")
+                                   << " scancode=" << event.key.scancode
+                                   << " key=" << event.key.key;
+                        });
+                    }
+
+                    if (event.type == SDL_EVENT_KEY_DOWN && event.key.repeat) {
+                        continue;
+                    }
+
+                    const bool pressed = event.type == SDL_EVENT_KEY_DOWN;
+                    const std::optional<std::uint8_t> modifier = keyboard_modifier_bit(event.key.scancode);
+                    bool changed = false;
+                    if (modifier) {
+                        if (pressed) {
+                            changed = (keyboard_modifiers & *modifier) == 0;
+                            keyboard_modifiers |= *modifier;
+                        } else {
+                            changed = (keyboard_modifiers & *modifier) != 0;
+                            keyboard_modifiers &= static_cast<std::uint8_t>(~*modifier);
+                        }
+                    } else if (const std::optional<std::uint8_t> usage =
+                                   keyboard_usage_from_sdl_scancode(event.key.scancode)) {
+                        changed = set_keyboard_usage(keyboard_keys, *usage, pressed);
+                    }
+
+                    if (changed) {
+                        send_keyboard_report(
+                            *state,
+                            keyboard_modifiers,
+                            keyboard_keys,
+                            keyboard_sequence,
+                            options.login.verbose);
                     }
                 } else if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
                            event.type == SDL_EVENT_MOUSE_BUTTON_UP) {
@@ -2019,6 +2554,14 @@ void run_kvm_view(const KvmViewOptions& options)
                 last_mouse_motion_ticks = pending_mouse_motion_ticks;
             }
 
+            bool cursor_texture_dirty = false;
+            if (std::optional<SharedCursor> cursor = take_latest_cursor(*state, last_cursor_sequence)) {
+                hardware_cursor = std::move(*cursor);
+                last_cursor_sequence = hardware_cursor.sequence;
+                has_hardware_cursor = true;
+                cursor_texture_dirty = true;
+            }
+
             const std::optional<SharedFrame> frame = take_latest_frame(*state, last_sequence);
             if (frame) {
                 last_sequence = frame->sequence;
@@ -2047,6 +2590,8 @@ void run_kvm_view(const KvmViewOptions& options)
                 if (!SDL_UpdateTexture(texture, nullptr, frame->rgba.data(), frame->width * 4)) {
                     throw_sdl_error("SDL_UpdateTexture");
                 }
+                latest_frame_rgba = frame->rgba;
+                cursor_texture_dirty = has_hardware_cursor;
 
                 ++presented_frames;
                 if (options.login.verbose && (presented_frames <= 20 || presented_frames % 60 == 0)) {
@@ -2057,11 +2602,35 @@ void run_kvm_view(const KvmViewOptions& options)
                 }
             }
 
+            if (cursor_texture_dirty && has_hardware_cursor) {
+                const CursorImage cursor_image = make_cursor_image(
+                    hardware_cursor,
+                    latest_frame_rgba,
+                    texture_width,
+                    texture_height);
+                update_cursor_texture(
+                    renderer,
+                    cursor_texture,
+                    cursor_texture_width,
+                    cursor_texture_height,
+                    cursor_image);
+            }
+
             SDL_SetRenderDrawColor(renderer, 12, 14, 18, 255);
             SDL_RenderClear(renderer);
             if (texture != nullptr) {
                 const SDL_FRect target = current_target_rect(window, texture_width, texture_height);
                 SDL_RenderTexture(renderer, texture, nullptr, &target);
+                if (cursor_texture != nullptr && has_hardware_cursor && hardware_cursor.visible) {
+                    const float scale_x = target.w / static_cast<float>(texture_width);
+                    const float scale_y = target.h / static_cast<float>(texture_height);
+                    SDL_FRect cursor_target{};
+                    cursor_target.x = target.x + static_cast<float>(hardware_cursor.x) * scale_x;
+                    cursor_target.y = target.y + static_cast<float>(hardware_cursor.y) * scale_y;
+                    cursor_target.w = static_cast<float>(cursor_texture_width) * scale_x;
+                    cursor_target.h = static_cast<float>(cursor_texture_height) * scale_y;
+                    SDL_RenderTexture(renderer, cursor_texture, nullptr, &cursor_target);
+                }
             }
             SDL_RenderPresent(renderer);
 
@@ -2076,6 +2645,9 @@ void run_kvm_view(const KvmViewOptions& options)
     } catch (...) {
         print_current_exception_with_stack(std::cerr, "kvm view ui thread");
         stop_network_thread(*state, *stop_requested, network_thread, *network_done);
+        if (cursor_texture != nullptr) {
+            SDL_DestroyTexture(cursor_texture);
+        }
         if (texture != nullptr) {
             SDL_DestroyTexture(texture);
         }
@@ -2091,6 +2663,9 @@ void run_kvm_view(const KvmViewOptions& options)
 
     stop_network_thread(*state, *stop_requested, network_thread, *network_done);
 
+    if (cursor_texture != nullptr) {
+        SDL_DestroyTexture(cursor_texture);
+    }
     if (texture != nullptr) {
         SDL_DestroyTexture(texture);
     }
