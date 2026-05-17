@@ -4,8 +4,11 @@
 #include "aspeed_decoder.hpp"
 #include "diagnostics.hpp"
 #include "http_client.hpp"
-#include "kvm_video.hpp"
+#include "megarac_cursor.hpp"
+#include "megarac_hid.hpp"
+#include "megarac_protocol.hpp"
 #include "megarac_session.hpp"
+#include "megarac_video.hpp"
 #include "text.hpp"
 #include "tls.hpp"
 #include "url.hpp"
@@ -57,103 +60,57 @@ using KvmWebSocket = websocket::stream<beast::ssl_stream<beast::tcp_stream>>;
 
 namespace {
 
-constexpr std::uint16_t kCmdSendHidPacket = 1;
-constexpr std::uint16_t kCmdConnectionAllowed = 23;
-constexpr std::uint16_t kCmdVideoPackets = 25;
-constexpr std::uint16_t kCmdActiveClients = 39;
-constexpr std::uint16_t kCmdKeepAlive = 57;
-constexpr std::uint16_t kCmdValidateVideoSession = 18;
-constexpr std::uint16_t kCmdValidatedVideoSession = 19;
-constexpr std::uint16_t kCmdMaxSessionClose = 22;
-constexpr std::uint16_t kCmdStopSessionImmediate = 8;
-constexpr std::uint16_t kCmdPaintBlankScreen = 9;
-constexpr std::uint16_t kCmdGetFullScreen = 11;
-constexpr std::uint16_t kCmdResumeRedirection = 6;
-constexpr std::uint16_t kCmdUsbMouseMode = 10;
-constexpr std::uint16_t kCmdGetKbdLedStatus = 20;
-constexpr std::uint16_t kCmdGetWebToken = 21;
-constexpr std::uint16_t kCmdKvmSharing = 32;
-constexpr std::uint16_t kCmdGetUserMacro = 40;
-constexpr std::uint16_t kCmdSetNextMaster = 50;
-constexpr std::uint16_t kCmdPowerStatus = 34;
-constexpr std::uint16_t kCmdDisplayLockSet = 51;
-constexpr std::uint16_t kCmdDisplayControlStatus = 52;
-constexpr std::uint16_t kCmdMediaLicenseStatus = 53;
-constexpr std::uint16_t kCmdMediaFreeInstanceStatus = 56;
-constexpr std::uint16_t kCmdFpsDiff = 60;
-constexpr std::uint16_t kIvtpHwCursor = 4098;
-constexpr std::uint16_t kIvtpGetVideoEngineConfigs = 4099;
-constexpr std::uint16_t kIvtpSetVideoEngineConfigs = 4100;
-
-constexpr std::size_t kSsiHashSize = 129;
-constexpr std::size_t kClientUsernameLength = 129;
-constexpr std::size_t kClientOwnIpLength = 65;
-constexpr std::size_t kClientOwnMacLength = 49;
-constexpr std::size_t kVideoPacketSize = 373;
-constexpr std::size_t kWebTokenPayloadLength = 35;
-constexpr int kAbsoluteMouseMode = 2;
-constexpr int kRelativeMouseMode = 1;
-constexpr int kOtherMouseMode = 3;
-constexpr int kAbsoluteMouseMax = 32767;
-constexpr std::uint8_t kValidateSessionValid = 1;
-constexpr std::uint16_t kKvmPrivReqMaster = 1;
-constexpr std::uint16_t kKvmReqAllowed = 0;
-constexpr std::size_t kIusbHeaderSize = 32;
-constexpr std::size_t kIusbHidHeaderSize = 34;
-constexpr std::size_t kHardwareCursorHeaderSize = 13;
-constexpr std::size_t kHardwareCursorPatternSize = 64;
-constexpr std::size_t kHardwareCursorPatternPixels =
-    kHardwareCursorPatternSize * kHardwareCursorPatternSize;
-constexpr int kHardwareCursorFallbackWidth = 15;
-constexpr int kHardwareCursorFallbackHeight = 15;
-constexpr std::size_t kUsbKeyboardReportSize = 8;
-constexpr std::size_t kUsbKeyboardKeySlots = 6;
-constexpr std::size_t kUsbMouseAbsReportSize = 6;
-constexpr std::size_t kUsbMouseRelReportSize = 4;
-constexpr std::uint8_t kIusbMajor = 1;
-constexpr std::uint8_t kIusbMinor = 0;
-constexpr std::uint8_t kIusbDeviceKeyboard = 48;
-constexpr std::uint8_t kIusbDeviceMouse = 49;
-constexpr std::uint8_t kIusbProtoKeyboardData = 16;
-constexpr std::uint8_t kIusbProtoMouseData = 32;
-constexpr std::uint8_t kIusbFromRemote = 128;
-constexpr std::uint8_t kIusbKeyboardDeviceNumber = 2;
-constexpr std::uint8_t kIusbKeyboardInterfaceNumber = 0;
-constexpr std::uint8_t kIusbMouseDeviceNumber = 2;
-constexpr std::uint8_t kIusbMouseInterfaceNumber = 1;
-constexpr std::size_t kIusbChecksumOffset = 11;
-constexpr std::uint8_t kKeyboardLeftCtrl = 0x01;
-constexpr std::uint8_t kKeyboardLeftShift = 0x02;
-constexpr std::uint8_t kKeyboardLeftAlt = 0x04;
-constexpr std::uint8_t kKeyboardLeftGui = 0x08;
-constexpr std::uint8_t kKeyboardRightCtrl = 0x10;
-constexpr std::uint8_t kKeyboardRightShift = 0x20;
-constexpr std::uint8_t kKeyboardRightAlt = 0x40;
-constexpr std::uint8_t kKeyboardRightGui = 0x80;
-constexpr std::uint8_t kMouseLeftButton = 1;
-constexpr std::uint8_t kMouseRightButton = 2;
-constexpr std::uint8_t kMouseMiddleButton = 4;
 constexpr std::uint64_t kMouseMotionIntervalMilliseconds = 8;
 constexpr int kMaxSdlEventsPerFrame = 96;
 constexpr int kInitialFramebufferWidth = 800;
 constexpr int kInitialFramebufferHeight = 600;
-constexpr std::uint32_t kMaxKvmPacketPayloadSize = 128U * 1024U * 1024U;
 constexpr auto kBlankRecoveryInterval = std::chrono::seconds(3);
 
-struct KvmConfig {
-    std::string client_ip;
-    std::string session;
-    std::string token;
-    std::string server_ip;
-    bool reconnect_enabled = false;
-};
+constexpr std::uint16_t kCmdSendHidPacket = command_value(MegaracCommand::SendHidPacket);
+constexpr std::uint16_t kCmdConnectionAllowed = command_value(MegaracCommand::ConnectionAllowed);
+constexpr std::uint16_t kCmdVideoPackets = command_value(MegaracCommand::VideoPackets);
+constexpr std::uint16_t kCmdActiveClients = command_value(MegaracCommand::ActiveClients);
+constexpr std::uint16_t kCmdKeepAlive = command_value(MegaracCommand::KeepAlive);
+constexpr std::uint16_t kCmdValidateVideoSession = command_value(MegaracCommand::ValidateVideoSession);
+constexpr std::uint16_t kCmdValidatedVideoSession = command_value(MegaracCommand::ValidatedVideoSession);
+constexpr std::uint16_t kCmdMaxSessionClose = command_value(MegaracCommand::MaxSessionClose);
+constexpr std::uint16_t kCmdStopSessionImmediate = command_value(MegaracCommand::StopSessionImmediate);
+constexpr std::uint16_t kCmdPaintBlankScreen = command_value(MegaracCommand::PaintBlankScreen);
+constexpr std::uint16_t kCmdGetFullScreen = command_value(MegaracCommand::GetFullScreen);
+constexpr std::uint16_t kCmdUsbMouseMode = command_value(MegaracCommand::UsbMouseMode);
+constexpr std::uint16_t kCmdGetWebToken = command_value(MegaracCommand::GetWebToken);
+constexpr std::uint16_t kCmdKvmSharing = command_value(MegaracCommand::KvmSharing);
+constexpr std::uint16_t kCmdGetUserMacro = command_value(MegaracCommand::GetUserMacro);
+constexpr std::uint16_t kCmdSetNextMaster = command_value(MegaracCommand::SetNextMaster);
+constexpr std::uint16_t kCmdPowerStatus = command_value(MegaracCommand::PowerStatus);
+constexpr std::uint16_t kCmdDisplayLockSet = command_value(MegaracCommand::DisplayLockSet);
+constexpr std::uint16_t kCmdMediaLicenseStatus = command_value(MegaracCommand::MediaLicenseStatus);
+constexpr std::uint16_t kCmdFpsDiff = command_value(MegaracCommand::FpsDiff);
+constexpr std::uint16_t kIvtpHwCursor = command_value(MegaracCommand::IvtpHwCursor);
 
-struct KvmPacket {
-    std::uint16_t type = 0;
-    std::uint32_t payload_size = 0;
-    std::uint16_t status = 0;
-    std::vector<std::uint8_t> payload;
-};
+using KvmConfig = MegaracKvmConfig;
+using KvmPacket = MegaracPacket;
+using PacketBuffer = MegaracPacketBuffer;
+using SharedCursor = MegaracHardwareCursor;
+using KeyboardKeySlots = MegaracKeyboardKeySlots;
+
+constexpr int kAbsoluteMouseMode = kMegaracAbsoluteMouseMode;
+constexpr int kRelativeMouseMode = kMegaracRelativeMouseMode;
+constexpr int kOtherMouseMode = kMegaracOtherMouseMode;
+constexpr std::uint8_t kValidateSessionValid = kMegaracValidateSessionValid;
+constexpr std::uint16_t kKvmPrivReqMaster = kMegaracKvmPrivReqMaster;
+constexpr std::uint16_t kKvmReqAllowed = kMegaracKvmReqAllowed;
+constexpr std::uint8_t kKeyboardLeftCtrl = kMegaracKeyboardLeftCtrl;
+constexpr std::uint8_t kKeyboardLeftShift = kMegaracKeyboardLeftShift;
+constexpr std::uint8_t kKeyboardLeftAlt = kMegaracKeyboardLeftAlt;
+constexpr std::uint8_t kKeyboardLeftGui = kMegaracKeyboardLeftGui;
+constexpr std::uint8_t kKeyboardRightCtrl = kMegaracKeyboardRightCtrl;
+constexpr std::uint8_t kKeyboardRightShift = kMegaracKeyboardRightShift;
+constexpr std::uint8_t kKeyboardRightAlt = kMegaracKeyboardRightAlt;
+constexpr std::uint8_t kKeyboardRightGui = kMegaracKeyboardRightGui;
+constexpr std::uint8_t kMouseLeftButton = kMegaracMouseLeftButton;
+constexpr std::uint8_t kMouseRightButton = kMegaracMouseRightButton;
+constexpr std::uint8_t kMouseMiddleButton = kMegaracMouseMiddleButton;
 
 struct SharedFrame {
     int width = 0;
@@ -162,34 +119,10 @@ struct SharedFrame {
     std::vector<std::uint8_t> rgba;
 };
 
-struct SharedCursor {
-    bool visible = false;
-    bool has_pattern = false;
-    bool pattern_from_packet = false;
-    int type = 0;
-    std::uint32_t checksum = 0;
-    int x = 0;
-    int y = 0;
-    int x_offset = 0;
-    int y_offset = 0;
-    int width = 0;
-    int height = 0;
-    std::uint64_t sequence = 0;
-    std::vector<std::uint16_t> pattern;
-};
-
-struct CursorImage {
-    int width = 0;
-    int height = 0;
-    std::vector<std::uint8_t> rgba;
-};
-
 struct RemoteMousePosition {
     int x = 0;
     int y = 0;
 };
-
-using KeyboardKeySlots = std::array<std::uint8_t, kUsbKeyboardKeySlots>;
 
 struct OutgoingPacket {
     std::uint16_t type = 0;
@@ -202,7 +135,7 @@ struct ViewState {
     std::mutex cursor_mutex;
     std::mutex control_mutex;
     SharedFrame frame;
-    SharedCursor cursor;
+    MegaracHardwareCursor cursor;
     std::string status = "starting";
     std::string subprotocol;
     std::function<void(std::uint16_t, std::vector<std::uint8_t>, bool)> send_packet;
@@ -210,85 +143,12 @@ struct ViewState {
     std::weak_ptr<KvmWebSocket> websocket;
     bool has_frame = false;
     bool has_cursor = false;
-    int mouse_mode = kAbsoluteMouseMode;
+    int mouse_mode = kMegaracAbsoluteMouseMode;
 };
 
 struct ViewStatusSnapshot {
     std::string status;
     bool has_frame = false;
-};
-
-class PacketBuffer {
-public:
-    void append(const std::vector<std::uint8_t>& bytes)
-    {
-        buffer_.insert(buffer_.end(), bytes.begin(), bytes.end());
-    }
-
-    std::optional<KvmPacket> next()
-    {
-        constexpr std::size_t header_size = 8;
-        if (buffer_.size() - offset_ < header_size) {
-            compact_if_needed();
-            return std::nullopt;
-        }
-
-        const auto* data = buffer_.data() + offset_;
-        const auto type = read_le16(data);
-        const auto payload_size = read_le32(data + 2);
-        const auto status = read_le16(data + 6);
-        if (payload_size > kMaxKvmPacketPayloadSize) {
-            throw std::runtime_error("KVM packet declared implausible payload size");
-        }
-        const std::size_t packet_size = header_size + payload_size;
-        if (buffer_.size() - offset_ < packet_size) {
-            compact_if_needed();
-            return std::nullopt;
-        }
-
-        KvmPacket packet;
-        packet.type = type;
-        packet.payload_size = payload_size;
-        packet.status = status;
-        packet.payload.assign(data + header_size, data + packet_size);
-        offset_ += packet_size;
-        compact_if_needed();
-        return packet;
-    }
-
-private:
-    static std::uint16_t read_le16(const std::uint8_t* data)
-    {
-        return static_cast<std::uint16_t>(data[0]) |
-               static_cast<std::uint16_t>(data[1] << 8);
-    }
-
-    static std::uint32_t read_le32(const std::uint8_t* data)
-    {
-        return static_cast<std::uint32_t>(data[0]) |
-               (static_cast<std::uint32_t>(data[1]) << 8) |
-               (static_cast<std::uint32_t>(data[2]) << 16) |
-               (static_cast<std::uint32_t>(data[3]) << 24);
-    }
-
-    void compact_if_needed()
-    {
-        if (offset_ == 0) {
-            return;
-        }
-        if (offset_ == buffer_.size()) {
-            buffer_.clear();
-            offset_ = 0;
-            return;
-        }
-        if (offset_ > 4096) {
-            buffer_.erase(buffer_.begin(), buffer_.begin() + static_cast<std::ptrdiff_t>(offset_));
-            offset_ = 0;
-        }
-    }
-
-    std::vector<std::uint8_t> buffer_;
-    std::size_t offset_ = 0;
 };
 
 std::string json_string_field(const json::object& object, std::string_view name)
@@ -310,7 +170,7 @@ std::string json_string_field(const json::object& object, std::string_view name)
     return {};
 }
 
-KvmConfig parse_kvm_config(std::string_view body)
+MegaracKvmConfig parse_kvm_config(std::string_view body)
 {
     boost::system::error_code error;
     json::value value = json::parse(body, error);
@@ -323,7 +183,7 @@ KvmConfig parse_kvm_config(std::string_view body)
         throw std::runtime_error("/api/settings/media/h5viewercfg did not return a JSON object");
     }
 
-    KvmConfig config;
+    MegaracKvmConfig config;
     config.client_ip = json_string_field(*object, "client_ip");
     config.session = json_string_field(*object, "session");
     config.token = json_string_field(*object, "token");
@@ -390,7 +250,7 @@ bool fetch_reconnect_feature(const LoginOptions& options, CookieJar& cookies, st
     return parse_reconnect_feature(decode_response_body(response));
 }
 
-KvmConfig fetch_kvm_config(const LoginOptions& options, CookieJar& cookies, std::string_view csrf_token)
+MegaracKvmConfig fetch_kvm_config(const LoginOptions& options, CookieJar& cookies, std::string_view csrf_token)
 {
     std::vector<Header> headers{
         Header{http::field::origin, {}, make_origin(options.base_url)},
@@ -412,258 +272,9 @@ KvmConfig fetch_kvm_config(const LoginOptions& options, CookieJar& cookies, std:
         options.verbose);
 
     require_success_status(response, "/api/settings/media/h5viewercfg");
-    KvmConfig config = parse_kvm_config(decode_response_body(response));
+    MegaracKvmConfig config = parse_kvm_config(decode_response_body(response));
     config.reconnect_enabled = fetch_reconnect_feature(options, cookies, csrf_token);
     return config;
-}
-
-void append_le16(std::vector<std::uint8_t>& bytes, std::uint16_t value)
-{
-    bytes.push_back(static_cast<std::uint8_t>(value & 0xff));
-    bytes.push_back(static_cast<std::uint8_t>((value >> 8) & 0xff));
-}
-
-void append_le32(std::vector<std::uint8_t>& bytes, std::uint32_t value)
-{
-    bytes.push_back(static_cast<std::uint8_t>(value & 0xff));
-    bytes.push_back(static_cast<std::uint8_t>((value >> 8) & 0xff));
-    bytes.push_back(static_cast<std::uint8_t>((value >> 16) & 0xff));
-    bytes.push_back(static_cast<std::uint8_t>((value >> 24) & 0xff));
-}
-
-std::uint8_t to_byte(int value)
-{
-    return static_cast<std::uint8_t>(value & 0xff);
-}
-
-std::uint16_t load_le16(const std::vector<std::uint8_t>& bytes, std::size_t offset)
-{
-    return static_cast<std::uint16_t>(bytes[offset]) |
-           static_cast<std::uint16_t>(bytes[offset + 1] << 8);
-}
-
-std::uint32_t load_le32(const std::vector<std::uint8_t>& bytes, std::size_t offset)
-{
-    return static_cast<std::uint32_t>(bytes[offset]) |
-           (static_cast<std::uint32_t>(bytes[offset + 1]) << 8) |
-           (static_cast<std::uint32_t>(bytes[offset + 2]) << 16) |
-           (static_cast<std::uint32_t>(bytes[offset + 3]) << 24);
-}
-
-void append_fixed_cstring(std::vector<std::uint8_t>& bytes, std::string_view value, std::size_t fixed_size)
-{
-    const std::size_t copy_size = std::min(value.size(), fixed_size);
-    for (std::size_t i = 0; i < copy_size; ++i) {
-        bytes.push_back(static_cast<std::uint8_t>(value[i]));
-    }
-    bytes.insert(bytes.end(), fixed_size - copy_size, 0);
-}
-
-std::vector<std::uint8_t> make_header(
-    std::uint16_t type,
-    std::uint32_t payload_size,
-    std::uint16_t status)
-{
-    std::vector<std::uint8_t> bytes;
-    bytes.reserve(8 + payload_size);
-    append_le16(bytes, type);
-    append_le32(bytes, payload_size);
-    append_le16(bytes, status);
-    return bytes;
-}
-
-std::vector<std::uint8_t> make_simple_packet(std::uint16_t type, std::uint16_t status = 0)
-{
-    return make_header(type, 0, status);
-}
-
-std::vector<std::uint8_t> make_payload_packet(
-    std::uint16_t type,
-    std::uint16_t status,
-    const std::vector<std::uint8_t>& payload)
-{
-    std::vector<std::uint8_t> bytes = make_header(
-        type,
-        static_cast<std::uint32_t>(payload.size()),
-        status);
-    bytes.insert(bytes.end(), payload.begin(), payload.end());
-    return bytes;
-}
-
-std::vector<std::uint8_t> make_web_token_packet(std::string_view session)
-{
-    std::vector<std::uint8_t> payload;
-    payload.reserve(kWebTokenPayloadLength);
-    append_fixed_cstring(payload, session, kWebTokenPayloadLength);
-    return make_payload_packet(kCmdGetWebToken, 0, payload);
-}
-
-void append_iusb_hid_header(
-    std::vector<std::uint8_t>& payload,
-    std::size_t report_size,
-    std::uint32_t sequence,
-    std::uint8_t device,
-    std::uint8_t protocol,
-    std::uint8_t device_number,
-    std::uint8_t interface_number)
-{
-    constexpr std::string_view signature = "IUSB    ";
-    payload.insert(payload.end(), signature.begin(), signature.end());
-    payload.push_back(kIusbMajor);
-    payload.push_back(kIusbMinor);
-    payload.push_back(static_cast<std::uint8_t>(kIusbHeaderSize));
-    payload.push_back(0);
-    append_le32(
-        payload,
-        static_cast<std::uint32_t>(kIusbHidHeaderSize - 1 + report_size - kIusbHeaderSize));
-    payload.push_back(0);
-    payload.push_back(device);
-    payload.push_back(protocol);
-    payload.push_back(kIusbFromRemote);
-    payload.push_back(device_number);
-    payload.push_back(interface_number);
-    payload.push_back(0);
-    payload.push_back(0);
-    append_le32(payload, sequence);
-    payload.push_back(0);
-    payload.push_back(0);
-    payload.push_back(0);
-    payload.push_back(0);
-}
-
-void append_iusb_mouse_header(
-    std::vector<std::uint8_t>& payload,
-    std::size_t report_size,
-    std::uint32_t sequence)
-{
-    append_iusb_hid_header(
-        payload,
-        report_size,
-        sequence,
-        kIusbDeviceMouse,
-        kIusbProtoMouseData,
-        kIusbMouseDeviceNumber,
-        kIusbMouseInterfaceNumber);
-}
-
-void set_iusb_checksum(std::vector<std::uint8_t>& payload)
-{
-    if (payload.size() < kIusbHeaderSize) {
-        return;
-    }
-
-    payload[kIusbChecksumOffset] = 0;
-    int sum = 0;
-    for (std::size_t index = 0; index < kIusbHeaderSize; ++index) {
-        sum = (sum + payload[index]) & 0xff;
-    }
-    payload[kIusbChecksumOffset] = to_byte(-sum);
-}
-
-std::uint16_t scale_absolute_mouse_coordinate(int value, int size)
-{
-    if (size <= 0) {
-        return 0;
-    }
-
-    const int clamped = std::clamp(value, 0, size);
-    const double scaled =
-        static_cast<double>(clamped) * static_cast<double>(kAbsoluteMouseMax) / static_cast<double>(size);
-    return static_cast<std::uint16_t>(std::clamp(
-        static_cast<int>(std::floor(scaled + 0.5)),
-        0,
-        kAbsoluteMouseMax));
-}
-
-std::vector<std::uint8_t> make_absolute_mouse_packet(
-    std::uint8_t buttons,
-    int x,
-    int y,
-    int width,
-    int height,
-    int wheel,
-    std::uint32_t sequence)
-{
-    std::vector<std::uint8_t> payload;
-    payload.reserve(kIusbHidHeaderSize - 1 + kUsbMouseAbsReportSize);
-    append_iusb_mouse_header(payload, kUsbMouseAbsReportSize, sequence);
-    payload.push_back(static_cast<std::uint8_t>(kUsbMouseAbsReportSize));
-    payload.push_back(buttons);
-    append_le16(payload, scale_absolute_mouse_coordinate(x, width));
-    append_le16(payload, scale_absolute_mouse_coordinate(y, height));
-    payload.push_back(to_byte(wheel));
-    set_iusb_checksum(payload);
-    return make_payload_packet(kCmdSendHidPacket, 0, payload);
-}
-
-std::vector<std::uint8_t> make_relative_mouse_packet(
-    std::uint8_t buttons,
-    int dx,
-    int dy,
-    int wheel,
-    std::uint32_t sequence)
-{
-    std::vector<std::uint8_t> payload;
-    payload.reserve(kIusbHidHeaderSize - 1 + kUsbMouseRelReportSize);
-    append_iusb_mouse_header(payload, kUsbMouseRelReportSize, sequence);
-    payload.push_back(static_cast<std::uint8_t>(kUsbMouseAbsReportSize));
-    payload.push_back(buttons);
-    payload.push_back(to_byte(std::clamp(dx, -127, 127)));
-    payload.push_back(to_byte(std::clamp(dy, -127, 127)));
-    payload.push_back(to_byte(wheel));
-    set_iusb_checksum(payload);
-    return make_payload_packet(kCmdSendHidPacket, 0, payload);
-}
-
-std::vector<std::uint8_t> make_keyboard_packet(
-    std::uint8_t modifiers,
-    const KeyboardKeySlots& keys,
-    std::uint32_t sequence)
-{
-    std::vector<std::uint8_t> payload;
-    payload.reserve(kIusbHidHeaderSize - 1 + kUsbKeyboardReportSize);
-    append_iusb_hid_header(
-        payload,
-        kUsbKeyboardReportSize,
-        sequence,
-        kIusbDeviceKeyboard,
-        kIusbProtoKeyboardData,
-        kIusbKeyboardDeviceNumber,
-        kIusbKeyboardInterfaceNumber);
-    payload.push_back(static_cast<std::uint8_t>(kUsbKeyboardReportSize));
-    payload.push_back(modifiers);
-    payload.push_back(0);
-    payload.insert(payload.end(), keys.begin(), keys.end());
-    set_iusb_checksum(payload);
-    return make_payload_packet(kCmdSendHidPacket, 0, payload);
-}
-
-std::vector<std::uint8_t> make_validate_packet(const KvmConfig& config, std::string_view username)
-{
-    std::vector<std::uint8_t> payload;
-    payload.reserve(kVideoPacketSize + kClientOwnIpLength);
-    payload.push_back(0);
-    append_fixed_cstring(payload, config.token, kSsiHashSize);
-    append_fixed_cstring(payload, config.client_ip, kClientOwnIpLength);
-    append_fixed_cstring(payload, username.empty() ? "domain/username" : username, kClientUsernameLength);
-    append_fixed_cstring(payload, "00-00-00-00-00-00", kClientOwnMacLength);
-    append_fixed_cstring(payload, config.server_ip, kClientOwnIpLength);
-
-    std::vector<std::uint8_t> bytes;
-    if (config.reconnect_enabled) {
-        bytes = make_simple_packet(58, 1);
-    }
-
-    std::vector<std::uint8_t> validate = make_header(
-        kCmdValidateVideoSession,
-        static_cast<std::uint32_t>(payload.size()),
-        1);
-    bytes.insert(bytes.end(), validate.begin(), validate.end());
-    bytes.insert(bytes.end(), payload.begin(), payload.end());
-
-    std::vector<std::uint8_t> resume = make_simple_packet(kCmdResumeRedirection);
-    bytes.insert(bytes.end(), resume.begin(), resume.end());
-    return bytes;
 }
 
 std::vector<std::uint8_t> base64_decode(std::string_view input)
@@ -831,87 +442,13 @@ std::optional<SharedFrame> take_latest_frame(ViewState& state, std::uint64_t las
     return state.frame;
 }
 
-std::optional<SharedCursor> take_latest_cursor(ViewState& state, std::uint64_t last_sequence)
+std::optional<MegaracHardwareCursor> take_latest_cursor(ViewState& state, std::uint64_t last_sequence)
 {
     std::lock_guard lock(state.cursor_mutex);
     if (!state.has_cursor || state.cursor.sequence == last_sequence) {
         return std::nullopt;
     }
     return state.cursor;
-}
-
-std::string packet_name(std::uint16_t type)
-{
-    switch (type) {
-    case kCmdSendHidPacket:
-        return "CMD_SEND_HID_PACKET";
-    case 4:
-        return "CMD_PAUSE_REDIRECTION";
-    case kCmdResumeRedirection:
-        return "CMD_RESUME_REDIRECTION";
-    case kCmdStopSessionImmediate:
-        return "CMD_STOP_SESSION_IMMEDIATE";
-    case kCmdPaintBlankScreen:
-        return "CMD_PAINT_BLANK_SCREEN";
-    case kCmdUsbMouseMode:
-        return "CMD_USB_MOUSE_MODE";
-    case kCmdGetFullScreen:
-        return "CMD_GET_FULL_SCREEN";
-    case kCmdValidateVideoSession:
-        return "CMD_VALIDATE_VIDEO_SESSION";
-    case kCmdValidatedVideoSession:
-        return "CMD_VALIDATED_VIDEO_SESSION";
-    case kCmdMaxSessionClose:
-        return "CMD_MAX_SESSION_CLOSE";
-    case kCmdGetKbdLedStatus:
-        return "CMD_GET_KBD_LED_STATUS";
-    case kCmdGetWebToken:
-        return "CMD_GET_WEB_TOKEN";
-    case kCmdConnectionAllowed:
-        return "CMD_CONNECTION_ALLOWED";
-    case kCmdVideoPackets:
-        return "CMD_VIDEO_PACKETS";
-    case kCmdKvmSharing:
-        return "CMD_KVM_SHARING";
-    case kCmdPowerStatus:
-        return "CMD_POWER_STATUS";
-    case 37:
-        return "CMD_SERVICE_INFO";
-    case 38:
-        return "CMD_KVM_MEDIA_INFO";
-    case kCmdActiveClients:
-        return "CMD_ACTIVE_CLIENTS";
-    case kCmdGetUserMacro:
-        return "CMD_GET_USER_MACRO";
-    case kCmdSetNextMaster:
-        return "CMD_SET_NEXT_MASTER";
-    case kCmdDisplayLockSet:
-        return "CMD_DISPLAY_LOCK_SET";
-    case kCmdDisplayControlStatus:
-        return "CMD_DISPLAY_CONTROL_STATUS";
-    case kCmdMediaLicenseStatus:
-        return "CMD_MEDIA_LICENSE_STATUS";
-    case kCmdMediaFreeInstanceStatus:
-        return "CMD_MEDIA_FREE_INSTANCE_STATUS";
-    case kCmdKeepAlive:
-        return "CMD_KEEP_ALIVE_PKT";
-    case 58:
-        return "CMD_CONNECTION_COMPLETE_PKT";
-    case 59:
-        return "CMD_CONNECTION_FAILED";
-    case kCmdFpsDiff:
-        return "CMD_FPS_DIFF";
-    case 61:
-        return "CMD_KBD_QUEUE_STATUS";
-    case kIvtpHwCursor:
-        return "IVTP_HW_CURSOR";
-    case kIvtpGetVideoEngineConfigs:
-        return "IVTP_GET_VIDEO_ENGINE_CONFIGS";
-    case kIvtpSetVideoEngineConfigs:
-        return "IVTP_SET_VIDEO_ENGINE_CONFIGS";
-    default:
-        return "UNKNOWN";
-    }
 }
 
 std::mutex& log_mutex()
@@ -933,7 +470,7 @@ void log_packet(int number, const KvmPacket& packet)
     write_log_line(std::cout, [&](std::ostream& output) {
         output << "hitsc: kvm packet #" << number
                << " type=" << packet.type
-               << " " << packet_name(packet.type)
+               << " " << command_name(packet.type)
                << " status=" << packet.status
                << " payload=" << packet.payload_size;
 
@@ -963,7 +500,7 @@ void log_sent_packet(std::uint16_t type, std::uint16_t status, std::size_t paylo
     write_log_line(std::cout, [&](std::ostream& output) {
         output << "hitsc: sent kvm packet"
                << " type=" << type
-               << " " << packet_name(type)
+               << " " << command_name(type)
                << " status=" << status
                << " payload=" << payload_size;
     });
@@ -1076,231 +613,6 @@ int sampled_average_rgb(const std::vector<std::uint8_t>& rgba)
         ++samples;
     }
     return samples == 0 ? 0 : static_cast<int>(sum / (samples * 3));
-}
-
-std::uint16_t packet_status_from_bytes(const std::vector<std::uint8_t>& packet)
-{
-    if (packet.size() < 8) {
-        return 0;
-    }
-    return static_cast<std::uint16_t>(packet[6]) |
-           static_cast<std::uint16_t>(packet[7] << 8);
-}
-
-std::size_t packet_payload_size_from_bytes(const std::vector<std::uint8_t>& packet)
-{
-    return packet.size() >= 8 ? packet.size() - 8 : 0;
-}
-
-std::string max_session_close_reason(std::uint16_t status)
-{
-    switch (status) {
-    case 0:
-        return "maximum KVM sessions reached";
-    case 1:
-        return "same KVM client/user already connected";
-    default:
-        return "unknown session close reason";
-    }
-}
-
-std::string validation_response_name(std::uint8_t response)
-{
-    switch (response) {
-    case 0:
-        return "invalid session";
-    case kValidateSessionValid:
-        return "valid session";
-    case 2:
-        return "not sufficient privilege";
-    case 3:
-        return "invalid session info";
-    case 8:
-        return "session unregistered";
-    default:
-        return "unknown validation response";
-    }
-}
-
-std::vector<std::uint16_t> parse_hardware_cursor_pattern(const std::vector<std::uint8_t>& payload)
-{
-    std::vector<std::uint16_t> pattern(kHardwareCursorPatternPixels, 0);
-    const std::size_t available_words = (payload.size() - kHardwareCursorHeaderSize) / 2;
-    const std::size_t words = std::min(available_words, kHardwareCursorPatternPixels);
-    for (std::size_t index = 0; index < words; ++index) {
-        pattern[index] = load_le16(payload, kHardwareCursorHeaderSize + index * 2);
-    }
-    return pattern;
-}
-
-std::optional<SharedCursor> parse_hardware_cursor_packet(
-    const std::vector<std::uint8_t>& payload,
-    const std::vector<std::uint16_t>& cached_pattern,
-    int source_width,
-    int source_height)
-{
-    if (payload.size() < kHardwareCursorHeaderSize) {
-        return std::nullopt;
-    }
-
-    if (source_width <= 0) {
-        source_width = kInitialFramebufferWidth;
-    }
-    if (source_height <= 0) {
-        source_height = kInitialFramebufferHeight;
-    }
-
-    SharedCursor cursor;
-    cursor.type = payload[0];
-    cursor.checksum = load_le32(payload, 1);
-    cursor.x = load_le16(payload, 5);
-    cursor.y = load_le16(payload, 7);
-    cursor.x_offset = std::min<int>(load_le16(payload, 9), static_cast<int>(kHardwareCursorPatternSize - 1));
-    cursor.y_offset = std::min<int>(load_le16(payload, 11), static_cast<int>(kHardwareCursorPatternSize - 1));
-
-    if (payload.size() > kHardwareCursorHeaderSize) {
-        cursor.pattern = parse_hardware_cursor_pattern(payload);
-        cursor.pattern_from_packet = true;
-    } else if (!cached_pattern.empty()) {
-        cursor.pattern = cached_pattern;
-    }
-
-    cursor.has_pattern = !cursor.pattern.empty();
-    if (cursor.x >= source_width || cursor.y >= source_height) {
-        cursor.visible = false;
-        return cursor;
-    }
-
-    cursor.width = std::min(
-        source_width - cursor.x,
-        static_cast<int>(kHardwareCursorPatternSize) - cursor.x_offset);
-    if (cursor.type != 1) {
-        cursor.width = std::min(cursor.width, 32);
-    }
-    cursor.height = std::min(
-        source_height - cursor.y,
-        static_cast<int>(kHardwareCursorPatternSize) - cursor.y_offset);
-    cursor.visible = cursor.width > 0 && cursor.height > 0;
-    return cursor;
-}
-
-void set_cursor_pixel(
-    CursorImage& image,
-    int x,
-    int y,
-    std::uint8_t red,
-    std::uint8_t green,
-    std::uint8_t blue,
-    std::uint8_t alpha)
-{
-    if (x < 0 || y < 0 || x >= image.width || y >= image.height) {
-        return;
-    }
-
-    const std::size_t offset = (static_cast<std::size_t>(y) * image.width + x) * 4;
-    image.rgba[offset + 0] = red;
-    image.rgba[offset + 1] = green;
-    image.rgba[offset + 2] = blue;
-    image.rgba[offset + 3] = alpha;
-}
-
-CursorImage make_fallback_cursor_image(const SharedCursor& cursor, int frame_width, int frame_height)
-{
-    CursorImage image;
-    image.width = std::min(kHardwareCursorFallbackWidth, std::max(0, frame_width - cursor.x));
-    image.height = std::min(kHardwareCursorFallbackHeight, std::max(0, frame_height - cursor.y));
-    if (image.width <= 0 || image.height <= 0) {
-        return {};
-    }
-
-    image.rgba.assign(static_cast<std::size_t>(image.width) * image.height * 4, 0);
-    const int center_x = std::min(7, image.width - 1);
-    const int center_y = std::min(7, image.height - 1);
-    for (int x = 0; x < image.width; ++x) {
-        set_cursor_pixel(image, x, center_y, 0, 0, 0, 255);
-        set_cursor_pixel(image, x, center_y - 1, 255, 255, 255, 255);
-    }
-    for (int y = 0; y < image.height; ++y) {
-        set_cursor_pixel(image, center_x, y, 0, 0, 0, 255);
-        set_cursor_pixel(image, center_x - 1, y, 255, 255, 255, 255);
-    }
-    return image;
-}
-
-CursorImage make_cursor_image(
-    const SharedCursor& cursor,
-    const std::vector<std::uint8_t>& framebuffer,
-    int frame_width,
-    int frame_height)
-{
-    if (!cursor.visible || frame_width <= 0 || frame_height <= 0) {
-        return {};
-    }
-    if (!cursor.has_pattern || cursor.pattern.size() < kHardwareCursorPatternPixels) {
-        return make_fallback_cursor_image(cursor, frame_width, frame_height);
-    }
-
-    CursorImage image;
-    image.width = std::min(cursor.width, std::max(0, frame_width - cursor.x));
-    image.height = std::min(cursor.height, std::max(0, frame_height - cursor.y));
-    if (image.width <= 0 || image.height <= 0) {
-        return {};
-    }
-
-    image.rgba.assign(static_cast<std::size_t>(image.width) * image.height * 4, 0);
-    const bool has_framebuffer =
-        framebuffer.size() == static_cast<std::size_t>(frame_width) * frame_height * 4;
-
-    for (int row = 0; row < image.height; ++row) {
-        for (int column = 0; column < image.width; ++column) {
-            const std::size_t pattern_index =
-                static_cast<std::size_t>(row + cursor.y_offset) * kHardwareCursorPatternSize
-                + static_cast<std::size_t>(column + cursor.x_offset);
-            const std::uint16_t cursor_data = cursor.pattern[pattern_index];
-            const std::uint8_t red = static_cast<std::uint8_t>((cursor_data & 0x0f00) >> 4);
-            const std::uint8_t green = static_cast<std::uint8_t>(cursor_data & 0x00f0);
-            const std::uint8_t blue = static_cast<std::uint8_t>((cursor_data & 0x000f) << 4);
-
-            if (cursor.type == 1) {
-                const auto alpha_nibble = static_cast<std::uint8_t>((cursor_data & 0xf000) >> 12);
-                if (alpha_nibble == 0) {
-                    continue;
-                }
-                set_cursor_pixel(
-                    image,
-                    column,
-                    row,
-                    red,
-                    green,
-                    blue,
-                    static_cast<std::uint8_t>(alpha_nibble * 17));
-                continue;
-            }
-
-            const bool and_bit = (cursor_data & 0x8000) != 0;
-            const bool xor_bit = (cursor_data & 0x4000) != 0;
-            if (!and_bit) {
-                set_cursor_pixel(image, column, row, red, green, blue, 255);
-            } else if (xor_bit) {
-                if (has_framebuffer) {
-                    const std::size_t source =
-                        (static_cast<std::size_t>(cursor.y + row) * frame_width + cursor.x + column) * 4;
-                    set_cursor_pixel(
-                        image,
-                        column,
-                        row,
-                        static_cast<std::uint8_t>(255 - framebuffer[source + 0]),
-                        static_cast<std::uint8_t>(255 - framebuffer[source + 1]),
-                        static_cast<std::uint8_t>(255 - framebuffer[source + 2]),
-                        255);
-                } else {
-                    set_cursor_pixel(image, column, row, 255, 255, 255, 255);
-                }
-            }
-        }
-    }
-
-    return image;
 }
 
 class KvmAsyncSession : public std::enable_shared_from_this<KvmAsyncSession> {
@@ -1451,7 +763,7 @@ private:
         if (packet.type == kCmdConnectionAllowed && !validation_sent_) {
             queue_packet_from_strand(
                 kCmdValidateVideoSession,
-                make_validate_packet(config_, options_.login.username),
+                make_validate_video_session_packet(config_, options_.login.username),
                 false);
             validation_sent_ = true;
             std::cout << "hitsc: sent KVM validation packet\n";
@@ -1551,15 +863,18 @@ private:
         const int mouse_mode = mouse_mode_snapshot(state_);
         std::vector<std::uint8_t> packet;
         if (mouse_mode == kRelativeMouseMode || mouse_mode == kOtherMouseMode) {
-            packet = make_relative_mouse_packet(0, 1, 1, 0, synthetic_mouse_sequence_++);
+            packet = make_megarac_relative_mouse_packet(
+                MegaracRelativeMouseReport{0, 1, 1, 0},
+                synthetic_mouse_sequence_++);
         } else {
-            packet = make_absolute_mouse_packet(
-                0,
-                kInitialFramebufferWidth / 2,
-                kInitialFramebufferHeight / 2,
-                kInitialFramebufferWidth,
-                kInitialFramebufferHeight,
-                0,
+            packet = make_megarac_absolute_mouse_packet(
+                MegaracAbsoluteMouseReport{
+                    0,
+                    kInitialFramebufferWidth / 2,
+                    kInitialFramebufferHeight / 2,
+                    kInitialFramebufferWidth,
+                    kInitialFramebufferHeight,
+                    0},
                 synthetic_mouse_sequence_++);
         }
 
@@ -1680,7 +995,7 @@ private:
     void handle_video_packet(const KvmPacket& packet)
     {
         ++video_packets_seen_;
-        const std::optional<KvmVideoFrame> frame = video_assembler_.ingest(packet.payload);
+        const std::optional<MegaracVideoFrame> frame = video_assembler_.ingest(packet.payload);
         if (!frame) {
             if (options_.login.verbose && video_packets_seen_ <= 20) {
                 std::cout << "hitsc: video packet #" << video_packets_seen_
@@ -1690,8 +1005,8 @@ private:
             return;
         }
 
-        const std::uint8_t block_header = kvm_video_first_block_header(frame->compressed);
-        if (frame->rc4_enable != 0 || !kvm_video_is_supported_first_block(block_header)) {
+        const std::uint8_t block_header = megarac_video_first_block_header(frame->compressed);
+        if (frame->rc4_enable != 0 || !megarac_video_is_supported_first_block(block_header)) {
             std::cerr << "hitsc: skipped unsupported video frame"
                       << " compression=" << static_cast<int>(frame->compression_mode)
                       << " rc4=" << static_cast<int>(frame->rc4_enable)
@@ -1938,7 +1253,7 @@ private:
     beast::flat_buffer read_buffer_;
     PacketBuffer packet_buffer_;
     AspeedDecoder decoder_;
-    KvmVideoAssembler video_assembler_;
+    MegaracVideoAssembler video_assembler_;
     std::vector<std::uint8_t> framebuffer_;
     std::vector<std::uint16_t> cursor_pattern_;
     std::deque<OutgoingPacket> outgoing_packets_;
@@ -2250,7 +1565,8 @@ void send_keyboard_report(
     std::uint32_t& sequence,
     bool verbose)
 {
-    std::vector<std::uint8_t> packet = make_keyboard_packet(modifiers, keys, sequence++);
+    std::vector<std::uint8_t> packet =
+        make_megarac_keyboard_packet(MegaracKeyboardReport{modifiers, keys}, sequence++);
     const bool accepted = queue_outgoing_packet(state, kCmdSendHidPacket, std::move(packet), false);
     if (verbose && accepted) {
         write_log_line(std::cout, [&](std::ostream& output) {
@@ -2293,9 +1609,13 @@ void send_mouse_report(
     if (mouse_mode == kRelativeMouseMode || mouse_mode == kOtherMouseMode) {
         const int dx = last_relative_position ? position.x - last_relative_position->x : 0;
         const int dy = last_relative_position ? position.y - last_relative_position->y : 0;
-        packet = make_relative_mouse_packet(buttons, dx, dy, wheel, sequence++);
+        packet = make_megarac_relative_mouse_packet(
+            MegaracRelativeMouseReport{buttons, dx, dy, wheel},
+            sequence++);
     } else {
-        packet = make_absolute_mouse_packet(buttons, position.x, position.y, frame_width, frame_height, wheel, sequence++);
+        packet = make_megarac_absolute_mouse_packet(
+            MegaracAbsoluteMouseReport{buttons, position.x, position.y, frame_width, frame_height, wheel},
+            sequence++);
     }
 
     last_relative_position = position;

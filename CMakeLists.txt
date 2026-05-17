@@ -43,9 +43,12 @@ add_executable(
   src/kvm_capture.cpp
   src/kvm_capture_decode.cpp
   src/kvm_probe.cpp
-  src/kvm_video.cpp
   src/kvm_view.cpp
   src/main.cpp
+  src/megarac_cursor.cpp
+  src/megarac_hid.cpp
+  src/megarac_protocol.cpp
+  src/megarac_video.cpp
   src/megarac_session.cpp
   src/text.cpp
   src/tls.cpp

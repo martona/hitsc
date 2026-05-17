@@ -6,7 +6,7 @@
 
 namespace hitsc {
 
-struct KvmVideoFrame {
+struct MegaracVideoFrame {
     int width = 0;
     int height = 0;
     std::uint8_t compression_mode = 0;
@@ -18,18 +18,18 @@ struct KvmVideoFrame {
     std::vector<std::uint8_t> compressed;
 };
 
-class KvmVideoAssembler {
+class MegaracVideoAssembler {
 public:
-    std::optional<KvmVideoFrame> ingest(const std::vector<std::uint8_t>& packet_payload);
+    std::optional<MegaracVideoFrame> ingest(const std::vector<std::uint8_t>& packet_payload);
 
 private:
     void append_fragment(const std::vector<std::uint8_t>& packet_payload, std::size_t offset);
 
     bool expecting_new_frame_ = true;
-    KvmVideoFrame current_;
+    MegaracVideoFrame current_;
 };
 
-std::uint8_t kvm_video_first_block_header(const std::vector<std::uint8_t>& compressed);
-bool kvm_video_is_supported_first_block(std::uint8_t header);
+std::uint8_t megarac_video_first_block_header(const std::vector<std::uint8_t>& compressed);
+bool megarac_video_is_supported_first_block(std::uint8_t header);
 
 } // namespace hitsc

@@ -2,7 +2,8 @@
 
 #include "aspeed_decoder.hpp"
 #include "kvm_capture.hpp"
-#include "kvm_video.hpp"
+#include "megarac_protocol.hpp"
+#include "megarac_video.hpp"
 
 #include <algorithm>
 #include <array>
@@ -23,38 +24,12 @@ namespace {
 
 constexpr std::array<char, 16> kMagic = {'H', 'I', 'T', 'S', 'C', 'K', 'V', 'M', 'C', 'A', 'P', '0', '0', '1', '\r', '\n'};
 constexpr std::uint32_t kFormatVersion = 1;
-constexpr std::uint16_t kCmdVideoPackets = 25;
 
 struct CaptureRecord {
     KvmCaptureRecordType type = KvmCaptureRecordType::Note;
     std::uint64_t timestamp_us = 0;
     std::vector<std::uint8_t> payload;
 };
-
-struct KvmPacket {
-    std::uint16_t type = 0;
-    std::uint16_t status = 0;
-    std::vector<std::uint8_t> payload;
-};
-
-std::uint16_t read_le16(const std::vector<std::uint8_t>& bytes, std::size_t offset)
-{
-    if (offset + 2 > bytes.size()) {
-        throw std::runtime_error("truncated little-endian uint16");
-    }
-    return static_cast<std::uint16_t>(bytes[offset] | (static_cast<std::uint16_t>(bytes[offset + 1]) << 8));
-}
-
-std::uint32_t read_le32(const std::vector<std::uint8_t>& bytes, std::size_t offset)
-{
-    if (offset + 4 > bytes.size()) {
-        throw std::runtime_error("truncated little-endian uint32");
-    }
-    return static_cast<std::uint32_t>(bytes[offset])
-        | (static_cast<std::uint32_t>(bytes[offset + 1]) << 8)
-        | (static_cast<std::uint32_t>(bytes[offset + 2]) << 16)
-        | (static_cast<std::uint32_t>(bytes[offset + 3]) << 24);
-}
 
 std::uint16_t read_u16(std::ifstream& input)
 {
@@ -118,23 +93,6 @@ std::optional<CaptureRecord> read_record(std::ifstream& input)
     record.timestamp_us = read_u64(input);
     record.payload = read_payload(input, read_u32(input));
     return record;
-}
-
-KvmPacket parse_kvm_packet(const std::vector<std::uint8_t>& payload)
-{
-    if (payload.size() < 8) {
-        throw std::runtime_error("truncated captured KVM packet");
-    }
-
-    KvmPacket packet;
-    packet.type = read_le16(payload, 0);
-    packet.status = read_le16(payload, 6);
-    const std::uint32_t declared_size = read_le32(payload, 2);
-    if (declared_size != payload.size() - 8) {
-        throw std::runtime_error("captured KVM packet payload size mismatch");
-    }
-    packet.payload.assign(payload.begin() + 8, payload.end());
-    return packet;
 }
 
 std::string frame_name(int frame_index)
@@ -259,7 +217,7 @@ void decode_kvm_capture(const KvmCaptureDecodeOptions& options)
     std::filesystem::create_directories(output_directory);
 
     AspeedDecoder decoder;
-    KvmVideoAssembler assembler;
+    MegaracVideoAssembler assembler;
     int video_packet_count = 0;
     int frame_count = 0;
     int decoded_frame_count = 0;
@@ -273,20 +231,20 @@ void decode_kvm_capture(const KvmCaptureDecodeOptions& options)
             continue;
         }
 
-        const KvmPacket packet = parse_kvm_packet(record->payload);
-        if (packet.type != kCmdVideoPackets) {
+        const MegaracPacket packet = parse_megarac_packet(record->payload);
+        if (packet.type != command_value(MegaracCommand::VideoPackets)) {
             continue;
         }
 
         ++video_packet_count;
-        const std::optional<KvmVideoFrame> frame = assembler.ingest(packet.payload);
+        const std::optional<MegaracVideoFrame> frame = assembler.ingest(packet.payload);
         if (!frame) {
             continue;
         }
 
         ++frame_count;
-        const std::uint8_t block_header = kvm_video_first_block_header(frame->compressed);
-        if (frame->rc4_enable != 0 || !kvm_video_is_supported_first_block(block_header)) {
+        const std::uint8_t block_header = megarac_video_first_block_header(frame->compressed);
+        if (frame->rc4_enable != 0 || !megarac_video_is_supported_first_block(block_header)) {
             ++skipped_frame_count;
             std::cerr << "hitsc: skipped frame #" << frame_count
                       << " " << frame->width << "x" << frame->height
