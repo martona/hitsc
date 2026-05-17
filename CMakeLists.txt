@@ -38,6 +38,7 @@ add_executable(
   src/cli.cpp
   src/console.cpp
   src/cookie_jar.cpp
+  src/diagnostics.cpp
   src/http_client.cpp
   src/kvm_capture.cpp
   src/kvm_capture_decode.cpp
@@ -93,3 +94,7 @@ target_link_libraries(
     SDL3::SDL3
     ZLIB::ZLIB
 )
+
+if(WIN32)
+  target_link_libraries(hitsc PRIVATE Dbghelp)
+endif()

@@ -1,10 +1,14 @@
 #include "kvm_video.hpp"
 
+#include <algorithm>
 #include <cstddef>
 #include <stdexcept>
 
 namespace hitsc {
 namespace {
+
+constexpr std::uint32_t kMaxCompressedFrameSize = 128U * 1024U * 1024U;
+constexpr int kMaxFrameDimension = 8192;
 
 std::uint16_t read_le16(const std::vector<std::uint8_t>& bytes, std::size_t offset)
 {
@@ -48,7 +52,14 @@ std::optional<KvmVideoFrame> KvmVideoAssembler::ingest(const std::vector<std::ui
         current_.rc4_enable = packet_payload[header_base + 53];
         current_.mode420 = packet_payload[header_base + 55];
         current_.compressed_size = read_le32(packet_payload, header_base + 69);
-        current_.compressed.reserve(current_.compressed_size);
+        if (current_.width <= 0 || current_.height <= 0 ||
+            current_.width > kMaxFrameDimension || current_.height > kMaxFrameDimension) {
+            throw std::runtime_error("video packet declared implausible frame dimensions");
+        }
+        if (current_.compressed_size == 0 || current_.compressed_size > kMaxCompressedFrameSize) {
+            throw std::runtime_error("video packet declared implausible compressed size");
+        }
+        current_.compressed.reserve(std::min<std::size_t>(current_.compressed_size, packet_payload.size()));
         append_fragment(packet_payload, 88);
     } else {
         append_fragment(packet_payload, 2);

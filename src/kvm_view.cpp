@@ -2,6 +2,7 @@
 
 #include "app_info.hpp"
 #include "aspeed_decoder.hpp"
+#include "diagnostics.hpp"
 #include "http_client.hpp"
 #include "kvm_video.hpp"
 #include "megarac_session.hpp"
@@ -64,13 +65,16 @@ constexpr std::uint16_t kCmdValidateVideoSession = 18;
 constexpr std::uint16_t kCmdValidatedVideoSession = 19;
 constexpr std::uint16_t kCmdMaxSessionClose = 22;
 constexpr std::uint16_t kCmdStopSessionImmediate = 8;
+constexpr std::uint16_t kCmdPaintBlankScreen = 9;
 constexpr std::uint16_t kCmdGetFullScreen = 11;
 constexpr std::uint16_t kCmdResumeRedirection = 6;
 constexpr std::uint16_t kCmdUsbMouseMode = 10;
 constexpr std::uint16_t kCmdGetKbdLedStatus = 20;
 constexpr std::uint16_t kCmdGetWebToken = 21;
+constexpr std::uint16_t kCmdKvmSharing = 32;
 constexpr std::uint16_t kCmdGetUserMacro = 40;
 constexpr std::uint16_t kCmdSetNextMaster = 50;
+constexpr std::uint16_t kCmdPowerStatus = 34;
 constexpr std::uint16_t kCmdDisplayLockSet = 51;
 constexpr std::uint16_t kCmdDisplayControlStatus = 52;
 constexpr std::uint16_t kCmdMediaLicenseStatus = 53;
@@ -87,6 +91,8 @@ constexpr int kAbsoluteMouseMode = 2;
 constexpr int kRelativeMouseMode = 1;
 constexpr int kOtherMouseMode = 3;
 constexpr int kAbsoluteMouseMax = 32767;
+constexpr std::uint16_t kKvmPrivReqMaster = 1;
+constexpr std::uint16_t kKvmReqAllowed = 0;
 constexpr std::size_t kIusbHeaderSize = 32;
 constexpr std::size_t kIusbHidHeaderSize = 34;
 constexpr std::size_t kUsbMouseAbsReportSize = 6;
@@ -104,6 +110,10 @@ constexpr std::uint8_t kMouseRightButton = 2;
 constexpr std::uint8_t kMouseMiddleButton = 4;
 constexpr std::uint64_t kMouseMotionIntervalMilliseconds = 8;
 constexpr int kMaxSdlEventsPerFrame = 96;
+constexpr int kInitialFramebufferWidth = 800;
+constexpr int kInitialFramebufferHeight = 600;
+constexpr std::uint32_t kMaxKvmPacketPayloadSize = 128U * 1024U * 1024U;
+constexpr auto kBlankRecoveryInterval = std::chrono::seconds(3);
 
 struct KvmConfig {
     std::string client_ip;
@@ -175,6 +185,9 @@ public:
         const auto type = read_le16(data);
         const auto payload_size = read_le32(data + 2);
         const auto status = read_le16(data + 6);
+        if (payload_size > kMaxKvmPacketPayloadSize) {
+            throw std::runtime_error("KVM packet declared implausible payload size");
+        }
         const std::size_t packet_size = header_size + payload_size;
         if (buffer_.size() - offset_ < packet_size) {
             compact_if_needed();
@@ -713,6 +726,8 @@ std::string packet_name(std::uint16_t type)
         return "CMD_RESUME_REDIRECTION";
     case kCmdStopSessionImmediate:
         return "CMD_STOP_SESSION_IMMEDIATE";
+    case kCmdPaintBlankScreen:
+        return "CMD_PAINT_BLANK_SCREEN";
     case kCmdUsbMouseMode:
         return "CMD_USB_MOUSE_MODE";
     case kCmdGetFullScreen:
@@ -731,9 +746,9 @@ std::string packet_name(std::uint16_t type)
         return "CMD_CONNECTION_ALLOWED";
     case kCmdVideoPackets:
         return "CMD_VIDEO_PACKETS";
-    case 32:
+    case kCmdKvmSharing:
         return "CMD_KVM_SHARING";
-    case 34:
+    case kCmdPowerStatus:
         return "CMD_POWER_STATUS";
     case 37:
         return "CMD_SERVICE_INFO";
@@ -774,30 +789,44 @@ std::string packet_name(std::uint16_t type)
     }
 }
 
+std::mutex& log_mutex()
+{
+    static std::mutex mutex;
+    return mutex;
+}
+
+template <typename Writer>
+void write_log_line(std::ostream& output, Writer writer)
+{
+    std::lock_guard lock(log_mutex());
+    writer(output);
+    output << '\n';
+}
+
 void log_packet(int number, const KvmPacket& packet)
 {
-    std::cout << "hitsc: kvm packet #" << number
-              << " type=" << packet.type
-              << " " << packet_name(packet.type)
-              << " status=" << packet.status
-              << " payload=" << packet.payload_size;
+    write_log_line(std::cout, [&](std::ostream& output) {
+        output << "hitsc: kvm packet #" << number
+               << " type=" << packet.type
+               << " " << packet_name(packet.type)
+               << " status=" << packet.status
+               << " payload=" << packet.payload_size;
 
-    if (packet.type == kCmdValidatedVideoSession && !packet.payload.empty()) {
-        std::cout << " validation=" << static_cast<int>(packet.payload[0]);
-    } else if (packet.type == kCmdVideoPackets && packet.payload.size() >= 4) {
-        std::cout << " first-bytes=";
-        const auto preview = std::min<std::size_t>(packet.payload.size(), 8);
-        for (std::size_t i = 0; i < preview; ++i) {
-            if (i != 0) {
-                std::cout << ' ';
+        if (packet.type == kCmdValidatedVideoSession && !packet.payload.empty()) {
+            output << " validation=" << static_cast<int>(packet.payload[0]);
+        } else if (packet.type == kCmdVideoPackets && packet.payload.size() >= 4) {
+            output << " first-bytes=";
+            const auto preview = std::min<std::size_t>(packet.payload.size(), 8);
+            for (std::size_t i = 0; i < preview; ++i) {
+                if (i != 0) {
+                    output << ' ';
+                }
+                output << std::hex << std::setw(2) << std::setfill('0')
+                       << static_cast<int>(packet.payload[i])
+                       << std::dec << std::setfill(' ');
             }
-            std::cout << std::hex << std::setw(2) << std::setfill('0')
-                      << static_cast<int>(packet.payload[i])
-                      << std::dec << std::setfill(' ');
         }
-    }
-
-    std::cout << '\n';
+    });
 }
 
 void log_sent_packet(std::uint16_t type, std::uint16_t status, std::size_t payload_size, bool enabled)
@@ -806,12 +835,13 @@ void log_sent_packet(std::uint16_t type, std::uint16_t status, std::size_t paylo
         return;
     }
 
-    std::cout << "hitsc: sent kvm packet"
-              << " type=" << type
-              << " " << packet_name(type)
-              << " status=" << status
-              << " payload=" << payload_size
-              << '\n';
+    write_log_line(std::cout, [&](std::ostream& output) {
+        output << "hitsc: sent kvm packet"
+               << " type=" << type
+               << " " << packet_name(type)
+               << " status=" << status
+               << " payload=" << payload_size;
+    });
 }
 
 void store_websocket(ViewState& state, std::shared_ptr<KvmWebSocket> ws)
@@ -1116,17 +1146,97 @@ private:
             queue_packet_from_strand(kCmdGetFullScreen, make_simple_packet(kCmdGetFullScreen, 1), false);
             full_screen_requested_ = true;
             std::cout << "hitsc: requested full screen\n";
+        } else if (packet.type == kCmdKvmSharing) {
+            handle_kvm_sharing(packet);
+        } else if (packet.type == kCmdSetNextMaster) {
+            query_power_status("next-master");
         } else if (packet.type == kCmdMaxSessionClose) {
             const std::string reason = max_session_close_reason(packet.status);
             set_status(state_, "session closed: " + reason);
             std::cerr << "hitsc: kvm session closed: " << reason
                       << " status=" << packet.status << '\n';
             close_socket();
+        } else if (packet.type == kCmdPaintBlankScreen) {
+            handle_blank_screen_packet(packet);
+        } else if (packet.type == kCmdPowerStatus) {
+            handle_power_status(packet.status);
         } else if (packet.type == kCmdVideoPackets) {
             handle_video_packet(packet);
         }
 
         send_fps_report_if_due();
+    }
+
+    void handle_kvm_sharing(const KvmPacket& packet)
+    {
+        if ((packet.status & 0xff) != kKvmPrivReqMaster) {
+            return;
+        }
+
+        const auto allowed_status = static_cast<std::uint16_t>(
+            kKvmPrivReqMaster + (kKvmReqAllowed << 8));
+
+        // TODO: prompt before granting KVM sharing once the UI has policy controls.
+        queue_packet_from_strand(
+            kCmdKvmSharing,
+            make_payload_packet(kCmdKvmSharing, allowed_status, packet.payload),
+            false);
+        queue_packet_from_strand(
+            kCmdSetNextMaster,
+            make_payload_packet(kCmdSetNextMaster, allowed_status, packet.payload),
+            false);
+
+        std::cout << "hitsc: granted KVM sharing request"
+                  << " payload=" << packet.payload.size() << '\n';
+    }
+
+    void query_power_status(std::string_view reason)
+    {
+        queue_packet_from_strand(kCmdPowerStatus, make_simple_packet(kCmdPowerStatus), false);
+        if (options_.login.verbose) {
+            std::cout << "hitsc: requested power status"
+                      << " reason=" << reason << '\n';
+        }
+    }
+
+    void request_full_screen_retry(std::string_view reason)
+    {
+        queue_packet_from_strand(kCmdGetFullScreen, make_simple_packet(kCmdGetFullScreen, 1), false);
+        if (options_.login.verbose) {
+            std::cout << "hitsc: requested full screen"
+                      << " reason=" << reason << '\n';
+        }
+    }
+
+    void handle_blank_screen_packet(const KvmPacket& packet)
+    {
+        ++blank_screen_packets_;
+        set_status(state_, "blank screen");
+        if (blank_screen_packets_ == 1) {
+            std::cerr << "hitsc: remote requested blank screen"
+                      << " status=" << packet.status << '\n';
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        if (last_blank_recovery_ != std::chrono::steady_clock::time_point{} &&
+            now - last_blank_recovery_ < kBlankRecoveryInterval) {
+            return;
+        }
+
+        last_blank_recovery_ = now;
+        query_power_status("blank-screen");
+        request_full_screen_retry("blank-screen");
+    }
+
+    void handle_power_status(std::uint16_t status)
+    {
+        power_status_ = static_cast<int>(status);
+        if (options_.login.verbose) {
+            std::cout << "hitsc: power status=" << power_status_ << '\n';
+        }
+        if (blank_screen_packets_ > 0 && status == 1) {
+            request_full_screen_retry("power-on-after-blank");
+        }
     }
 
     void handle_video_packet(const KvmPacket& packet)
@@ -1156,6 +1266,7 @@ private:
 
         ++frames_received_since_report_;
         fps_reporting_started_ = true;
+        blank_screen_packets_ = 0;
         const AspeedDecodeOptions decode_options{
             frame->width,
             frame->height,
@@ -1260,6 +1371,18 @@ private:
         start_write();
     }
 
+    void discard_queued_packets_preserving_active_write()
+    {
+        if (writing_ && !outgoing_packets_.empty()) {
+            auto keep_current = outgoing_packets_.begin();
+            ++keep_current;
+            outgoing_packets_.erase(keep_current, outgoing_packets_.end());
+            return;
+        }
+
+        outgoing_packets_.clear();
+    }
+
     void start_write()
     {
         if (closed_ || writing_ || outgoing_packets_.empty()) {
@@ -1331,7 +1454,7 @@ private:
     void fail_with_exception(const std::exception& ex)
     {
         set_status(state_, std::string("error: ") + ex.what());
-        std::cerr << "hitsc: kvm view error: " << ex.what() << '\n';
+        print_exception_with_stack(std::cerr, ex, "kvm websocket handler");
         close_socket();
     }
 
@@ -1343,7 +1466,7 @@ private:
 
         closed_ = true;
         clear_network_callbacks(state_);
-        outgoing_packets_.clear();
+        discard_queued_packets_preserving_active_write();
         beast::error_code error;
         beast::get_lowest_layer(*ws_).socket().shutdown(tcp::socket::shutdown_both, error);
         error.clear();
@@ -1370,6 +1493,8 @@ private:
     int packets_seen_ = 0;
     int video_packets_seen_ = 0;
     int frames_seen_ = 0;
+    int blank_screen_packets_ = 0;
+    int power_status_ = -1;
     bool validation_sent_ = false;
     bool full_screen_requested_ = false;
     bool fps_reporting_started_ = false;
@@ -1379,6 +1504,7 @@ private:
     int frames_received_since_report_ = 0;
     int frames_processed_since_report_ = 0;
     std::chrono::steady_clock::time_point last_fps_report_ = std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point last_blank_recovery_;
 };
 
 void network_thread_main(const KvmViewOptions& options, ViewState& state, const std::atomic_bool& stop_requested)
@@ -1475,7 +1601,7 @@ void network_thread_main(const KvmViewOptions& options, ViewState& state, const 
         io.run();
     } catch (const std::exception& ex) {
         set_status(state, std::string("error: ") + ex.what());
-        std::cerr << "hitsc: kvm view error: " << ex.what() << '\n';
+        print_exception_with_stack(std::cerr, ex, "kvm network thread");
     }
 
     clear_network_callbacks(state);
@@ -1574,13 +1700,14 @@ void send_mouse_report(
     const bool coalesce = buttons == 0 && wheel == 0;
     const bool accepted = queue_outgoing_packet(state, kCmdSendHidPacket, std::move(packet), coalesce);
     if (verbose && accepted) {
-        std::cout << "hitsc: queued mouse"
-                  << " mode=" << mouse_mode
-                  << " buttons=" << static_cast<int>(buttons)
-                  << " x=" << position.x
-                  << " y=" << position.y
-                  << " wheel=" << wheel
-                  << '\n';
+        write_log_line(std::cout, [&](std::ostream& output) {
+            output << "hitsc: queued mouse"
+                   << " mode=" << mouse_mode
+                   << " buttons=" << static_cast<int>(buttons)
+                   << " x=" << position.x
+                   << " y=" << position.y
+                   << " wheel=" << wheel;
+        });
     }
 }
 
@@ -1646,8 +1773,8 @@ void run_kvm_view(const KvmViewOptions& options)
         std::uint64_t last_sequence = 0;
         std::uint64_t last_status_tick = 0;
         int presented_frames = 0;
-        int texture_width = 0;
-        int texture_height = 0;
+        int texture_width = kInitialFramebufferWidth;
+        int texture_height = kInitialFramebufferHeight;
         std::uint8_t mouse_buttons = 0;
         std::uint32_t mouse_sequence = 0;
         std::uint64_t last_mouse_motion_ticks = 0;
@@ -1825,6 +1952,7 @@ void run_kvm_view(const KvmViewOptions& options)
             SDL_Delay(16);
         }
     } catch (...) {
+        print_current_exception_with_stack(std::cerr, "kvm view ui thread");
         stop_network_thread(*state, *stop_requested, network_thread, *network_done);
         if (texture != nullptr) {
             SDL_DestroyTexture(texture);

@@ -152,6 +152,8 @@ std::string packet_name(std::uint16_t type)
         return "CMD_RESUME_REDIRECTION";
     case 8:
         return "CMD_STOP_SESSION_IMMEDIATE";
+    case 9:
+        return "CMD_PAINT_BLANK_SCREEN";
     case kCmdGetFullScreen:
         return "CMD_GET_FULL_SCREEN";
     case kCmdValidateVideoSession:
