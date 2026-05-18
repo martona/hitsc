@@ -21,6 +21,7 @@ extern "C" {
 #include <cctype>
 #include <cstring>
 #include <memory>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -31,6 +32,43 @@ namespace asio = boost::asio;
 namespace beast = boost::beast;
 namespace json = boost::json;
 namespace websocket = boost::beast::websocket;
+
+const char* pikvm_video_pixel_format_name(PikvmVideoPixelFormat format)
+{
+    switch (format) {
+    case PikvmVideoPixelFormat::rgba32:
+        return "rgba32";
+    case PikvmVideoPixelFormat::i420:
+        return "i420";
+    case PikvmVideoPixelFormat::nv12:
+        return "nv12";
+    }
+    return "unknown";
+}
+
+std::size_t pikvm_video_frame_payload_bytes(const PikvmVideoFrame& frame)
+{
+    const auto plane_bytes = [](const std::uint8_t* data, int pitch, int rows) -> std::size_t {
+        if (data == nullptr || pitch <= 0 || rows <= 0) {
+            return 0;
+        }
+        return static_cast<std::size_t>(pitch) * static_cast<std::size_t>(rows);
+    };
+
+    const int chroma_height = (frame.height + 1) / 2;
+    switch (frame.format) {
+    case PikvmVideoPixelFormat::rgba32:
+        return frame.rgba.size();
+    case PikvmVideoPixelFormat::i420:
+        return plane_bytes(frame.planes[0], frame.pitches[0], frame.height)
+             + plane_bytes(frame.planes[1], frame.pitches[1], chroma_height)
+             + plane_bytes(frame.planes[2], frame.pitches[2], chroma_height);
+    case PikvmVideoPixelFormat::nv12:
+        return plane_bytes(frame.planes[0], frame.pitches[0], frame.height)
+             + plane_bytes(frame.planes[1], frame.pitches[1], chroma_height);
+    }
+    return 0;
+}
 
 namespace {
 
@@ -223,7 +261,7 @@ struct PikvmH264Decoder::Impl {
         }
     }
 
-    std::vector<PikvmVideoFrame> ingest(const std::vector<std::uint8_t>& bytes)
+    std::vector<PikvmVideoFrame> ingest(std::span<const std::uint8_t> bytes)
     {
         std::vector<PikvmVideoFrame> frames;
         const std::uint8_t* data = bytes.data();
@@ -293,27 +331,81 @@ struct PikvmH264Decoder::Impl {
                 throw ffmpeg_error(result, "failed to receive decoded H.264 frame");
             }
 
-            frames.push_back(convert_frame());
+            frames.push_back(make_output_frame());
             ++frames_decoded;
             if (verbose && (frames_decoded <= 12 || frames_decoded % 120 == 0)) {
                 const PikvmVideoFrame& decoded = frames.back();
                 log_info() << "ffmpeg decoded H.264 frame"
                            << " frame=" << frames_decoded
                            << " size=" << decoded.width << 'x' << decoded.height
-                           << " format=" << frame->format
-                           << " rgba-bytes=" << decoded.rgba.size();
+                           << " source-format=" << frame->format
+                           << " output-format=" << pikvm_video_pixel_format_name(decoded.format)
+                           << " payload-bytes=" << pikvm_video_frame_payload_bytes(decoded);
             }
             av_frame_unref(frame);
         }
     }
 
-    PikvmVideoFrame convert_frame()
+    PikvmVideoFrame make_output_frame()
     {
         if (frame->width <= 0 || frame->height <= 0) {
             throw std::runtime_error("decoded H.264 frame has invalid dimensions");
         }
 
         const auto source_format = static_cast<AVPixelFormat>(frame->format);
+        switch (source_format) {
+        case AV_PIX_FMT_YUV420P:
+        case AV_PIX_FMT_YUVJ420P:
+            if (has_positive_planes(3)) {
+                return reference_decoded_frame(PikvmVideoPixelFormat::i420);
+            }
+            break;
+        case AV_PIX_FMT_NV12:
+            if (has_positive_planes(2)) {
+                return reference_decoded_frame(PikvmVideoPixelFormat::nv12);
+            }
+            break;
+        default:
+            break;
+        }
+
+        return convert_frame_to_rgba(source_format);
+    }
+
+    bool has_positive_planes(int count) const
+    {
+        for (int i = 0; i < count; ++i) {
+            if (frame->data[i] == nullptr || frame->linesize[i] <= 0) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    PikvmVideoFrame reference_decoded_frame(PikvmVideoPixelFormat format)
+    {
+        AVFrame* cloned = av_frame_clone(frame);
+        if (cloned == nullptr) {
+            throw std::runtime_error("failed to reference decoded FFmpeg frame");
+        }
+
+        PikvmVideoFrame output;
+        output.width = cloned->width;
+        output.height = cloned->height;
+        output.format = format;
+        for (std::size_t i = 0; i < output.planes.size(); ++i) {
+            output.planes[i] = cloned->data[i];
+            output.pitches[i] = cloned->linesize[i];
+        }
+        output.owner = std::shared_ptr<void>(cloned, [](void* pointer) {
+            AVFrame* frame = static_cast<AVFrame*>(pointer);
+            av_frame_free(&frame);
+        });
+        return output;
+    }
+
+    PikvmVideoFrame convert_frame_to_rgba(AVPixelFormat source_format)
+    {
         sws = sws_getCachedContext(
             sws,
             frame->width,
@@ -333,9 +425,12 @@ struct PikvmH264Decoder::Impl {
         PikvmVideoFrame output;
         output.width = frame->width;
         output.height = frame->height;
+        output.format = PikvmVideoPixelFormat::rgba32;
         output.rgba.assign(
             static_cast<std::size_t>(output.width) * static_cast<std::size_t>(output.height) * 4U,
             0);
+        output.planes[0] = output.rgba.data();
+        output.pitches[0] = output.width * 4;
 
         std::uint8_t* destination_data[4] = {output.rgba.data(), nullptr, nullptr, nullptr};
         int destination_linesize[4] = {output.width * 4, 0, 0, 0};
@@ -366,7 +461,7 @@ PikvmH264Decoder::PikvmH264Decoder()
 
 PikvmH264Decoder::~PikvmH264Decoder() = default;
 
-std::vector<PikvmVideoFrame> PikvmH264Decoder::ingest(const std::vector<std::uint8_t>& bytes)
+std::vector<PikvmVideoFrame> PikvmH264Decoder::ingest(std::span<const std::uint8_t> bytes)
 {
     return impl_->ingest(bytes);
 }
@@ -554,7 +649,7 @@ private:
         }
 
         const bool key = bytes[1] != 0;
-        std::vector<std::uint8_t> payload(bytes.begin() + 2, bytes.end());
+        const std::span<const std::uint8_t> payload(bytes.data() + 2, bytes.size() - 2);
         ++messages_seen_;
         if (options_.login.verbose && (messages_seen_ <= 12 || messages_seen_ % 120 == 0)) {
             log_info() << "pikvm video websocket frame"
@@ -575,7 +670,8 @@ private:
             log_info() << "published PiKVM frame"
                        << " count=" << frames_decoded_
                        << " size=" << frame.width << 'x' << frame.height
-                       << " rgba-bytes=" << frame.rgba.size();
+                       << " format=" << pikvm_video_pixel_format_name(frame.format)
+                       << " payload-bytes=" << pikvm_video_frame_payload_bytes(frame);
         }
     }
 

@@ -69,21 +69,52 @@ SDL_FRect current_target_rect(SDL_Window* window, int frame_width, int frame_hei
     return centered_target_rect(window_width, window_height, frame_width, frame_height);
 }
 
-int sampled_average_rgb(const std::vector<std::uint8_t>& rgba)
+SDL_PixelFormat sdl_pixel_format_for_frame(PikvmVideoPixelFormat format)
 {
-    if (rgba.empty()) {
-        return 0;
+    switch (format) {
+    case PikvmVideoPixelFormat::rgba32:
+        return SDL_PIXELFORMAT_RGBA32;
+    case PikvmVideoPixelFormat::i420:
+        return SDL_PIXELFORMAT_IYUV;
+    case PikvmVideoPixelFormat::nv12:
+        return SDL_PIXELFORMAT_NV12;
     }
+    return SDL_PIXELFORMAT_RGBA32;
+}
 
-    std::uint64_t total = 0;
-    std::uint64_t samples = 0;
-    constexpr std::size_t stride_pixels = 257;
-    for (std::size_t pixel = 0; pixel * 4 + 2 < rgba.size(); pixel += stride_pixels) {
-        const std::size_t offset = pixel * 4;
-        total += rgba[offset] + rgba[offset + 1] + rgba[offset + 2];
-        ++samples;
+void update_pikvm_texture(SDL_Texture* texture, const PikvmVideoFrame& frame)
+{
+    switch (frame.format) {
+    case PikvmVideoPixelFormat::rgba32:
+        if (!SDL_UpdateTexture(texture, nullptr, frame.rgba.data(), frame.width * 4)) {
+            throw_sdl_error("SDL_UpdateTexture");
+        }
+        return;
+    case PikvmVideoPixelFormat::i420:
+        if (!SDL_UpdateYUVTexture(
+                texture,
+                nullptr,
+                frame.planes[0],
+                frame.pitches[0],
+                frame.planes[1],
+                frame.pitches[1],
+                frame.planes[2],
+                frame.pitches[2])) {
+            throw_sdl_error("SDL_UpdateYUVTexture");
+        }
+        return;
+    case PikvmVideoPixelFormat::nv12:
+        if (!SDL_UpdateNVTexture(
+                texture,
+                nullptr,
+                frame.planes[0],
+                frame.pitches[0],
+                frame.planes[1],
+                frame.pitches[1])) {
+            throw_sdl_error("SDL_UpdateNVTexture");
+        }
+        return;
     }
-    return samples == 0 ? 0 : static_cast<int>(total / (samples * 3));
 }
 
 void set_pikvm_status(PikvmViewState& state, std::string status)
@@ -297,6 +328,7 @@ void run_pikvm_view(const PikvmViewOptions& options)
         std::uint64_t last_status_tick = 0;
         int texture_width = 0;
         int texture_height = 0;
+        PikvmVideoPixelFormat texture_format = PikvmVideoPixelFormat::rgba32;
         int presented_frames = 0;
 
         while (running) {
@@ -324,13 +356,16 @@ void run_pikvm_view(const PikvmViewOptions& options)
                 take_latest_pikvm_frame(*state, last_sequence);
             if (frame) {
                 last_sequence = frame->sequence;
-                if (texture == nullptr || texture_width != frame->width || texture_height != frame->height) {
+                if (texture == nullptr
+                    || texture_width != frame->width
+                    || texture_height != frame->height
+                    || texture_format != frame->format) {
                     if (texture != nullptr) {
                         SDL_DestroyTexture(texture);
                     }
                     texture = SDL_CreateTexture(
                         renderer,
-                        SDL_PIXELFORMAT_RGBA32,
+                        sdl_pixel_format_for_frame(frame->format),
                         SDL_TEXTUREACCESS_STREAMING,
                         frame->width,
                         frame->height);
@@ -339,6 +374,7 @@ void run_pikvm_view(const PikvmViewOptions& options)
                     }
                     texture_width = frame->width;
                     texture_height = frame->height;
+                    texture_format = frame->format;
                     SDL_SetWindowTitle(
                         window,
                         ("hitsc - PiKVM - " + options.login.base_url.host + " - "
@@ -346,15 +382,13 @@ void run_pikvm_view(const PikvmViewOptions& options)
                             .c_str());
                 }
 
-                if (!SDL_UpdateTexture(texture, nullptr, frame->rgba.data(), frame->width * 4)) {
-                    throw_sdl_error("SDL_UpdateTexture");
-                }
+                update_pikvm_texture(texture, *frame);
 
                 ++presented_frames;
                 if (options.login.verbose && (presented_frames <= 20 || presented_frames % 60 == 0)) {
                     log_info() << "presented PiKVM frame #" << presented_frames
                                << " sequence=" << frame->sequence
-                               << " avg-rgb=" << sampled_average_rgb(frame->rgba);
+                               << " format=" << pikvm_video_pixel_format_name(frame->format);
                 }
                 render_needed = true;
             }
