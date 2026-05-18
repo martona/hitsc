@@ -38,6 +38,7 @@
 #include <optional>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <sstream>
 #include <stdexcept>
@@ -97,6 +98,16 @@ struct AtenViewFrame {
     std::vector<std::uint8_t> rgba;
 };
 
+struct AtenCursorImage {
+    int x = 0;
+    int y = 0;
+    int width = 0;
+    int height = 0;
+    bool visible = false;
+    std::uint64_t sequence = 0;
+    std::vector<std::uint8_t> rgba;
+};
+
 struct AtenRemoteMousePosition {
     int x = 0;
     int y = 0;
@@ -113,9 +124,12 @@ struct AtenQueuedWrite {
 
 struct AtenViewState {
     std::mutex frame_mutex;
+    std::mutex cursor_mutex;
     std::mutex control_mutex;
     std::shared_ptr<const AtenViewFrame> frame;
+    std::shared_ptr<const AtenCursorImage> cursor;
     std::uint64_t frame_sequence = 0;
+    std::uint64_t cursor_sequence = 0;
     std::string status = "starting";
     std::exception_ptr exception;
     std::function<void()> force_close;
@@ -259,11 +273,61 @@ int sampled_average_rgb(const std::vector<std::uint8_t>& rgba)
     return samples == 0 ? 0 : static_cast<int>(total / (samples * 3));
 }
 
+AtenCursorImage make_aten_cursor_image(
+    std::uint32_t remote_x,
+    std::uint32_t remote_y,
+    std::uint32_t remote_width,
+    std::uint32_t remote_height,
+    const std::vector<std::uint8_t>& pattern)
+{
+    if (remote_width > static_cast<std::uint32_t>(std::numeric_limits<int>::max()) ||
+        remote_height > static_cast<std::uint32_t>(std::numeric_limits<int>::max()) ||
+        remote_x > static_cast<std::uint32_t>(std::numeric_limits<int>::max()) ||
+        remote_y > static_cast<std::uint32_t>(std::numeric_limits<int>::max())) {
+        throw std::runtime_error("ATEN cursor dimensions are too large");
+    }
+
+    AtenCursorImage cursor;
+    cursor.x = static_cast<int>(remote_x);
+    cursor.y = static_cast<int>(remote_y);
+    cursor.width = static_cast<int>(remote_width);
+    cursor.height = static_cast<int>(remote_height);
+    cursor.visible = cursor.width > 0 && cursor.height > 0;
+    cursor.rgba.assign(
+        static_cast<std::size_t>(cursor.width) * static_cast<std::size_t>(cursor.height) * 4U,
+        0);
+
+    const std::size_t pixel_count =
+        static_cast<std::size_t>(cursor.width) * static_cast<std::size_t>(cursor.height);
+    if (pattern.size() < pixel_count * 2U) {
+        throw std::runtime_error("ATEN cursor pattern is truncated");
+    }
+
+    for (std::size_t pixel = 0; pixel < pixel_count; ++pixel) {
+        const std::uint8_t first = pattern[pixel * 2U];
+        const std::uint8_t second = pattern[pixel * 2U + 1U];
+        const std::size_t output = pixel * 4U;
+        cursor.rgba[output + 0] = static_cast<std::uint8_t>((second & 0x0fU) << 4U);
+        cursor.rgba[output + 1] = static_cast<std::uint8_t>(first & 0xf0U);
+        cursor.rgba[output + 2] = static_cast<std::uint8_t>((first & 0x0fU) << 4U);
+        cursor.rgba[output + 3] = (first != 0 || (second & 0x0fU) != 0) ? 255U : 0U;
+    }
+
+    return cursor;
+}
+
 void store_aten_frame(AtenViewState& state, AtenViewFrame frame)
 {
     std::lock_guard lock(state.frame_mutex);
     frame.sequence = ++state.frame_sequence;
     state.frame = std::make_shared<AtenViewFrame>(std::move(frame));
+}
+
+void store_aten_cursor(AtenViewState& state, AtenCursorImage cursor)
+{
+    std::lock_guard lock(state.cursor_mutex);
+    cursor.sequence = ++state.cursor_sequence;
+    state.cursor = std::make_shared<AtenCursorImage>(std::move(cursor));
 }
 
 std::shared_ptr<const AtenViewFrame> take_latest_aten_frame(
@@ -275,6 +339,17 @@ std::shared_ptr<const AtenViewFrame> take_latest_aten_frame(
         return {};
     }
     return state.frame;
+}
+
+std::shared_ptr<const AtenCursorImage> take_latest_aten_cursor(
+    AtenViewState& state,
+    std::uint64_t last_sequence)
+{
+    std::lock_guard lock(state.cursor_mutex);
+    if (!state.cursor || state.cursor->sequence == last_sequence) {
+        return {};
+    }
+    return state.cursor;
 }
 
 void set_aten_status(AtenViewState& state, std::string status)
@@ -330,6 +405,20 @@ std::vector<std::uint8_t> make_aten_pointer_event(int x, int y, std::uint8_t mas
     append_be16(packet, static_cast<std::uint16_t>(std::clamp(x, 0, 65535)));
     append_be16(packet, static_cast<std::uint16_t>(std::clamp(y, 0, 65535)));
     packet.insert(packet.end(), 11, 0);
+    return packet;
+}
+
+std::vector<std::uint8_t> make_aten_cursor_position_request()
+{
+    return std::vector<std::uint8_t>{25};
+}
+
+std::vector<std::uint8_t> make_aten_mouse_sync_request()
+{
+    std::vector<std::uint8_t> packet;
+    packet.reserve(3);
+    packet.push_back(7);
+    append_be16(packet, 1920);
     return packet;
 }
 
@@ -1510,6 +1599,11 @@ private:
                 std::cout << '\n';
             }
 
+            // TODO: ATEN cursor replay is disabled until it can be matched to the vendor JS exactly.
+            // if (rect.encoding == 87) {
+            //     observe_cursor_mode(rect.mode);
+            // }
+
             if (rect.encoding != 87 || payload.empty()) {
                 continue;
             }
@@ -1532,6 +1626,13 @@ private:
     void decode_ast_rect(const AtenFramebufferRect& rect, const std::vector<std::uint8_t>& payload)
     {
         const AtenAstPayloadHeader ast = read_ast_payload_header(payload);
+        // TODO: ATEN cursor/mouse side-channel replay is disabled until it can be matched
+        // to the vendor JS exactly.
+        // if ((previous_width_ != rect.width || previous_height_ != rect.height) &&
+        //     rect.width > 0 && rect.height > 0) {
+        //     queue_mouse_sync_request();
+        // }
+
         if (ast_payload_is_frame_end_only(payload)) {
             previous_width_ = rect.width;
             previous_height_ = rect.height;
@@ -1591,6 +1692,24 @@ private:
         }
     }
 
+    void observe_cursor_mode(std::int32_t mode)
+    {
+        (void)mode;
+        // TODO: ATEN cursor replay is disabled until it can be matched to the vendor JS exactly.
+#if 0
+        if (!cursor_mode_initialized_ || cursor_mode_ != mode) {
+            cursor_mode_initialized_ = true;
+            cursor_mode_ = mode;
+            cursor_position_request_needed_ = true;
+            if (mode == 0) {
+                AtenCursorImage cursor;
+                cursor.visible = false;
+                store_aten_cursor(state_, std::move(cursor));
+            }
+        }
+#endif
+    }
+
     void handle_cursor_position()
     {
         const std::uint32_t x = read_be32();
@@ -1598,19 +1717,30 @@ private:
         const std::uint32_t width = read_be32();
         const std::uint32_t height = read_be32();
         const std::uint32_t valid = read_be32();
-        std::cout << log_prefix() << "aten rfb cursor"
-                  << " xy=" << x << ',' << y
-                  << " size=" << width << 'x' << height
-                  << " valid=" << valid << '\n';
+        cursor_position_request_pending_ = false;
 
+        std::uint32_t pattern_type = 0;
+        std::uint64_t pattern_size = 0;
         if (valid == 1) {
-            read_be32();
-            const std::uint64_t pattern_size =
+            pattern_type = read_be32();
+            pattern_size =
                 static_cast<std::uint64_t>(width) * static_cast<std::uint64_t>(height) * 2U;
             if (pattern_size > 16U * 1024U * 1024U) {
                 throw std::runtime_error("ATEN RFB cursor pattern is implausibly large");
             }
             discard(static_cast<std::size_t>(pattern_size));
+        }
+
+        if (options_.login.verbose) {
+            std::cout << log_prefix() << "ignored ATEN cursor"
+                      << " xy=" << x << ',' << y
+                      << " size=" << width << 'x' << height
+                      << " valid=" << valid;
+            if (valid == 1) {
+                std::cout << " pattern-type=" << pattern_type
+                          << " pattern-bytes=" << pattern_size;
+            }
+            std::cout << '\n';
         }
     }
 
@@ -1721,6 +1851,8 @@ private:
                 }
 
                 self->queue_framebuffer_update_request(true);
+                // TODO: ATEN cursor replay is disabled until it can be matched to the vendor JS exactly.
+                // self->queue_cursor_position_request_if_needed();
             }));
     }
 
@@ -1736,6 +1868,35 @@ private:
             previous_height_ > 0 ? previous_height_ : init_.height);
         framebuffer_request_pending_ = true;
         send_packet(make_framebuffer_update_request(request_width, request_height, incremental), false);
+    }
+
+    void queue_cursor_position_request_if_needed()
+    {
+        if (!cursor_position_request_needed_) {
+            return;
+        }
+
+        cursor_position_request_needed_ = false;
+        queue_cursor_position_request();
+    }
+
+    void queue_cursor_position_request()
+    {
+        if (closed_ || stop_requested_.load() || cursor_position_request_pending_) {
+            return;
+        }
+
+        cursor_position_request_pending_ = true;
+        send_packet(make_aten_cursor_position_request(), false);
+    }
+
+    void queue_mouse_sync_request()
+    {
+        if (closed_ || stop_requested_.load()) {
+            return;
+        }
+
+        send_packet(make_aten_mouse_sync_request(), false);
     }
 
     void send_packet(std::vector<std::uint8_t> packet, bool coalesce_mouse_motion)
@@ -1777,8 +1938,12 @@ private:
     int previous_width_ = 0;
     int previous_height_ = 0;
     int updates_ = 0;
+    std::int32_t cursor_mode_ = 0;
     bool framebuffer_request_pending_ = false;
     bool framebuffer_request_timer_active_ = false;
+    bool cursor_mode_initialized_ = false;
+    bool cursor_position_request_needed_ = false;
+    bool cursor_position_request_pending_ = false;
     bool receive_parse_posted_ = false;
     bool closed_ = false;
 };
@@ -2274,6 +2439,7 @@ void run_aten_view(const AtenViewOptions& options)
     SDL_Window* window = nullptr;
     SDL_Renderer* renderer = nullptr;
     SDL_Texture* texture = nullptr;
+    SDL_Texture* cursor_texture = nullptr;
     auto state = std::make_shared<AtenViewState>();
     auto stop_requested = std::make_shared<std::atomic_bool>(false);
     auto network_done = std::make_shared<std::atomic_bool>(false);
@@ -2303,9 +2469,13 @@ void run_aten_view(const AtenViewOptions& options)
 
         bool running = true;
         std::uint64_t last_sequence = 0;
+        std::uint64_t last_cursor_sequence = 0;
         std::uint64_t last_status_tick = 0;
         int texture_width = 0;
         int texture_height = 0;
+        int cursor_texture_width = 0;
+        int cursor_texture_height = 0;
+        std::shared_ptr<const AtenCursorImage> current_cursor;
         int presented_frames = 0;
         std::uint8_t mouse_buttons = 0;
         std::uint64_t last_mouse_motion_ticks = 0;
@@ -2465,12 +2635,61 @@ void run_aten_view(const AtenViewOptions& options)
                 render_needed = true;
             }
 
+            const std::shared_ptr<const AtenCursorImage> cursor =
+                take_latest_aten_cursor(*state, last_cursor_sequence);
+            if (cursor) {
+                last_cursor_sequence = cursor->sequence;
+                current_cursor = cursor;
+                if (!cursor->visible || cursor->width <= 0 || cursor->height <= 0) {
+                    if (cursor_texture != nullptr) {
+                        SDL_DestroyTexture(cursor_texture);
+                        cursor_texture = nullptr;
+                    }
+                    cursor_texture_width = 0;
+                    cursor_texture_height = 0;
+                } else {
+                    if (cursor_texture == nullptr ||
+                        cursor_texture_width != cursor->width ||
+                        cursor_texture_height != cursor->height) {
+                        if (cursor_texture != nullptr) {
+                            SDL_DestroyTexture(cursor_texture);
+                        }
+                        cursor_texture = SDL_CreateTexture(
+                            renderer,
+                            SDL_PIXELFORMAT_RGBA32,
+                            SDL_TEXTUREACCESS_STREAMING,
+                            cursor->width,
+                            cursor->height);
+                        if (cursor_texture == nullptr) {
+                            throw_sdl_error("SDL_CreateTexture(cursor)");
+                        }
+                        SDL_SetTextureBlendMode(cursor_texture, SDL_BLENDMODE_BLEND);
+                        cursor_texture_width = cursor->width;
+                        cursor_texture_height = cursor->height;
+                    }
+                    if (!SDL_UpdateTexture(cursor_texture, nullptr, cursor->rgba.data(), cursor->width * 4)) {
+                        throw_sdl_error("SDL_UpdateTexture(cursor)");
+                    }
+                }
+                render_needed = true;
+            }
+
             if (render_needed) {
                 SDL_SetRenderDrawColor(renderer, 12, 14, 18, 255);
                 SDL_RenderClear(renderer);
                 if (texture != nullptr && texture_width > 0 && texture_height > 0) {
                     const SDL_FRect target = current_target_rect(window, texture_width, texture_height);
                     SDL_RenderTexture(renderer, texture, nullptr, &target);
+                    if (cursor_texture != nullptr && current_cursor && current_cursor->visible) {
+                        const float scale_x = target.w / static_cast<float>(texture_width);
+                        const float scale_y = target.h / static_cast<float>(texture_height);
+                        SDL_FRect cursor_target{};
+                        cursor_target.x = target.x + static_cast<float>(current_cursor->x) * scale_x;
+                        cursor_target.y = target.y + static_cast<float>(current_cursor->y) * scale_y;
+                        cursor_target.w = static_cast<float>(cursor_texture_width) * scale_x;
+                        cursor_target.h = static_cast<float>(cursor_texture_height) * scale_y;
+                        SDL_RenderTexture(renderer, cursor_texture, nullptr, &cursor_target);
+                    }
                 }
                 SDL_RenderPresent(renderer);
                 first_render = false;
@@ -2494,6 +2713,9 @@ void run_aten_view(const AtenViewOptions& options)
     } catch (...) {
         print_current_exception_with_stack(std::cerr, "aten view ui thread");
         stop_aten_network(*state, *stop_requested, network_thread);
+        if (cursor_texture != nullptr) {
+            SDL_DestroyTexture(cursor_texture);
+        }
         if (texture != nullptr) {
             SDL_DestroyTexture(texture);
         }
@@ -2511,6 +2733,9 @@ void run_aten_view(const AtenViewOptions& options)
 
     if (texture != nullptr) {
         SDL_DestroyTexture(texture);
+    }
+    if (cursor_texture != nullptr) {
+        SDL_DestroyTexture(cursor_texture);
     }
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
