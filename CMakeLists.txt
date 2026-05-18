@@ -62,6 +62,8 @@ add_executable(
   src/megarac_protocol.cpp
   src/megarac_video.cpp
   src/megarac_session.cpp
+  src/pikvm_events.cpp
+  src/pikvm_session.cpp
   src/text.cpp
   src/tls.cpp
   src/trace.cpp
@@ -119,4 +121,3 @@ target_link_libraries(
 if(WIN32)
   target_link_libraries(hitsc PRIVATE Dbghelp)
 endif()
-

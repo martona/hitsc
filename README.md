@@ -4,7 +4,7 @@
 
 It's a fast, small, and efficient utility to provide a secure iKVM interface to IPMI targets without wading through vendor-specific web interfaces with their subpar-to-downright-hostile UX. The **Terminal Services Client** part is an homage to `mstsc.exe`.
 
-The two supported vendors are **MegaRAC** (ASRockRack and ASUS, works well) and **ATEN** (Supermicro, passable, see notes.) 
+The two supported vendors are **MegaRAC** (ASRockRack and ASUS, works well) and **ATEN** (Supermicro, passable, see notes.) There is also an experimental **PiKVM** event WebSocket probe.
 
 The goal is narrow: speak HTTPS, verify TLS certificates, authenticate through the BMC web session, establish a secure `wss://` tunnel, then provide a clean and consistent UX for iKVM interaction through it.
 
@@ -16,6 +16,7 @@ Supported today:
 
 - iKVM with basic keyboard and mouse input
 - MegaRAC and ATEN
+- PiKVM authentication and one-event WebSocket probe
 - Console interface to provide target information and options
 - Windows only for now
 
@@ -57,6 +58,12 @@ Open an ATEN/Supermicro iKVM session:
 .\build\windows-debug\hitsc.exe aten -u USERNAME https://bmc.example.com
 ```
 
+Open a PiKVM event WebSocket and read one event:
+
+```powershell
+.\build\windows-debug\hitsc.exe pikvm -u USERNAME https://pikvm.example.com
+```
+
 Common viewer options:
 
 - `-u, --username TEXT`: username for the BMC web login.
@@ -78,6 +85,7 @@ Use `--help` to inspect the command line:
 .\build\windows-debug\hitsc.exe --help
 .\build\windows-debug\hitsc.exe megarac --help
 .\build\windows-debug\hitsc.exe aten --help
+.\build\windows-debug\hitsc.exe pikvm --help
 ```
 
 ## Security and Credentials
@@ -108,6 +116,10 @@ The reason I'm so salty about this protocol is that screen updates are based on 
 
 So it works, but it's not great, and it likely won't ever be.
 
+### PiKVM
+
+The current PiKVM support is an intentionally small probe: it authenticates with the documented `/api/auth/login` form endpoint, opens `/api/ws?stream=0`, reads one JSON event, prints a concise summary, then logs out. It does not render video or send input yet.
+
 ## License and Third-party Code
 
 `hitsc` is MIT licensed; see [LICENSE.md](LICENSE.md).
@@ -122,7 +134,7 @@ This is a work in progress, the current stage not being much more than a sign of
 
 - Add Linux and macOS support.
 - Add TLS certificate pinning.
-- Add PiKVM support
+- Expand PiKVM support beyond the first event WebSocket probe
 - Add Apple RDP support (yeah it's not IPMI but it's a pain point for me)
 - Add UI for connection establishment, making CLI optional
 - Add secure credential store (win32 CryptoAPI, macOS keychain, ...)

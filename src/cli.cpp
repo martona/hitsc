@@ -5,6 +5,7 @@
 #include "console.hpp"
 #include "megarac_view.hpp"
 #include "options.hpp"
+#include "pikvm_events.hpp"
 #include "text.hpp"
 #include "url.hpp"
 
@@ -105,6 +106,18 @@ int run_cli(int argc, char* argv[])
     aten->add_flag("--exclusive", aten_exclusive, "Request an exclusive RFB session.");
     aten->add_option("url", aten_url, "https://host[:port]")->required();
 
+    PikvmProbeOptions pikvm_options;
+    std::string pikvm_url;
+    std::string pikvm_password_env_name;
+    CLI::App* pikvm =
+        app.add_subcommand("pikvm", "Open a PiKVM event WebSocket and read one event.");
+    configure_view_options(
+        *pikvm,
+        pikvm_options.login,
+        pikvm_options.idle_timeout_seconds,
+        pikvm_password_env_name);
+    pikvm->add_option("url", pikvm_url, "https://host[:port]")->required();
+
     if (argc == 1) {
         std::cout << app.help();
         return EXIT_SUCCESS;
@@ -112,7 +125,11 @@ int run_cli(int argc, char* argv[])
 
     if (argc > 1) {
         const std::string command = argv[1];
-        if (!command.empty() && command.front() != '-' && command != "megarac" && command != "aten") {
+        if (!command.empty()
+            && command.front() != '-'
+            && command != "megarac"
+            && command != "aten"
+            && command != "pikvm") {
             std::cerr << "Unknown subcommand: " << command << "\n";
             std::cerr << "Run with --help for more information.\n";
             return EXIT_FAILURE;
@@ -141,6 +158,15 @@ int run_cli(int argc, char* argv[])
         fill_default_credentials(aten_options.login, aten_password_env_name);
 
         run_aten_view(aten_options);
+        return EXIT_SUCCESS;
+    }
+
+    if (*pikvm) {
+        pikvm_options.login.base_url = parse_https_url(pikvm_url);
+        pikvm_options.login.base_url.target = "/";
+        fill_default_credentials(pikvm_options.login, pikvm_password_env_name);
+
+        run_pikvm_events_probe(pikvm_options);
         return EXIT_SUCCESS;
     }
 
