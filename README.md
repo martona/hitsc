@@ -4,7 +4,7 @@
 
 It's a fast, small, and efficient utility to provide a secure iKVM interface to IPMI targets without wading through vendor-specific web interfaces with their subpar-to-downright-hostile UX. The **Terminal Services Client** part is an homage to `mstsc.exe`.
 
-The two supported vendors are **MegaRAC** (ASRockRack and ASUS, works well) and **ATEN** (Supermicro, passable, see notes.) There is also an experimental **PiKVM** event WebSocket probe.
+The two supported vendors are **MegaRAC** (ASRockRack and ASUS, works well) and **ATEN** (Supermicro, passable, see notes.) There is also experimental **PiKVM** direct H.264 video support.
 
 The goal is narrow: speak HTTPS, verify TLS certificates, authenticate through the BMC web session, establish a secure `wss://` tunnel, then provide a clean and consistent UX for iKVM interaction through it.
 
@@ -16,7 +16,7 @@ Supported today:
 
 - iKVM with basic keyboard and mouse input
 - MegaRAC and ATEN
-- PiKVM authentication and one-event WebSocket probe
+- Experimental PiKVM direct H.264 video
 - Console interface to provide target information and options
 - Windows only for now
 
@@ -58,7 +58,7 @@ Open an ATEN/Supermicro iKVM session:
 .\build\windows-debug\hitsc.exe aten -u USERNAME https://bmc.example.com
 ```
 
-Open a PiKVM event WebSocket and read one event:
+Open a PiKVM direct H.264 video session:
 
 ```powershell
 .\build\windows-debug\hitsc.exe pikvm -u USERNAME https://pikvm.example.com
@@ -118,13 +118,15 @@ So it works, but it's not great, and it likely won't ever be.
 
 ### PiKVM
 
-The current PiKVM support is an intentionally small probe: it authenticates with the documented `/api/auth/login` form endpoint, opens `/api/ws?stream=0`, reads one JSON event, prints a concise summary, then logs out. It does not render video or send input yet.
+The current PiKVM support authenticates with the documented `/api/auth/login` form endpoint, keeps `/api/ws?stream=1` open for KVMD state, opens `/api/media/ws`, requests direct H.264 over the PiKVM media websocket, decodes it with FFmpeg, and displays it in SDL. It does not send input or control power yet.
 
 ## License and Third-party Code
 
 `hitsc` is MIT licensed; see [LICENSE.md](LICENSE.md).
 
 MegaRAC video decoding uses a trimmed C subset of [AspeedTech-BMC/aspeed_codec](https://github.com/AspeedTech-BMC/aspeed_codec), vendored under [third_party/aspeed_codec](third_party/aspeed_codec). The retained ASPEED files are MPL-2.0 licensed; see [third_party/aspeed_codec/README.md](third_party/aspeed_codec/README.md) and [third_party/aspeed_codec/LICENSE](third_party/aspeed_codec/LICENSE).
+
+PiKVM direct H.264 video uses FFmpeg through vcpkg with GPL and nonfree features disabled. The FFmpeg components used here are LGPL-2.1-or-later.
 
 Other third-party dependencies are resolved through `vcpkg.json`.
 
@@ -134,11 +136,13 @@ This is a work in progress, the current stage not being much more than a sign of
 
 - Add Linux and macOS support.
 - Add TLS certificate pinning.
-- Expand PiKVM support beyond the first event WebSocket probe
+- Expand PiKVM support beyond direct video
+- Add keyboard and mouse input over the KVMD event WebSocket
+- Add hardware-accelerated H.264 decode and zero-copy or near-zero-copy SDL texture upload where available
 - Add Apple RDP support (yeah it's not IPMI but it's a pain point for me)
 - Add UI for connection establishment, making CLI optional
 - Add secure credential store (win32 CryptoAPI, macOS keychain, ...)
-- Add comfort features such as "type-my-clipboard"
+- Add comfort features such as "type-my-clipboard, ocr-screen-into-clipboard"
 - Better indication of "remote display is off"
 - BMC controls for power on/off, reset; indicators for power status
 - Scale to fit, 1:1, etc display options.

@@ -10,6 +10,14 @@
     "boost-log",
     "boost-system",
     "cli11",
+    {
+      "name": "ffmpeg",
+      "default-features": false,
+      "features": [
+        "avcodec",
+        "swscale"
+      ]
+    },
     "openssl",
     "sdl3",
     "zlib"

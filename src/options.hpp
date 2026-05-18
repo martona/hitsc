@@ -25,9 +25,9 @@ struct AtenViewOptions {
     bool shared = true;
 };
 
-struct PikvmProbeOptions {
+struct PikvmViewOptions {
     LoginOptions login;
-    int idle_timeout_seconds = 30;
+    int idle_timeout_seconds = 0;
 };
 
 } // namespace hitsc

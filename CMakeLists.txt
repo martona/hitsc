@@ -19,6 +19,7 @@ endif()
 
 find_package(Boost REQUIRED CONFIG COMPONENTS json log log_setup system)
 find_package(CLI11 CONFIG REQUIRED)
+find_package(FFMPEG REQUIRED)
 find_package(OpenSSL REQUIRED)
 find_package(SDL3 CONFIG REQUIRED)
 find_package(ZLIB REQUIRED)
@@ -64,6 +65,8 @@ add_executable(
   src/megarac_session.cpp
   src/pikvm_events.cpp
   src/pikvm_session.cpp
+  src/pikvm_video.cpp
+  src/pikvm_view.cpp
   src/text.cpp
   src/tls.cpp
   src/trace.cpp
@@ -102,6 +105,9 @@ else()
   message(FATAL_ERROR "Boost headers target was not provided by find_package(Boost).")
 endif()
 
+target_include_directories(hitsc PRIVATE ${FFMPEG_INCLUDE_DIRS})
+target_link_directories(hitsc PRIVATE ${FFMPEG_LIBRARY_DIRS})
+
 target_link_libraries(
   hitsc
   PRIVATE
@@ -112,6 +118,7 @@ target_link_libraries(
     Boost::log_setup
     Boost::system
     CLI11::CLI11
+    ${FFMPEG_LIBRARIES}
     OpenSSL::SSL
     OpenSSL::Crypto
     SDL3::SDL3

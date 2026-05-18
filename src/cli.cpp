@@ -5,7 +5,7 @@
 #include "console.hpp"
 #include "megarac_view.hpp"
 #include "options.hpp"
-#include "pikvm_events.hpp"
+#include "pikvm_view.hpp"
 #include "text.hpp"
 #include "url.hpp"
 
@@ -106,11 +106,11 @@ int run_cli(int argc, char* argv[])
     aten->add_flag("--exclusive", aten_exclusive, "Request an exclusive RFB session.");
     aten->add_option("url", aten_url, "https://host[:port]")->required();
 
-    PikvmProbeOptions pikvm_options;
+    PikvmViewOptions pikvm_options;
     std::string pikvm_url;
     std::string pikvm_password_env_name;
     CLI::App* pikvm =
-        app.add_subcommand("pikvm", "Open a PiKVM event WebSocket and read one event.");
+        app.add_subcommand("pikvm", "Open a PiKVM H.264 video window.");
     configure_view_options(
         *pikvm,
         pikvm_options.login,
@@ -166,7 +166,7 @@ int run_cli(int argc, char* argv[])
         pikvm_options.login.base_url.target = "/";
         fill_default_credentials(pikvm_options.login, pikvm_password_env_name);
 
-        run_pikvm_events_probe(pikvm_options);
+        run_pikvm_view(pikvm_options);
         return EXIT_SUCCESS;
     }
 
