@@ -4,6 +4,7 @@
 #include "aspeed_decoder.hpp"
 #include "aten_session.hpp"
 #include "diagnostics.hpp"
+#include "log.hpp"
 #include "tls.hpp"
 #include "url.hpp"
 
@@ -30,7 +31,6 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
-#include <ctime>
 #include <deque>
 #include <exception>
 #include <functional>
@@ -156,27 +156,6 @@ void append_be32(std::vector<std::uint8_t>& bytes, std::uint32_t value);
 std::uint16_t load_be16(const std::vector<std::uint8_t>& bytes, std::size_t offset);
 std::uint32_t load_be32(const std::vector<std::uint8_t>& bytes, std::size_t offset);
 std::uint32_t load_le32(const std::vector<std::uint8_t>& bytes, std::size_t offset);
-
-std::string log_prefix()
-{
-    const auto now = std::chrono::system_clock::now();
-    const auto time = std::chrono::system_clock::to_time_t(now);
-    const auto milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(
-        now.time_since_epoch()).count() % 1000;
-
-    std::tm local_time{};
-#ifdef _WIN32
-    localtime_s(&local_time, &time);
-#else
-    localtime_r(&time, &local_time);
-#endif
-
-    std::ostringstream output;
-    output << std::put_time(&local_time, "%H:%M:%S")
-           << '.' << std::setw(3) << std::setfill('0') << milliseconds
-           << " hitsc: ";
-    return output.str();
-}
 
 void throw_sdl_error(std::string_view context)
 {
@@ -509,10 +488,16 @@ void queue_aten_pointer_event(
     queue_aten_input_packet(state, make_aten_pointer_event(position.x, position.y, mask), coalesce);
 }
 
-void stop_aten_network(AtenViewState& state, std::atomic_bool& stop_requested, std::thread& network_thread)
+void stop_aten_network(
+    AtenViewState& state,
+    std::atomic_bool& stop_requested,
+    std::thread& network_thread,
+    bool verbose)
 {
     const auto started_at = std::chrono::steady_clock::now();
-    std::cerr << log_prefix() << "aten network stop begin\n";
+    if (verbose) {
+        log_debug() << "aten network stop begin";
+    }
     stop_requested.store(true);
 
     std::function<void()> force_close;
@@ -521,18 +506,28 @@ void stop_aten_network(AtenViewState& state, std::atomic_bool& stop_requested, s
         force_close = state.force_close;
     }
     if (force_close) {
-        std::cerr << log_prefix() << "aten network force-close begin\n";
+        if (verbose) {
+            log_debug() << "aten network force-close begin";
+        }
         force_close();
-        std::cerr << log_prefix() << "aten network force-close returned\n";
+        if (verbose) {
+            log_debug() << "aten network force-close returned";
+        }
     } else {
-        std::cerr << log_prefix() << "aten network force-close missing\n";
+        if (verbose) {
+            log_debug() << "aten network force-close missing";
+        }
     }
     const auto force_closed_at = std::chrono::steady_clock::now();
 
     if (network_thread.joinable()) {
-        std::cerr << log_prefix() << "aten network join begin\n";
+        if (verbose) {
+            log_debug() << "aten network join begin";
+        }
         network_thread.join();
-        std::cerr << log_prefix() << "aten network join returned\n";
+        if (verbose) {
+            log_debug() << "aten network join returned";
+        }
     }
     const auto stopped_at = std::chrono::steady_clock::now();
     const auto stop_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -540,9 +535,9 @@ void stop_aten_network(AtenViewState& state, std::atomic_bool& stop_requested, s
     if (stop_ms > 250) {
         const auto force_close_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             force_closed_at - started_at).count();
-        std::cerr << log_prefix() << "aten network stop waited"
-                  << " total-ms=" << stop_ms
-                  << " force-close-ms=" << force_close_ms << '\n';
+        log_warning() << "aten network stop waited"
+                      << " total-ms=" << stop_ms
+                      << " force-close-ms=" << force_close_ms;
     }
 }
 
@@ -872,8 +867,8 @@ std::uint8_t negotiate_security(RfbStream& rfb, std::string_view client_version)
         if (auth_scheme > 255) {
             throw std::runtime_error("ATEN RFB 3.3 security scheme is too large");
         }
-        std::cout << log_prefix() << "aten rfb security scheme=" << auth_scheme
-                  << " " << security_type_name(static_cast<std::uint8_t>(auth_scheme)) << '\n';
+        log_info() << "aten rfb security scheme=" << auth_scheme
+                   << " " << security_type_name(static_cast<std::uint8_t>(auth_scheme));
         return static_cast<std::uint8_t>(auth_scheme);
     }
 
@@ -895,25 +890,30 @@ std::uint8_t negotiate_security(RfbStream& rfb, std::string_view client_version)
         throw std::runtime_error("ATEN RFB offered no supported security type");
     }
 
-    std::cout << log_prefix() << "aten rfb security types=";
-    for (std::size_t i = 0; i < types.size(); ++i) {
-        if (i != 0) {
-            std::cout << ',';
+    {
+        LogLine line = log_info();
+        line << "aten rfb security types=";
+        for (std::size_t i = 0; i < types.size(); ++i) {
+            if (i != 0) {
+                line << ',';
+            }
+            line << static_cast<int>(types[i]) << "(" << security_type_name(types[i]) << ")";
         }
-        std::cout << static_cast<int>(types[i]) << "(" << security_type_name(types[i]) << ")";
+        line << " selected=" << static_cast<int>(selected)
+             << "(" << security_type_name(selected) << ")";
     }
-    std::cout << " selected=" << static_cast<int>(selected)
-              << "(" << security_type_name(selected) << ")\n";
 
     rfb.write(std::vector<std::uint8_t>{selected});
     return selected;
 }
 
-void authenticate_insyde(RfbStream& rfb, std::string_view credential)
+void authenticate_insyde(RfbStream& rfb, std::string_view credential, bool verbose)
 {
     const std::vector<std::uint8_t> challenge = rfb.read_exact(24);
-    std::cout << log_prefix() << "aten rfb insyde challenge bytes=" << challenge.size()
-              << " first-bytes=" << hex_preview(challenge) << '\n';
+    if (verbose) {
+        log_info() << "aten rfb insyde challenge bytes=" << challenge.size()
+                   << " first-bytes=" << hex_preview(challenge);
+    }
 
     std::vector<std::uint8_t> reply(49, 0);
     const std::size_t copy_size = std::min<std::size_t>(24, credential.size());
@@ -923,19 +923,21 @@ void authenticate_insyde(RfbStream& rfb, std::string_view credential)
     reply[48] = 0;
     rfb.write(reply);
 
-    std::cout << log_prefix() << "sent ATEN/Insyde username auth reply"
-              << " credential-bytes=" << copy_size
-              << " client-type=0\n";
+    if (verbose) {
+        log_info() << "sent ATEN/Insyde username auth reply"
+                   << " credential-bytes=" << copy_size
+                   << " client-type=0";
+    }
 }
 
-void authenticate(RfbStream& rfb, std::uint8_t security_type, std::string_view credential)
+void authenticate(RfbStream& rfb, std::uint8_t security_type, std::string_view credential, bool verbose)
 {
     switch (security_type) {
     case 1:
         return;
     case 15:
     case 16:
-        authenticate_insyde(rfb, credential);
+        authenticate_insyde(rfb, credential, verbose);
         return;
     case 2:
         throw std::runtime_error("ATEN RFB VNCAuth/DES is not implemented yet");
@@ -948,11 +950,13 @@ void authenticate(RfbStream& rfb, std::uint8_t security_type, std::string_view c
     }
 }
 
-void read_security_result(RfbStream& rfb)
+void read_security_result(RfbStream& rfb, bool verbose)
 {
     const std::uint32_t result = rfb.read_be32();
     if (result == 0) {
-        std::cout << log_prefix() << "aten rfb authentication succeeded\n";
+        if (verbose) {
+            log_info() << "aten rfb authentication succeeded";
+        }
         return;
     }
 
@@ -1085,7 +1089,9 @@ public:
             set_aten_status(self->state_, "waiting for video");
             self->receive_queue_ = std::move(initial_bytes);
             self->queue_framebuffer_update_request(false);
-            std::cout << log_prefix() << "requested ATEN framebuffer update\n";
+            if (self->options_.login.verbose) {
+                log_info() << "requested ATEN framebuffer update";
+            }
             self->schedule_receive_parse();
         });
     }
@@ -1300,23 +1306,29 @@ private:
         ++total_messages_;
         ++stats_messages_;
         if (options_.login.verbose && message_type != 0) {
-            std::cout << log_prefix() << "aten rfb message #" << total_messages_
-                      << " type=" << static_cast<int>(message_type)
-                      << " " << aten_server_message_name(message_type)
-                      << " buffered=" << receive_buffered_bytes() << '\n';
+            log_info() << "aten rfb message #" << total_messages_
+                       << " type=" << static_cast<int>(message_type)
+                       << " " << aten_server_message_name(message_type)
+                       << " buffered=" << receive_buffered_bytes();
         }
         switch (message_type) {
         case 0:
             handle_framebuffer_update();
             break;
         case 2:
-            std::cout << log_prefix() << "aten rfb bell\n";
+            if (options_.login.verbose) {
+                log_info() << "aten rfb bell";
+            }
             break;
         case 4:
             handle_cursor_position();
             break;
         case 22:
-            std::cout << log_prefix() << "aten rfb message 22 value=" << static_cast<int>(read_u8()) << '\n';
+            if (options_.login.verbose) {
+                log_info() << "aten rfb message 22 value=" << static_cast<int>(read_u8());
+            } else {
+                discard(1);
+            }
             break;
         case 53:
         case 54:
@@ -1328,9 +1340,13 @@ private:
             break;
         case 60:
         case 63:
-            std::cout << log_prefix() << "aten rfb service"
-                      << " type=" << static_cast<int>(message_type)
-                      << " value=" << static_cast<int>(read_u8()) << '\n';
+            if (options_.login.verbose) {
+                log_info() << "aten rfb service"
+                           << " type=" << static_cast<int>(message_type)
+                           << " value=" << static_cast<int>(read_u8());
+            } else {
+                discard(1);
+            }
             break;
         default:
             throw std::runtime_error(
@@ -1349,8 +1365,8 @@ private:
         ++updates_;
         ++stats_framebuffer_updates_;
         if (options_.login.verbose && (updates_ <= 5 || updates_ % 120 == 0)) {
-            std::cout << log_prefix() << "aten rfb framebuffer update #" << updates_
-                      << " rects=" << rect_count << '\n';
+            log_info() << "aten rfb framebuffer update #" << updates_
+                       << " rects=" << rect_count;
         }
 
         for (std::uint16_t i = 0; i < rect_count; ++i) {
@@ -1361,17 +1377,17 @@ private:
             }
 
             if (options_.login.verbose && (updates_ <= 5 || updates_ % 120 == 0)) {
-                std::cout << log_prefix() << "aten rfb rect"
-                          << " index=" << (i + 1)
-                          << " xy=" << rect.x << ',' << rect.y
-                          << " size=" << rect.width << 'x' << rect.height
-                          << " encoding=" << rect.encoding << '(' << encoding_name(rect.encoding) << ')'
-                          << " mode=" << rect.mode
-                          << " payload=" << rect.data_length;
+                LogLine line = log_info();
+                line << "aten rfb rect"
+                     << " index=" << (i + 1)
+                     << " xy=" << rect.x << ',' << rect.y
+                     << " size=" << rect.width << 'x' << rect.height
+                     << " encoding=" << rect.encoding << '(' << encoding_name(rect.encoding) << ')'
+                     << " mode=" << rect.mode
+                     << " payload=" << rect.data_length;
                 if (!payload.empty()) {
-                    std::cout << " first-bytes=" << hex_preview(payload);
+                    line << " first-bytes=" << hex_preview(payload);
                 }
-                std::cout << '\n';
             }
 
             // TODO: ATEN cursor replay is disabled until it can be matched to the vendor JS exactly.
@@ -1405,10 +1421,10 @@ private:
             previous_width_ = rect.width;
             previous_height_ = rect.height;
             if (options_.login.verbose && (updates_ <= 20 || updates_ % 60 == 0)) {
-                std::cout << log_prefix() << "skipped ATEN no-op frame #" << updates_
-                          << " size=" << rect.width << 'x' << rect.height
-                          << " payload=" << payload.size()
-                          << " mode=" << ast.mode << '\n';
+                log_info() << "skipped ATEN no-op frame #" << updates_
+                           << " size=" << rect.width << 'x' << rect.height
+                           << " payload=" << payload.size()
+                           << " mode=" << ast.mode;
             }
             return;
         }
@@ -1449,14 +1465,13 @@ private:
         previous_rgba_ = std::move(rgba);
 
         if (options_.login.verbose && (updates_ <= 20 || updates_ % 60 == 0)) {
-            std::cout << log_prefix() << "rendered ATEN frame #" << updates_
-                      << " size=" << rect.width << 'x' << rect.height
-                      << " compressed=" << compressed.size()
-                      << " mode=" << ast.mode
-                      << " y-sel=" << ast.y_selector
-                      << " uv-sel=" << ast.uv_selector
-                      << " avg-rgb=" << sampled_average_rgb(previous_rgba_)
-                      << '\n';
+            log_info() << "rendered ATEN frame #" << updates_
+                       << " size=" << rect.width << 'x' << rect.height
+                       << " compressed=" << compressed.size()
+                       << " mode=" << ast.mode
+                       << " y-sel=" << ast.y_selector
+                       << " uv-sel=" << ast.uv_selector
+                       << " avg-rgb=" << sampled_average_rgb(previous_rgba_);
         }
     }
 
@@ -1500,15 +1515,15 @@ private:
         }
 
         if (options_.login.verbose) {
-            std::cout << log_prefix() << "ignored ATEN cursor"
-                      << " xy=" << x << ',' << y
-                      << " size=" << width << 'x' << height
-                      << " valid=" << valid;
+            LogLine line = log_info();
+            line << "ignored ATEN cursor"
+                 << " xy=" << x << ',' << y
+                 << " size=" << width << 'x' << height
+                 << " valid=" << valid;
             if (valid == 1) {
-                std::cout << " pattern-type=" << pattern_type
-                          << " pattern-bytes=" << pattern_size;
+                line << " pattern-type=" << pattern_type
+                     << " pattern-bytes=" << pattern_size;
             }
-            std::cout << '\n';
         }
     }
 
@@ -1517,11 +1532,13 @@ private:
         const std::uint8_t crypto = read_u8();
         const std::uint8_t mode = read_u8();
         const std::uint8_t status = read_u8();
-        std::cout << log_prefix() << "aten rfb mouse/control"
-                  << " type=" << static_cast<int>(message_type)
-                  << " crypto=" << static_cast<int>(crypto)
-                  << " mode=" << static_cast<int>(mode)
-                  << " status=" << static_cast<int>(status) << '\n';
+        if (options_.login.verbose) {
+            log_info() << "aten rfb mouse/control"
+                       << " type=" << static_cast<int>(message_type)
+                       << " crypto=" << static_cast<int>(crypto)
+                       << " mode=" << static_cast<int>(mode)
+                       << " status=" << static_cast<int>(status);
+        }
     }
 
     void handle_control_message()
@@ -1529,10 +1546,12 @@ private:
         const std::uint32_t count = read_be32();
         const std::uint32_t code_digits = read_be32();
         const std::vector<std::uint8_t> message = read_bytes(256);
-        std::cout << log_prefix() << "aten rfb control-message"
-                  << " count=" << count
-                  << " code-digits=" << code_digits
-                  << " first-bytes=" << hex_preview(message) << '\n';
+        if (options_.login.verbose) {
+            log_info() << "aten rfb control-message"
+                       << " count=" << count
+                       << " code-digits=" << code_digits
+                       << " first-bytes=" << hex_preview(message);
+        }
     }
 
     void schedule_receive_parse()
@@ -1580,13 +1599,12 @@ private:
 
         const auto elapsed_ms =
             std::chrono::duration_cast<std::chrono::milliseconds>(now - stats_started_at_).count();
-        std::cout << log_prefix() << "aten rfb stats"
-                  << " elapsed-ms=" << elapsed_ms
-                  << " rx-bytes=" << stats_rx_bytes_
-                  << " messages=" << stats_messages_
-                  << " framebuffer-updates=" << stats_framebuffer_updates_
-                  << " receive-buffer=" << receive_buffered_bytes()
-                  << '\n';
+        log_info() << "aten rfb stats"
+                   << " elapsed-ms=" << elapsed_ms
+                   << " rx-bytes=" << stats_rx_bytes_
+                   << " messages=" << stats_messages_
+                   << " framebuffer-updates=" << stats_framebuffer_updates_
+                   << " receive-buffer=" << receive_buffered_bytes();
 
         stats_started_at_ = now;
         stats_rx_bytes_ = 0;
@@ -1767,13 +1785,19 @@ public:
 
     void request_stop()
     {
-        std::cerr << log_prefix() << "aten websocket stop requested\n";
+        if (options_.login.verbose) {
+            log_debug() << "aten websocket stop requested";
+        }
         auto self = shared_from_this();
         asio::post(strand_, [self] {
-            std::cerr << log_prefix() << "aten websocket stop handler begin\n";
+            if (self->options_.login.verbose) {
+                log_debug() << "aten websocket stop handler begin";
+            }
             self->stop_requested_.store(true);
             self->close_now();
-            std::cerr << log_prefix() << "aten websocket stop handler end\n";
+            if (self->options_.login.verbose) {
+                log_debug() << "aten websocket stop handler end";
+            }
         });
     }
 
@@ -1881,8 +1905,10 @@ private:
             return;
         }
         if (error) {
-            std::cerr << log_prefix() << "aten websocket write callback error="
-                      << error.message() << '\n';
+            if (options_.login.verbose || !stop_requested_.load()) {
+                log_error() << "aten websocket write callback error="
+                            << error.message();
+            }
             if (!stop_requested_.load()) {
                 set_aten_exception(state_, std::make_exception_ptr(
                     beast::system_error(error, "ATEN websocket write failed")));
@@ -1892,7 +1918,7 @@ private:
         }
 
         if (options_.login.verbose && !is_hot_write_packet(active_write_.packet)) {
-            std::cout << log_prefix() << "sent ATEN packet " << describe_aten_client_packet(active_write_.packet) << '\n';
+            log_info() << "sent ATEN packet " << describe_aten_client_packet(active_write_.packet);
         }
         active_write_ = {};
         start_write();
@@ -1918,8 +1944,10 @@ private:
             return;
         }
         if (error) {
-            std::cerr << log_prefix() << "aten websocket read callback error="
-                      << error.message() << '\n';
+            if (options_.login.verbose || (!stop_requested_.load() && error != websocket::error::closed)) {
+                log_error() << "aten websocket read callback error="
+                            << error.message();
+            }
             if (!stop_requested_.load() && error != websocket::error::closed) {
                 set_aten_exception(state_, std::make_exception_ptr(
                     beast::system_error(error, "ATEN websocket read failed")));
@@ -1933,12 +1961,12 @@ private:
         ++total_websocket_messages_;
         if (options_.login.verbose &&
             (total_websocket_messages_ <= 5 || total_websocket_messages_ % 120 == 0)) {
-            std::cout << log_prefix() << "aten websocket message"
-                      << " bytes=" << bytes.size();
+            LogLine line = log_info();
+            line << "aten websocket message"
+                 << " bytes=" << bytes.size();
             if (!bytes.empty()) {
-                std::cout << " first-bytes=" << hex_preview(bytes);
+                line << " first-bytes=" << hex_preview(bytes);
             }
-            std::cout << '\n';
         }
         if (protocol_) {
             protocol_->enqueue_bytes(std::move(bytes));
@@ -1950,10 +1978,14 @@ private:
     void close_now()
     {
         if (closed_) {
-            std::cerr << log_prefix() << "aten websocket close_now ignored already-closed\n";
+            if (options_.login.verbose) {
+                log_debug() << "aten websocket close_now ignored already-closed";
+            }
             return;
         }
-        std::cerr << log_prefix() << "aten websocket close_now begin\n";
+        if (options_.login.verbose) {
+            log_debug() << "aten websocket close_now begin";
+        }
         closed_ = true;
         clear_aten_input_sink(state_);
         if (protocol_) {
@@ -1964,24 +1996,26 @@ private:
 
         beast::error_code error;
         beast::get_lowest_layer(ws_).socket().cancel(error);
-        if (error) {
-            std::cerr << log_prefix() << "aten websocket stream cancel error="
-                      << error.message() << '\n';
+        if (error && options_.login.verbose) {
+            log_error() << "aten websocket stream cancel error="
+                        << error.message();
         }
         error.clear();
         beast::get_lowest_layer(ws_).socket().shutdown(tcp::socket::shutdown_both, error);
-        if (error) {
-            std::cerr << log_prefix() << "aten websocket socket shutdown error="
-                      << error.message() << '\n';
+        if (error && options_.login.verbose) {
+            log_error() << "aten websocket socket shutdown error="
+                        << error.message();
         }
         error.clear();
         beast::get_lowest_layer(ws_).socket().close(error);
-        if (error) {
-            std::cerr << log_prefix() << "aten websocket socket close error="
-                      << error.message() << '\n';
+        if (error && options_.login.verbose) {
+            log_error() << "aten websocket socket close error="
+                        << error.message();
         }
         io_.stop();
-        std::cerr << log_prefix() << "aten websocket close_now end\n";
+        if (options_.login.verbose) {
+            log_debug() << "aten websocket close_now end";
+        }
     }
 
     void clear_pending_mouse_motion()
@@ -2019,8 +2053,10 @@ void run_aten_network_session(const AtenViewOptions& options, AtenViewState& sta
     AtenSession session = login_aten(options.login);
     AtenLogoutGuard logout_guard(options.login);
     logout_guard.arm(session);
-    std::cout << log_prefix() << "aten login succeeded\n";
-    std::cout << log_prefix() << "cookies stored: " << session.cookies.size() << '\n';
+    log_info() << "aten login succeeded";
+    if (options.login.verbose) {
+        log_info() << "cookies stored: " << session.cookies.size();
+    }
 
     std::string rfb_credential = options.login.username;
     const std::string bootstrap_credential =
@@ -2028,8 +2064,8 @@ void run_aten_network_session(const AtenViewOptions& options, AtenViewState& sta
     if (!bootstrap_credential.empty()) {
         rfb_credential = bootstrap_credential;
     } else {
-        std::cerr << log_prefix() << "aten warning: bootstrap did not expose entry_value; "
-                     "falling back to login username for RFB auth\n";
+        log_warning() << "aten warning: bootstrap did not expose entry_value; "
+                         "falling back to login username for RFB auth";
     }
 
     set_aten_status(state, "connecting websocket");
@@ -2073,12 +2109,15 @@ void run_aten_network_session(const AtenViewOptions& options, AtenViewState& sta
     const std::string path = "/";
     websocket::response_type response;
     ws.handshake(response, host, path);
-    std::cout << log_prefix() << "aten websocket connected"
-              << " path=" << path;
-    if (options.idle_timeout_seconds > 0) {
-        std::cout << " idle-timeout=" << options.idle_timeout_seconds << "s\n";
-    } else {
-        std::cout << " idle-timeout=disabled\n";
+    {
+        LogLine line = log_info();
+        line << "aten websocket connected"
+             << " path=" << path;
+        if (options.idle_timeout_seconds > 0) {
+            line << " idle-timeout=" << options.idle_timeout_seconds << "s";
+        } else {
+            line << " idle-timeout=disabled";
+        }
     }
     set_aten_force_close(state, [&ws] {
         beast::error_code error;
@@ -2104,33 +2143,35 @@ void run_aten_network_session(const AtenViewOptions& options, AtenViewState& sta
     }
     const std::string server_version = server_protocol_line.substr(4, 7);
     const std::string client_version = client_protocol_version(server_version);
-    std::cout << log_prefix() << "aten rfb server-version=" << server_version
-              << " client-version=" << client_version << '\n';
+    log_info() << "aten rfb server-version=" << server_version
+               << " client-version=" << client_version;
     rfb.write_string("RFB " + client_version + "\n");
 
     const std::uint8_t security_type = negotiate_security(rfb, client_version);
-    authenticate(rfb, security_type, rfb_credential);
+    authenticate(rfb, security_type, rfb_credential, options.login.verbose);
     if (security_type != 1 || version_uses_security_result_for_none(client_version)) {
-        read_security_result(rfb);
+        read_security_result(rfb, options.login.verbose);
     }
 
     rfb.write(std::vector<std::uint8_t>{options.shared ? 1U : 0U});
     const bool insyde_extension = security_type == 15 || security_type == 16;
     const AtenRfbServerInit init = read_server_init(rfb, insyde_extension);
-    std::cout << log_prefix() << "aten rfb server-init"
-              << " size=" << init.width << 'x' << init.height
-              << " name=\"" << init.name << "\""
-              << " bpp=" << static_cast<int>(init.bits_per_pixel)
-              << " depth=" << static_cast<int>(init.depth)
-              << " true-color=" << (init.true_color ? "yes" : "no")
-              << " endian=" << (init.big_endian ? "big" : "little") << '\n';
-    if (init.insyde_extension) {
-        std::cout << log_prefix() << "aten rfb insyde extension"
-                  << " session-id=" << init.session_id
-                  << " video=" << static_cast<int>(init.video_enable)
-                  << " kbms=" << static_cast<int>(init.keyboard_mouse_enable)
-                  << " kick-user=" << static_cast<int>(init.kick_user_enable)
-                  << " vmedia=" << static_cast<int>(init.virtual_media_enable) << '\n';
+    if (options.login.verbose) {
+        log_info() << "aten rfb server-init"
+                   << " size=" << init.width << 'x' << init.height
+                   << " name=\"" << init.name << "\""
+                   << " bpp=" << static_cast<int>(init.bits_per_pixel)
+                   << " depth=" << static_cast<int>(init.depth)
+                   << " true-color=" << (init.true_color ? "yes" : "no")
+                   << " endian=" << (init.big_endian ? "big" : "little");
+    }
+    if (init.insyde_extension && options.login.verbose) {
+        log_info() << "aten rfb insyde extension"
+                   << " session-id=" << init.session_id
+                   << " video=" << static_cast<int>(init.video_enable)
+                   << " kbms=" << static_cast<int>(init.keyboard_mouse_enable)
+                   << " kick-user=" << static_cast<int>(init.kick_user_enable)
+                   << " vmedia=" << static_cast<int>(init.virtual_media_enable);
     }
 
     asio::io_context protocol_io;
@@ -2190,13 +2231,13 @@ void run_aten_network_session(const AtenViewOptions& options, AtenViewState& sta
     protocol_session->start(rfb.take_queued_bytes());
     const auto io_started_at = std::chrono::steady_clock::now();
     if (options.login.verbose) {
-        std::cout << log_prefix() << "aten network io running\n";
+        log_debug() << "aten network io running";
     }
     io.run();
     if (options.login.verbose) {
         const auto io_elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - io_started_at).count();
-        std::cout << log_prefix() << "aten network io stopped duration-ms=" << io_elapsed_ms << '\n';
+        log_debug() << "aten network io stopped duration-ms=" << io_elapsed_ms;
     }
     protocol_session->request_stop();
     clear_aten_input_sink(state);
@@ -2266,8 +2307,8 @@ void run_aten_view(const AtenViewOptions& options)
                     event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED) {
                     if (!close_event_logged) {
                         close_event_logged = true;
-                        std::cerr << log_prefix() << "aten window close event"
-                                  << " type=" << event.type << '\n';
+                        log_info() << "aten window close event"
+                                   << " type=" << event.type;
                     }
                     running = false;
                 } else if (event.type == SDL_EVENT_WINDOW_RESIZED ||
@@ -2283,9 +2324,9 @@ void run_aten_view(const AtenViewOptions& options)
                             aten_keyboard_usage_from_sdl_scancode(event.key.scancode);
                         if (!usage || *usage >= key_down.size()) {
                             if (options.login.verbose) {
-                                std::cout << log_prefix() << "ignored ATEN key"
-                                          << " scancode=" << event.key.scancode
-                                          << " key=" << event.key.key << '\n';
+                                log_info() << "ignored ATEN key"
+                                           << " scancode=" << event.key.scancode
+                                           << " key=" << event.key.key;
                             }
                         } else {
                             const bool down = event.type == SDL_EVENT_KEY_DOWN;
@@ -2402,10 +2443,9 @@ void run_aten_view(const AtenViewOptions& options)
 
                 ++presented_frames;
                 if (options.login.verbose && (presented_frames <= 20 || presented_frames % 60 == 0)) {
-                    std::cout << log_prefix() << "presented ATEN frame #" << presented_frames
-                              << " sequence=" << frame->sequence
-                              << " avg-rgb=" << sampled_average_rgb(frame->rgba)
-                              << '\n';
+                    log_info() << "presented ATEN frame #" << presented_frames
+                               << " sequence=" << frame->sequence
+                               << " avg-rgb=" << sampled_average_rgb(frame->rgba);
                 }
                 render_needed = true;
             }
@@ -2484,7 +2524,7 @@ void run_aten_view(const AtenViewOptions& options)
         }
     } catch (...) {
         print_current_exception_with_stack(std::cerr, "aten view ui thread");
-        stop_aten_network(*state, *stop_requested, network_thread);
+        stop_aten_network(*state, *stop_requested, network_thread, options.login.verbose);
         if (cursor_texture != nullptr) {
             SDL_DestroyTexture(cursor_texture);
         }
@@ -2501,7 +2541,7 @@ void run_aten_view(const AtenViewOptions& options)
         throw;
     }
 
-    stop_aten_network(*state, *stop_requested, network_thread);
+    stop_aten_network(*state, *stop_requested, network_thread, options.login.verbose);
 
     if (texture != nullptr) {
         SDL_DestroyTexture(texture);

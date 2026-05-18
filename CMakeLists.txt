@@ -7,7 +7,7 @@ project(
   LANGUAGES C CXX
 )
 
-find_package(Boost REQUIRED CONFIG COMPONENTS json system)
+find_package(Boost REQUIRED CONFIG COMPONENTS json log log_setup system)
 find_package(CLI11 CONFIG REQUIRED)
 find_package(OpenSSL REQUIRED)
 find_package(SDL3 CONFIG REQUIRED)
@@ -43,6 +43,7 @@ add_executable(
   src/cookie_jar.cpp
   src/diagnostics.cpp
   src/http_client.cpp
+  src/log.cpp
   src/megarac_view.cpp
   src/main.cpp
   src/megarac_cursor.cpp
@@ -64,6 +65,7 @@ target_compile_definitions(
   PRIVATE
     BOOST_ASIO_NO_DEPRECATED
     BOOST_BEAST_USE_STD_STRING_VIEW
+    BOOST_LOG_DYN_LINK
     NOMINMAX
     SDL_MAIN_HANDLED
     WIN32_LEAN_AND_MEAN
@@ -91,6 +93,8 @@ target_link_libraries(
     aspeed_codec
     ${HITSC_BOOST_HEADERS_TARGET}
     Boost::json
+    Boost::log
+    Boost::log_setup
     Boost::system
     CLI11::CLI11
     OpenSSL::SSL

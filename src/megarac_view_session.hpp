@@ -7,10 +7,8 @@
 #include <atomic>
 #include <cstdint>
 #include <functional>
-#include <iosfwd>
 #include <mutex>
 #include <optional>
-#include <ostream>
 #include <string>
 #include <vector>
 
@@ -43,16 +41,6 @@ struct MegaracViewStatusSnapshot {
     std::string status;
     bool has_frame = false;
 };
-
-std::mutex& log_mutex();
-
-template <typename Writer>
-void write_log_line(std::ostream& output, Writer writer)
-{
-    std::lock_guard lock(log_mutex());
-    writer(output);
-    output << '\n';
-}
 
 void run_megarac_view_session(
     const MegaracViewOptions& options,

@@ -4,6 +4,7 @@
 #include "aspeed_decoder.hpp"
 #include "diagnostics.hpp"
 #include "http_client.hpp"
+#include "log.hpp"
 #include "megarac_hid.hpp"
 #include "megarac_protocol.hpp"
 #include "megarac_session.hpp"
@@ -394,36 +395,29 @@ std::optional<MegaracHardwareCursor> take_latest_megarac_view_cursor(MegaracView
     return state.cursor;
 }
 
-std::mutex& log_mutex()
-{
-    static std::mutex mutex;
-    return mutex;
-}
-
 void log_packet(int number, const KvmPacket& packet)
 {
-    write_log_line(std::cout, [&](std::ostream& output) {
-        output << "hitsc: kvm packet #" << number
-               << " type=" << packet.type
-               << " " << command_name(packet.type)
-               << " status=" << packet.status
-               << " payload=" << packet.payload_size;
+    LogLine line = log_info();
+    line << "kvm packet #" << number
+         << " type=" << packet.type
+         << " " << command_name(packet.type)
+         << " status=" << packet.status
+         << " payload=" << packet.payload_size;
 
-        if (packet.type == kCmdValidatedVideoSession && !packet.payload.empty()) {
-            output << " validation=" << static_cast<int>(packet.payload[0]);
-        } else if (packet.type == kCmdVideoPackets && packet.payload.size() >= 4) {
-            output << " first-bytes=";
-            const auto preview = std::min<std::size_t>(packet.payload.size(), 8);
-            for (std::size_t i = 0; i < preview; ++i) {
-                if (i != 0) {
-                    output << ' ';
-                }
-                output << std::hex << std::setw(2) << std::setfill('0')
-                       << static_cast<int>(packet.payload[i])
-                       << std::dec << std::setfill(' ');
+    if (packet.type == kCmdValidatedVideoSession && !packet.payload.empty()) {
+        line << " validation=" << static_cast<int>(packet.payload[0]);
+    } else if (packet.type == kCmdVideoPackets && packet.payload.size() >= 4) {
+        line << " first-bytes=";
+        const auto preview = std::min<std::size_t>(packet.payload.size(), 8);
+        for (std::size_t i = 0; i < preview; ++i) {
+            if (i != 0) {
+                line << ' ';
             }
+            line << std::hex << std::setw(2) << std::setfill('0')
+                 << static_cast<int>(packet.payload[i])
+                 << std::dec << std::setfill(' ');
         }
-    });
+    }
 }
 
 void log_sent_packet(std::uint16_t type, std::uint16_t status, std::size_t payload_size, bool enabled)
@@ -432,13 +426,11 @@ void log_sent_packet(std::uint16_t type, std::uint16_t status, std::size_t paylo
         return;
     }
 
-    write_log_line(std::cout, [&](std::ostream& output) {
-        output << "hitsc: sent kvm packet"
+    log_info() << "sent kvm packet"
                << " type=" << type
                << " " << command_name(type)
                << " status=" << status
                << " payload=" << payload_size;
-    });
 }
 
 void store_force_close_callback(MegaracViewSessionState& state, std::function<void()> force_close)
@@ -658,8 +650,8 @@ private:
 
         if (error == beast::error::timeout) {
             set_megarac_view_status(state_, "idle timeout");
-            std::cerr << "hitsc: megarac view idle timeout after "
-                      << options_.idle_timeout_seconds << "s\n";
+            log_warning() << "megarac view idle timeout after "
+                          << options_.idle_timeout_seconds << "s";
             close_socket();
             return;
         }
@@ -667,14 +659,14 @@ private:
         if (error == websocket::error::closed ||
             error == ssl::error::stream_truncated) {
             set_megarac_view_status(state_, "remote closed");
-            std::cerr << "hitsc: kvm websocket closed\n";
+            log_warning() << "kvm websocket closed";
             close_socket();
             return;
         }
 
         set_megarac_view_status(state_, std::string("error: ") + error.message());
-        std::cerr << "hitsc: megarac view error: " << error.message()
-                  << " [" << error.category().name() << ':' << error.value() << "]\n";
+        log_error() << "megarac view error: " << error.message()
+                    << " [" << error.category().name() << ':' << error.value() << ']';
         close_socket();
     }
 
@@ -691,7 +683,7 @@ private:
                 make_validate_video_session_packet(config_, options_.login.username),
                 false);
             validation_sent_ = true;
-            std::cout << "hitsc: sent KVM validation packet\n";
+            log_info() << "sent KVM validation packet";
         } else if (packet.type == kCmdValidatedVideoSession) {
             handle_validation_response(packet);
         } else if (packet.type == kCmdKeepAlive) {
@@ -700,7 +692,7 @@ private:
             set_mouse_mode(state_, packet.payload[0]);
             mouse_mode_seen_ = true;
             if (options_.login.verbose) {
-                std::cout << "hitsc: mouse mode=" << static_cast<int>(packet.payload[0]) << '\n';
+                log_info() << "mouse mode=" << static_cast<int>(packet.payload[0]);
             }
             send_initial_wake_hid_if_ready();
         } else if (packet.type == kCmdMediaLicenseStatus) {
@@ -716,7 +708,7 @@ private:
         } else if (packet.type == kCmdActiveClients && !full_screen_requested_) {
             queue_packet_from_strand(kCmdGetFullScreen, make_simple_packet(kCmdGetFullScreen, 1), false);
             full_screen_requested_ = true;
-            std::cout << "hitsc: requested full screen\n";
+            log_info() << "requested full screen";
         } else if (packet.type == kCmdKvmSharing) {
             handle_kvm_sharing(packet);
         } else if (packet.type == kCmdSetNextMaster) {
@@ -724,8 +716,8 @@ private:
         } else if (packet.type == kCmdMaxSessionClose) {
             const std::string reason = max_session_close_reason(packet.status);
             set_megarac_view_status(state_, "session closed: " + reason);
-            std::cerr << "hitsc: kvm session closed: " << reason
-                      << " status=" << packet.status << '\n';
+            log_warning() << "kvm session closed: " << reason
+                          << " status=" << packet.status;
             close_socket();
         } else if (packet.type == kCmdPaintBlankScreen) {
             handle_blank_screen_packet(packet);
@@ -745,7 +737,7 @@ private:
         if (packet.payload.empty()) {
             validation_failed_ = true;
             set_megarac_view_status(state_, "validation failed: empty response");
-            std::cerr << "hitsc: KVM validation failed: empty response\n";
+            log_error() << "KVM validation failed: empty response";
             close_socket();
             return;
         }
@@ -755,8 +747,8 @@ private:
             validation_failed_ = true;
             const std::string reason = validation_response_name(response);
             set_megarac_view_status(state_, "validation failed: " + reason);
-            std::cerr << "hitsc: KVM validation failed: " << reason
-                      << " response=" << static_cast<int>(response) << '\n';
+            log_error() << "KVM validation failed: " << reason
+                        << " response=" << static_cast<int>(response);
             close_socket();
             return;
         }
@@ -778,9 +770,7 @@ private:
             deferred_hid_packet_.reset();
             start_write();
             if (options_.login.verbose) {
-                write_log_line(std::cout, [](std::ostream& output) {
-                    output << "hitsc: released deferred HID packet after validation";
-                });
+                log_info() << "released deferred HID packet after validation";
             }
             return;
         }
@@ -805,12 +795,10 @@ private:
 
         queue_packet_from_strand(kCmdSendHidPacket, std::move(packet), false);
         if (options_.login.verbose) {
-            write_log_line(std::cout, [&](std::ostream& output) {
-                output << "hitsc: sent synthetic wake mouse"
+            log_info() << "sent synthetic wake mouse"
                        << " mode=" << mouse_mode
                        << " x=" << (kInitialFramebufferWidth / 2)
                        << " y=" << (kInitialFramebufferHeight / 2);
-            });
         }
     }
 
@@ -833,16 +821,16 @@ private:
             make_payload_packet(kCmdSetNextMaster, allowed_status, packet.payload),
             false);
 
-        std::cout << "hitsc: granted KVM sharing request"
-                  << " payload=" << packet.payload.size() << '\n';
+        log_info() << "granted KVM sharing request"
+                   << " payload=" << packet.payload.size();
     }
 
     void query_power_status(std::string_view reason)
     {
         queue_packet_from_strand(kCmdPowerStatus, make_simple_packet(kCmdPowerStatus), false);
         if (options_.login.verbose) {
-            std::cout << "hitsc: requested power status"
-                      << " reason=" << reason << '\n';
+            log_info() << "requested power status"
+                       << " reason=" << reason;
         }
     }
 
@@ -850,8 +838,8 @@ private:
     {
         queue_packet_from_strand(kCmdGetFullScreen, make_simple_packet(kCmdGetFullScreen, 1), false);
         if (options_.login.verbose) {
-            std::cout << "hitsc: requested full screen"
-                      << " reason=" << reason << '\n';
+            log_info() << "requested full screen"
+                       << " reason=" << reason;
         }
     }
 
@@ -860,8 +848,8 @@ private:
         ++blank_screen_packets_;
         set_megarac_view_status(state_, "blank screen");
         if (blank_screen_packets_ == 1) {
-            std::cerr << "hitsc: remote requested blank screen"
-                      << " status=" << packet.status << '\n';
+            log_warning() << "remote requested blank screen"
+                          << " status=" << packet.status;
         }
 
         const auto now = std::chrono::steady_clock::now();
@@ -879,7 +867,7 @@ private:
     {
         power_status_ = static_cast<int>(status);
         if (options_.login.verbose) {
-            std::cout << "hitsc: power status=" << power_status_ << '\n';
+            log_info() << "power status=" << power_status_;
         }
         if (blank_screen_packets_ > 0 && status == 1) {
             request_full_screen_retry("power-on-after-blank");
@@ -904,8 +892,7 @@ private:
         publish_cursor(state_, std::move(*cursor));
 
         if (options_.login.verbose) {
-            write_log_line(std::cout, [&](std::ostream& output) {
-                output << "hitsc: hardware cursor"
+            log_info() << "hardware cursor"
                        << " type=" << cursor_for_log.type
                        << " x=" << cursor_for_log.x
                        << " y=" << cursor_for_log.y
@@ -913,7 +900,6 @@ private:
                        << " size=" << cursor_for_log.width << 'x' << cursor_for_log.height
                        << " pattern=" << (cursor_for_log.has_pattern ? "yes" : "no")
                        << " checksum=0x" << std::hex << cursor_for_log.checksum << std::dec;
-            });
         }
     }
 
@@ -923,20 +909,19 @@ private:
         const std::optional<MegaracVideoFrame> frame = video_assembler_.ingest(packet.payload);
         if (!frame) {
             if (options_.login.verbose && video_packets_seen_ <= 20) {
-                std::cout << "hitsc: video packet #" << video_packets_seen_
-                          << " payload=" << packet.payload.size()
-                          << " complete=no\n";
+                log_info() << "video packet #" << video_packets_seen_
+                           << " payload=" << packet.payload.size()
+                           << " complete=no";
             }
             return;
         }
 
         const std::uint8_t block_header = megarac_video_first_block_header(frame->compressed);
         if (frame->rc4_enable != 0 || !megarac_video_is_supported_first_block(block_header)) {
-            std::cerr << "hitsc: skipped unsupported video frame"
-                      << " compression=" << static_cast<int>(frame->compression_mode)
-                      << " rc4=" << static_cast<int>(frame->rc4_enable)
-                      << " first-block=0x" << std::hex << static_cast<int>(block_header) << std::dec
-                      << '\n';
+            log_warning() << "skipped unsupported video frame"
+                          << " compression=" << static_cast<int>(frame->compression_mode)
+                          << " rc4=" << static_cast<int>(frame->rc4_enable)
+                          << " first-block=0x" << std::hex << static_cast<int>(block_header) << std::dec;
             ++frames_received_since_report_;
             fps_reporting_started_ = true;
             return;
@@ -953,15 +938,14 @@ private:
         decode_options.advance_table_selector = frame->advance_table_selector;
         const int next_frame_number = frames_seen_ + 1;
         if (options_.login.verbose && (next_frame_number <= 20 || next_frame_number % 60 == 0)) {
-            std::cout << "hitsc: decoding frame #" << next_frame_number
-                      << " packets=" << packets_seen_
-                      << " video-packets=" << video_packets_seen_
-                      << " size=" << frame->width << "x" << frame->height
-                      << " compressed=" << frame->compressed.size()
-                      << " compression=" << static_cast<int>(frame->compression_mode)
-                      << " mode420=" << static_cast<int>(frame->mode420)
-                      << " first-block=0x" << std::hex << static_cast<int>(block_header) << std::dec
-                      << '\n';
+            log_info() << "decoding frame #" << next_frame_number
+                       << " packets=" << packets_seen_
+                       << " video-packets=" << video_packets_seen_
+                       << " size=" << frame->width << "x" << frame->height
+                       << " compressed=" << frame->compressed.size()
+                       << " compression=" << static_cast<int>(frame->compression_mode)
+                       << " mode420=" << static_cast<int>(frame->mode420)
+                       << " first-block=0x" << std::hex << static_cast<int>(block_header) << std::dec;
         }
         const bool can_use_previous =
             framebuffer_width_ == frame->width
@@ -980,13 +964,12 @@ private:
 
         ++frames_seen_;
         if (options_.login.verbose && (frames_seen_ <= 20 || frames_seen_ % 60 == 0)) {
-            std::cout << "hitsc: rendered frame #" << frames_seen_
-                      << " packets=" << packets_seen_
-                      << " video-packets=" << video_packets_seen_
-                      << " size=" << frame->width << "x" << frame->height
-                      << " compressed=" << frame->compressed.size()
-                      << " avg-rgb=" << average_rgb
-                      << '\n';
+            log_info() << "rendered frame #" << frames_seen_
+                       << " packets=" << packets_seen_
+                       << " video-packets=" << video_packets_seen_
+                       << " size=" << frame->width << "x" << frame->height
+                       << " compressed=" << frame->compressed.size()
+                       << " avg-rgb=" << average_rgb;
         }
     }
 
@@ -1018,9 +1001,7 @@ private:
             deferred_hid_packet_ = OutgoingPacket{type, std::move(packet), {}};
             if (options_.login.verbose && !deferred_hid_logged_) {
                 deferred_hid_logged_ = true;
-                write_log_line(std::cout, [](std::ostream& output) {
-                    output << "hitsc: deferring HID packets until KVM validation succeeds";
-                });
+                log_info() << "deferring HID packets until KVM validation succeeds";
             }
             return;
         }
@@ -1114,8 +1095,8 @@ private:
             }
 
             set_megarac_view_status(state_, std::string("error: ") + error.message());
-            std::cerr << "hitsc: kvm write error: " << error.message()
-                      << " [" << error.category().name() << ':' << error.value() << "]\n";
+            log_error() << "kvm write error: " << error.message()
+                        << " [" << error.category().name() << ':' << error.value() << ']';
             close_socket();
             return;
         }
@@ -1130,7 +1111,7 @@ private:
                     packet_payload_size_from_bytes(sent.bytes),
                     true);
             } else if (sent.type == kCmdStopSessionImmediate) {
-                std::cout << "hitsc: sent stop session packet\n";
+                log_info() << "sent stop session packet";
             }
         }
 
@@ -1214,17 +1195,16 @@ void run_megarac_view_session(const MegaracViewOptions& options, MegaracViewSess
         MegaRacSession session = login_megarac(options.login);
         MegaRacLogoutGuard logout_guard(options.login);
         logout_guard.arm(session);
-        std::cout << "hitsc: megarac login succeeded\n";
+        log_info() << "megarac login succeeded";
 
         set_megarac_view_status(state, "fetching KVM config");
         KvmConfig config = fetch_kvm_config(options.login, session.cookies, session.csrf_token);
         session.cookies.set("__Host-isActiveKVM", "true");
-        std::cout << "hitsc: kvm config fetched"
-                  << " client_ip=" << config.client_ip
-                  << " server_ip=" << config.server_ip
-                  << " token=present"
-                  << " reconnect=" << (config.reconnect_enabled ? "yes" : "no")
-                  << '\n';
+        log_info() << "kvm config fetched"
+                   << " client_ip=" << config.client_ip
+                   << " server_ip=" << config.server_ip
+                   << " token=present"
+                   << " reconnect=" << (config.reconnect_enabled ? "yes" : "no");
 
         asio::io_context io;
         ssl::context tls_context(ssl::context::tls_client);
@@ -1283,12 +1263,15 @@ void run_megarac_view_session(const MegaracViewOptions& options, MegaracViewSess
         const std::string subprotocol = selected_subprotocol(response);
         set_subprotocol(state, subprotocol);
         set_megarac_view_status(state, "connected");
-        std::cout << "hitsc: kvm websocket connected"
-                  << " subprotocol=" << subprotocol;
-        if (options.idle_timeout_seconds > 0) {
-            std::cout << " idle-timeout=" << options.idle_timeout_seconds << "s\n";
-        } else {
-            std::cout << " idle-timeout=disabled\n";
+        {
+            LogLine line = log_info();
+            line << "kvm websocket connected"
+                 << " subprotocol=" << subprotocol;
+            if (options.idle_timeout_seconds > 0) {
+                line << " idle-timeout=" << options.idle_timeout_seconds << "s";
+            } else {
+                line << " idle-timeout=disabled";
+            }
         }
 
         if (stop_requested.load()) {

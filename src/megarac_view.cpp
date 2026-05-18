@@ -1,6 +1,7 @@
 #include "megarac_view.hpp"
 
 #include "diagnostics.hpp"
+#include "log.hpp"
 #include "megarac_cursor.hpp"
 #include "megarac_hid.hpp"
 #include "megarac_view_session.hpp"
@@ -238,27 +239,26 @@ void send_keyboard_report(
         make_megarac_keyboard_packet(MegaracKeyboardReport{modifiers, keys}, sequence++);
     const bool accepted = queue_megarac_view_packet(state, kCmdSendHidPacket, std::move(packet), false);
     if (verbose && accepted) {
-        write_log_line(std::cout, [&](std::ostream& output) {
-            output << "hitsc: queued keyboard"
-                   << " modifiers=0x" << std::hex << std::setw(2) << std::setfill('0')
-                   << static_cast<int>(modifiers)
-                   << std::dec << std::setfill(' ')
-                   << " keys=";
-            bool first = true;
-            for (const std::uint8_t key : keys) {
-                if (key == 0) {
-                    continue;
-                }
-                if (!first) {
-                    output << ',';
-                }
-                first = false;
-                output << static_cast<int>(key);
+        LogLine line = log_info();
+        line << "queued keyboard"
+             << " modifiers=0x" << std::hex << std::setw(2) << std::setfill('0')
+             << static_cast<int>(modifiers)
+             << std::dec << std::setfill(' ')
+             << " keys=";
+        bool first = true;
+        for (const std::uint8_t key : keys) {
+            if (key == 0) {
+                continue;
             }
-            if (first) {
-                output << "none";
+            if (!first) {
+                line << ',';
             }
-        });
+            first = false;
+            line << static_cast<int>(key);
+        }
+        if (first) {
+            line << "none";
+        }
     }
 }
 
@@ -291,14 +291,12 @@ void send_mouse_report(
     const bool coalesce = buttons == 0 && wheel == 0;
     const bool accepted = queue_megarac_view_packet(state, kCmdSendHidPacket, std::move(packet), coalesce);
     if (verbose && accepted) {
-        write_log_line(std::cout, [&](std::ostream& output) {
-            output << "hitsc: queued mouse"
+        log_info() << "queued mouse"
                    << " mode=" << mouse_mode
                    << " buttons=" << static_cast<int>(buttons)
                    << " x=" << position.x
                    << " y=" << position.y
                    << " wheel=" << wheel;
-        });
     }
 }
 
@@ -410,12 +408,10 @@ void run_megarac_view(const MegaracViewOptions& options)
                 } else if (event.type == SDL_EVENT_KEY_DOWN ||
                            event.type == SDL_EVENT_KEY_UP) {
                     if (options.login.verbose) {
-                        write_log_line(std::cout, [&](std::ostream& output) {
-                            output << "hitsc: key "
+                        log_info() << "key "
                                    << (event.type == SDL_EVENT_KEY_DOWN ? "down" : "up")
                                    << " scancode=" << event.key.scancode
                                    << " key=" << event.key.key;
-                        });
                     }
 
                     if (event.type == SDL_EVENT_KEY_DOWN && event.key.repeat) {
@@ -584,10 +580,9 @@ void run_megarac_view(const MegaracViewOptions& options)
 
                 ++presented_frames;
                 if (options.login.verbose && (presented_frames <= 20 || presented_frames % 60 == 0)) {
-                    std::cout << "hitsc: presented frame #" << presented_frames
-                              << " sequence=" << frame->sequence
-                              << " avg-rgb=" << sampled_average_rgb(frame->rgba)
-                              << '\n';
+                    log_info() << "presented frame #" << presented_frames
+                               << " sequence=" << frame->sequence
+                               << " avg-rgb=" << sampled_average_rgb(frame->rgba);
                 }
             }
 

@@ -2,6 +2,7 @@
 
 #include "bmc_session.hpp"
 #include "http_client.hpp"
+#include "log.hpp"
 #include "text.hpp"
 #include "url.hpp"
 
@@ -9,10 +10,6 @@
 
 #include <chrono>
 #include <cctype>
-#include <ctime>
-#include <iomanip>
-#include <iostream>
-#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -23,27 +20,6 @@ namespace hitsc {
 namespace http = boost::beast::http;
 
 namespace {
-
-std::string log_prefix()
-{
-    const auto now = std::chrono::system_clock::now();
-    const auto time = std::chrono::system_clock::to_time_t(now);
-    const auto milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(
-        now.time_since_epoch()).count() % 1000;
-
-    std::tm local_time{};
-#ifdef _WIN32
-    localtime_s(&local_time, &time);
-#else
-    localtime_r(&time, &local_time);
-#endif
-
-    std::ostringstream output;
-    output << std::put_time(&local_time, "%H:%M:%S")
-           << '.' << std::setw(3) << std::setfill('0') << milliseconds
-           << " hitsc: ";
-    return output.str();
-}
 
 bool is_redirect_status(int status)
 {
@@ -240,7 +216,7 @@ bool logout_aten(const LoginOptions& options, CookieJar& cookies)
         }
         const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - started_at).count();
-        std::cout << log_prefix() << "aten logout duration-ms=" << elapsed_ms << '\n';
+        log_info() << "aten logout duration-ms=" << elapsed_ms;
     };
 
     const std::vector<Header> headers{
@@ -262,16 +238,18 @@ bool logout_aten(const LoginOptions& options, CookieJar& cookies)
             5);
 
         if (response.result_int() >= 200 && response.result_int() < 300) {
-            std::cout << log_prefix() << "aten logout succeeded\n";
+            if (options.verbose) {
+                log_info() << "aten logout succeeded";
+            }
             log_duration();
             return true;
         }
 
-        std::cerr << log_prefix() << "aten logout warning: HTTP "
-                  << response.result_int() << ": "
-                  << body_snippet(decode_response_body(response)) << '\n';
+        log_warning() << "aten logout warning: HTTP "
+                      << response.result_int() << ": "
+                      << body_snippet(decode_response_body(response));
     } catch (const std::exception& ex) {
-        std::cerr << log_prefix() << "aten logout warning: " << ex.what() << '\n';
+        log_warning() << "aten logout warning: " << ex.what();
     }
 
     log_duration();
@@ -325,11 +303,13 @@ std::string fetch_aten_ikvm_bootstrap(const LoginOptions& options, CookieJar& co
         if (last_status >= 200 && last_status < 300) {
             const std::string body = decode_response_body(response);
             const std::string entry_value = extract_entry_value_from_html(body);
-            std::cout << log_prefix() << "aten iKVM bootstrap touched"
-                      << " target=" << target
-                      << " http=" << last_status
-                      << " entry-value=" << (entry_value.empty() ? "missing" : "present")
-                      << " entry-value-bytes=" << entry_value.size() << '\n';
+            if (options.verbose) {
+                log_info() << "aten iKVM bootstrap touched"
+                           << " target=" << target
+                           << " http=" << last_status
+                           << " entry-value=" << (entry_value.empty() ? "missing" : "present")
+                           << " entry-value-bytes=" << entry_value.size();
+            }
             return entry_value;
         }
 

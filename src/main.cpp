@@ -1,11 +1,13 @@
 #include "cli.hpp"
 #include "diagnostics.hpp"
+#include "log.hpp"
 
 #include <cstdlib>
 #include <iostream>
 
 int main(int argc, char* argv[])
 {
+    hitsc::initialize_logging();
     hitsc::install_exception_handlers();
 
     try {

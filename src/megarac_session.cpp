@@ -2,13 +2,13 @@
 
 #include "bmc_session.hpp"
 #include "http_client.hpp"
+#include "log.hpp"
 #include "text.hpp"
 #include "url.hpp"
 
 #include <boost/beast/http.hpp>
 #include <boost/json.hpp>
 
-#include <iostream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -95,15 +95,15 @@ bool logout_megarac(const LoginOptions& options, CookieJar& cookies, std::string
             5);
 
         if (response.result_int() >= 200 && response.result_int() < 300) {
-            std::cout << "hitsc: megarac logout succeeded\n";
+            log_info() << "megarac logout succeeded";
             return true;
         }
 
-        std::cerr << "hitsc: megarac logout warning: HTTP "
-                  << response.result_int() << ": "
-                  << body_snippet(decode_response_body(response)) << '\n';
+        log_warning() << "megarac logout warning: HTTP "
+                      << response.result_int() << ": "
+                      << body_snippet(decode_response_body(response));
     } catch (const std::exception& ex) {
-        std::cerr << "hitsc: megarac logout warning: " << ex.what() << '\n';
+        log_warning() << "megarac logout warning: " << ex.what();
     }
 
     return false;
