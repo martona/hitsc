@@ -43,7 +43,29 @@ build\windows-debug\hitsc.exe
 
 ## Usage
 
-## Diagnostics
+Open a MegaRAC iKVM session:
+
+```powershell
+.\build\windows-debug\hitsc.exe megarac https://bmc.example.com -u USERNAME
+```
+
+Open an ATEN/Supermicro iKVM session:
+
+```powershell
+.\build\windows-debug\hitsc.exe aten https://bmc.example.com -u USERNAME
+```
+
+Passwords can be passed with `--password`, read from an environment variable
+with `--password-env`, read from `HITSC_PASSWORD`, or entered at the prompt.
+`HITSC_USERNAME` can provide the default username.
+
+Use `--help` to inspect the command line:
+
+```powershell
+.\build\windows-debug\hitsc.exe --help
+.\build\windows-debug\hitsc.exe megarac --help
+.\build\windows-debug\hitsc.exe aten --help
+```
 
 ## TLS
 

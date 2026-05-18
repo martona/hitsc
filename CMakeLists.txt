@@ -34,7 +34,6 @@ endif()
 
 add_executable(
   hitsc
-  src/aten_probe.cpp
   src/aten_session.cpp
   src/aten_view.cpp
   src/aspeed_decoder.cpp
@@ -44,9 +43,6 @@ add_executable(
   src/cookie_jar.cpp
   src/diagnostics.cpp
   src/http_client.cpp
-  src/megarac_capture.cpp
-  src/megarac_capture_decode.cpp
-  src/megarac_probe.cpp
   src/megarac_view.cpp
   src/main.cpp
   src/megarac_cursor.cpp

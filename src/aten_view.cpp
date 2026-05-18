@@ -546,17 +546,6 @@ void stop_aten_network(AtenViewState& state, std::atomic_bool& stop_requested, s
     }
 }
 
-std::string normalized_websocket_path(std::string path)
-{
-    if (path.empty()) {
-        return "/";
-    }
-    if (path.front() != '/') {
-        path.insert(path.begin(), '/');
-    }
-    return path;
-}
-
 std::vector<std::uint8_t> buffer_bytes(const beast::flat_buffer& buffer)
 {
     std::vector<std::uint8_t> bytes(boost::asio::buffer_size(buffer.data()));
@@ -1025,15 +1014,6 @@ std::vector<std::uint8_t> make_framebuffer_update_request(
     return request;
 }
 
-void send_framebuffer_update_request(
-    RfbStream& rfb,
-    std::uint16_t width,
-    std::uint16_t height,
-    bool incremental)
-{
-    rfb.write(make_framebuffer_update_request(width, height, incremental));
-}
-
 AtenFramebufferRect read_vendor_rect_header(RfbStream& rfb)
 {
     const std::vector<std::uint8_t> header = rfb.read_exact(20);
@@ -1046,34 +1026,6 @@ AtenFramebufferRect read_vendor_rect_header(RfbStream& rfb)
     rect.mode = load_be32_signed(header, 12);
     rect.data_length = load_be32(header, 16);
     return rect;
-}
-
-void handle_insyde_framebuffer_update(RfbStream& rfb, int update_number)
-{
-    rfb.read_u8();
-    const std::uint16_t rect_count = rfb.read_be16();
-    std::cout << log_prefix() << "aten rfb framebuffer update #" << update_number
-              << " rects=" << rect_count << '\n';
-
-    for (std::uint16_t i = 0; i < rect_count; ++i) {
-        const AtenFramebufferRect rect = read_vendor_rect_header(rfb);
-        std::vector<std::uint8_t> payload;
-        if (rect.data_length != 0) {
-            payload = rfb.read_exact(rect.data_length);
-        }
-
-        std::cout << log_prefix() << "aten rfb rect"
-                  << " index=" << (i + 1)
-                  << " xy=" << rect.x << ',' << rect.y
-                  << " size=" << rect.width << 'x' << rect.height
-                  << " encoding=" << rect.encoding << '(' << encoding_name(rect.encoding) << ')'
-                  << " mode=" << rect.mode
-                  << " payload=" << rect.data_length;
-        if (!payload.empty()) {
-            std::cout << " first-bytes=" << hex_preview(payload);
-        }
-        std::cout << '\n';
-    }
 }
 
 AtenAstPayloadHeader read_ast_payload_header(const std::vector<std::uint8_t>& payload)
@@ -1093,183 +1045,6 @@ AtenAstPayloadHeader read_ast_payload_header(const std::vector<std::uint8_t>& pa
 bool ast_payload_is_frame_end_only(const std::vector<std::uint8_t>& payload)
 {
     return payload.size() >= 8 && load_le32(payload, 4) == kAtenAstFrameEndWord;
-}
-
-void handle_insyde_framebuffer_update(
-    RfbStream& rfb,
-    int update_number,
-    AspeedDecoder& decoder,
-    AtenViewState& state,
-    const AtenViewOptions& options,
-    std::vector<std::uint8_t>& previous_rgba,
-    int& previous_width,
-    int& previous_height)
-{
-    rfb.read_u8();
-    const std::uint16_t rect_count = rfb.read_be16();
-    if (options.login.verbose) {
-        std::cout << log_prefix() << "aten rfb framebuffer update #" << update_number
-                  << " rects=" << rect_count << '\n';
-    }
-
-    for (std::uint16_t i = 0; i < rect_count; ++i) {
-        const AtenFramebufferRect rect = read_vendor_rect_header(rfb);
-        std::vector<std::uint8_t> payload;
-        if (rect.data_length != 0) {
-            payload = rfb.read_exact(rect.data_length);
-        }
-
-        if (options.login.verbose) {
-            std::cout << log_prefix() << "aten rfb rect"
-                      << " index=" << (i + 1)
-                      << " xy=" << rect.x << ',' << rect.y
-                      << " size=" << rect.width << 'x' << rect.height
-                      << " encoding=" << rect.encoding << '(' << encoding_name(rect.encoding) << ')'
-                      << " mode=" << rect.mode
-                      << " payload=" << rect.data_length;
-            if (!payload.empty()) {
-                std::cout << " first-bytes=" << hex_preview(payload);
-            }
-            std::cout << '\n';
-        }
-
-        if (rect.encoding != 87 || payload.empty()) {
-            continue;
-        }
-
-        const AtenAstPayloadHeader ast = read_ast_payload_header(payload);
-        std::vector<std::uint8_t> compressed(payload.begin() + 4, payload.end());
-        if (compressed.empty()) {
-            continue;
-        }
-
-        AspeedDecodeOptions decode_options;
-        decode_options.width = rect.width;
-        decode_options.height = rect.height;
-        decode_options.mode420 = ast.mode420;
-        decode_options.jpeg_table_selector = ast.y_selector;
-        decode_options.chroma_table_selector = ast.uv_selector;
-        decode_options.advance_table_selector = 0;
-        decode_options.advance_chroma_table_selector = 0;
-        decode_options.use_separate_chroma_selectors = true;
-
-        const bool can_reuse_previous =
-            previous_width == rect.width &&
-            previous_height == rect.height &&
-            previous_rgba.size() == static_cast<std::size_t>(rect.width) *
-                    static_cast<std::size_t>(rect.height) * 4U;
-        std::vector<std::uint8_t> rgba = decoder.decode_rgba(
-            decode_options,
-            compressed,
-            can_reuse_previous ? &previous_rgba : nullptr);
-
-        AtenViewFrame frame;
-        frame.width = rect.width;
-        frame.height = rect.height;
-        frame.rgba = rgba;
-        store_aten_frame(state, std::move(frame));
-
-        previous_width = rect.width;
-        previous_height = rect.height;
-        previous_rgba = std::move(rgba);
-
-        if (options.login.verbose && (update_number <= 20 || update_number % 60 == 0)) {
-            std::cout << log_prefix() << "rendered ATEN frame #" << update_number
-                      << " size=" << rect.width << 'x' << rect.height
-                      << " compressed=" << compressed.size()
-                      << " mode=" << ast.mode
-                      << " y-sel=" << ast.y_selector
-                      << " uv-sel=" << ast.uv_selector
-                      << " avg-rgb=" << sampled_average_rgb(previous_rgba)
-                      << '\n';
-        }
-    }
-}
-
-void handle_cursor_position(RfbStream& rfb)
-{
-    const std::uint32_t x = rfb.read_be32();
-    const std::uint32_t y = rfb.read_be32();
-    const std::uint32_t width = rfb.read_be32();
-    const std::uint32_t height = rfb.read_be32();
-    const std::uint32_t valid = rfb.read_be32();
-    std::cout << log_prefix() << "aten rfb cursor"
-              << " xy=" << x << ',' << y
-              << " size=" << width << 'x' << height
-              << " valid=" << valid << '\n';
-
-    if (valid == 1) {
-        rfb.read_be32();
-        const std::uint64_t pattern_size =
-            static_cast<std::uint64_t>(width) * static_cast<std::uint64_t>(height) * 2U;
-        if (pattern_size > 16U * 1024U * 1024U) {
-            throw std::runtime_error("ATEN RFB cursor pattern is implausibly large");
-        }
-        rfb.read_exact(static_cast<std::size_t>(pattern_size));
-    }
-}
-
-void run_rfb_event_probe(RfbStream& rfb, const AtenRfbServerInit& init, const AtenViewOptions& options)
-{
-    int updates = 0;
-    while (options.framebuffer_update_limit == 0 || updates < options.framebuffer_update_limit) {
-        const std::uint8_t message_type = rfb.read_u8();
-        switch (message_type) {
-        case 0:
-            if (!init.insyde_extension) {
-                throw std::runtime_error("standard RFB framebuffer updates are not implemented yet");
-            }
-            ++updates;
-            handle_insyde_framebuffer_update(rfb, updates);
-            std::this_thread::sleep_for(std::chrono::milliseconds(66));
-            send_framebuffer_update_request(rfb, init.width, init.height, false);
-            break;
-        case 2:
-            std::cout << log_prefix() << "aten rfb bell\n";
-            break;
-        case 4:
-            handle_cursor_position(rfb);
-            break;
-        case 22:
-            std::cout << log_prefix() << "aten rfb message 22 value=" << static_cast<int>(rfb.read_u8()) << '\n';
-            break;
-        case 53:
-        case 54:
-        case 55: {
-            const std::uint8_t crypto = rfb.read_u8();
-            const std::uint8_t mode = rfb.read_u8();
-            const std::uint8_t status = rfb.read_u8();
-            std::cout << log_prefix() << "aten rfb mouse/control"
-                      << " type=" << static_cast<int>(message_type)
-                      << " crypto=" << static_cast<int>(crypto)
-                      << " mode=" << static_cast<int>(mode)
-                      << " status=" << static_cast<int>(status) << '\n';
-            break;
-        }
-        case 57: {
-            const std::uint32_t count = rfb.read_be32();
-            const std::uint32_t code_digits = rfb.read_be32();
-            const std::vector<std::uint8_t> message = rfb.read_exact(256);
-            std::cout << log_prefix() << "aten rfb control-message"
-                      << " count=" << count
-                      << " code-digits=" << code_digits
-                      << " first-bytes=" << hex_preview(message) << '\n';
-            break;
-        }
-        case 60:
-        case 63:
-            std::cout << log_prefix() << "aten rfb service"
-                      << " type=" << static_cast<int>(message_type)
-                      << " value=" << static_cast<int>(rfb.read_u8()) << '\n';
-            break;
-        default:
-            throw std::runtime_error(
-                "unhandled ATEN RFB server message type " + std::to_string(message_type));
-        }
-    }
-
-    std::cout << log_prefix() << "aten rfb update limit reached"
-              << " updates=" << updates << '\n';
 }
 
 class AtenProtocolRfbSession : public std::enable_shared_from_this<AtenProtocolRfbSession> {
@@ -1612,13 +1387,6 @@ private:
         }
 
         framebuffer_request_pending_ = false;
-
-        if (options_.framebuffer_update_limit != 0 && updates_ >= options_.framebuffer_update_limit) {
-            std::cout << log_prefix() << "aten rfb update limit reached"
-                      << " updates=" << updates_ << '\n';
-            close_protocol_and_network();
-            return;
-        }
 
         schedule_framebuffer_update_request();
     }
@@ -2255,15 +2023,13 @@ void run_aten_network_session(const AtenViewOptions& options, AtenViewState& sta
     std::cout << log_prefix() << "cookies stored: " << session.cookies.size() << '\n';
 
     std::string rfb_credential = options.login.username;
-    if (options.fetch_bootstrap) {
-        const std::string bootstrap_credential =
-            fetch_aten_ikvm_bootstrap(options.login, session.cookies);
-        if (!bootstrap_credential.empty()) {
-            rfb_credential = bootstrap_credential;
-        } else {
-            std::cerr << log_prefix() << "aten warning: bootstrap did not expose entry_value; "
-                         "falling back to login username for RFB auth\n";
-        }
+    const std::string bootstrap_credential =
+        fetch_aten_ikvm_bootstrap(options.login, session.cookies);
+    if (!bootstrap_credential.empty()) {
+        rfb_credential = bootstrap_credential;
+    } else {
+        std::cerr << log_prefix() << "aten warning: bootstrap did not expose entry_value; "
+                     "falling back to login username for RFB auth\n";
     }
 
     set_aten_status(state, "connecting websocket");
@@ -2284,8 +2050,13 @@ void run_aten_network_session(const AtenViewOptions& options, AtenViewState& sta
 
     websocket::stream_base::timeout timeout;
     timeout.handshake_timeout = std::chrono::seconds(30);
-    timeout.idle_timeout = std::chrono::seconds(options.idle_timeout_seconds);
-    timeout.keep_alive_pings = true;
+    if (options.idle_timeout_seconds > 0) {
+        timeout.idle_timeout = std::chrono::seconds(options.idle_timeout_seconds);
+        timeout.keep_alive_pings = true;
+    } else {
+        timeout.idle_timeout = websocket::stream_base::none();
+        timeout.keep_alive_pings = false;
+    }
     ws.set_option(timeout);
 
     const std::string host = make_host_header(options.login.base_url);
@@ -2299,12 +2070,16 @@ void run_aten_network_session(const AtenViewOptions& options, AtenViewState& sta
         }
     }));
 
-    const std::string path = normalized_websocket_path(options.websocket_path);
+    const std::string path = "/";
     websocket::response_type response;
     ws.handshake(response, host, path);
     std::cout << log_prefix() << "aten websocket connected"
-              << " path=" << path
-              << " idle-timeout=" << options.idle_timeout_seconds << "s\n";
+              << " path=" << path;
+    if (options.idle_timeout_seconds > 0) {
+        std::cout << " idle-timeout=" << options.idle_timeout_seconds << "s\n";
+    } else {
+        std::cout << " idle-timeout=disabled\n";
+    }
     set_aten_force_close(state, [&ws] {
         beast::error_code error;
         beast::get_lowest_layer(ws).socket().cancel(error);
@@ -2704,9 +2479,6 @@ void run_aten_view(const AtenViewOptions& options)
             if (network_done->load()) {
                 if (std::exception_ptr exception = take_aten_exception(*state)) {
                     std::rethrow_exception(exception);
-                }
-                if (options.framebuffer_update_limit != 0) {
-                    running = false;
                 }
             }
         }

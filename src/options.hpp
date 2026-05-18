@@ -14,31 +14,14 @@ struct LoginOptions {
     bool insecure = false;
 };
 
-struct MegaracProbeOptions {
-    LoginOptions login;
-    std::string capture_path;
-    int packet_limit = 80;
-    int idle_timeout_seconds = 10;
-};
-
 struct MegaracViewOptions {
     LoginOptions login;
     int idle_timeout_seconds = 0;
 };
 
-struct AtenProbeOptions {
-    LoginOptions login;
-    bool fetch_bootstrap = true;
-    std::string websocket_path = "/";
-    int idle_timeout_seconds = 10;
-};
-
 struct AtenViewOptions {
     LoginOptions login;
-    bool fetch_bootstrap = true;
-    std::string websocket_path = "/";
-    int idle_timeout_seconds = 10;
-    int framebuffer_update_limit = 0;
+    int idle_timeout_seconds = 0;
     bool shared = true;
 };
 

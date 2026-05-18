@@ -1,59 +1,28 @@
-# aspeed_codec
-A javascript decoder which supports aspeed jpeg.
-The pure javascript(lib/decoder_js.js) and webassembly(lib/decoder_wasm.*) implemenattions are both included. webassembly one will be used if possbile.
+# aspeed_codec provenance
 
-# Updates
-1.0.1 - 2022-03-24
-* Fix wasm decoder crash if complex video screen
+This directory contains a trimmed vendored subset of the upstream
+`AspeedTech-BMC/aspeed_codec` project:
 
-1.0.0 - 2021-12-03
-* Initial release
+https://github.com/AspeedTech-BMC/aspeed_codec
 
-# Steps
-## Compile your webassembly module
+The upstream project is licensed under MPL-2.0; see `LICENSE` in this
+directory.
 
-Although the webassembly module is ready, you can also modify and update by yourself.
+## Retained files
 
-Make sure your [emsdk](https://emscripten.org/docs/getting_started/downloads.html) environment is ready first.
+- `src/decoder.c`
+- `src/jpegdec.h`
+- `src/jtable.h`
+- `LICENSE`
 
-      $ emcc src/decoder.c -o lib/decoder_wasm.js -s ALLOW_MEMORY_GROWTH=1 -s MODULARIZE=1 -s EXPORT_ES6=1 -s EXPORTED_FUNCTIONS="['_malloc', '_free']" -O3
+`hitsc` builds the retained C decoder directly through CMake and wraps it from
+`src/aspeed_decoder.cpp`.
 
-### Required Emscripten flags
-The table below explains Emscripten-specific build flags required to build this sample:
+## Omitted files
 
-| Flag | Description |
-|------|-------------|
-| `-s ALLOW_MEMORY_GROWTH=1` | Allows the total amount of memory used to change depending on the demands of the application. |
-| `-s EXPORT_ES6=1` | Flag will include the necessary export object expected by the import statement.|
-| `-s MODULARIZE=1` | Flag will wrap the generated JavaScript code’s `Module` object in a function. EXPORT_ES6 requires MODULARIZE to be set.|
-| `-s EXPORTED_FUNCTIONS="['_malloc', '_free']"` | Export function, _malloc/_free, to get memory for wasm module usage.|
+The upstream JavaScript package metadata and browser decoder artifacts are not
+used by `hitsc` and are intentionally not vendored here:
 
-## Example Usage
-
-```js
-import {decode} from "./lib/decoder.js";
-
-let outbuf = decode(
-      header: {
-            frame: sequence_number,
-            mode420: mode,
-            selector: sel,
-            advance_selector: adv_sel,
-            width: width,
-            height: height,
-      },
-      buffer: data
-);
-```
-* frame: sequence number of the aspeed jpeg frame, which should continuous increase.
-* mode420: 1 for 420, and 0 for 444
-* selector: [0~11], the quality of the compressed data which should be the same with the one that video engine used.
-* advance_selector: [0~11], the quality of pass-2 compressed data which should be the same with the one that video engine used.
-* width: width of the aspeed jpeg
-* height: height of the aspeed jpeg
-* buffer: the data of the aspeed video engine, which includes aspeed jpeg header and aspeed jpeg data.
-
-# Data format
-
-Please refer to `Video stream data format – ASPEED mode
-compression` of `SDK User Guide` of [aspeed sdk](https://github.com/AspeedTech-BMC/openbmc/releases/).
+- `package.json`
+- `lib/*.js`
+- `lib/*.wasm`
