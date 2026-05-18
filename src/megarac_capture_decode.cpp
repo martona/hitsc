@@ -255,13 +255,12 @@ void decode_megarac_capture(const MegaracCaptureDecodeOptions& options)
             continue;
         }
 
-        const AspeedDecodeOptions decode_options{
-            frame->width,
-            frame->height,
-            frame->mode420,
-            frame->jpeg_table_selector,
-            frame->advance_table_selector,
-        };
+        AspeedDecodeOptions decode_options;
+        decode_options.width = frame->width;
+        decode_options.height = frame->height;
+        decode_options.mode420 = frame->mode420;
+        decode_options.jpeg_table_selector = frame->jpeg_table_selector;
+        decode_options.advance_table_selector = frame->advance_table_selector;
 
         const bool can_use_previous =
             framebuffer_width == frame->width

@@ -945,13 +945,12 @@ private:
         ++frames_received_since_report_;
         fps_reporting_started_ = true;
         blank_screen_packets_ = 0;
-        const AspeedDecodeOptions decode_options{
-            frame->width,
-            frame->height,
-            frame->mode420,
-            frame->jpeg_table_selector,
-            frame->advance_table_selector,
-        };
+        AspeedDecodeOptions decode_options;
+        decode_options.width = frame->width;
+        decode_options.height = frame->height;
+        decode_options.mode420 = frame->mode420;
+        decode_options.jpeg_table_selector = frame->jpeg_table_selector;
+        decode_options.advance_table_selector = frame->advance_table_selector;
         const int next_frame_number = frames_seen_ + 1;
         if (options_.login.verbose && (next_frame_number <= 20 || next_frame_number % 60 == 0)) {
             std::cout << "hitsc: decoding frame #" << next_frame_number

@@ -107,11 +107,14 @@ struct PendingAtenInputPacket {
     bool coalesce_mouse_motion = false;
 };
 
+struct AtenQueuedWrite {
+    std::vector<std::uint8_t> packet;
+};
+
 struct AtenViewState {
     std::mutex frame_mutex;
     std::mutex control_mutex;
-    AtenViewFrame frame;
-    bool has_frame = false;
+    std::shared_ptr<const AtenViewFrame> frame;
     std::uint64_t frame_sequence = 0;
     std::string status = "starting";
     std::exception_ptr exception;
@@ -128,8 +131,9 @@ struct AtenAstPayloadHeader {
 };
 
 constexpr std::uint64_t kMouseMotionIntervalMilliseconds = 10;
-constexpr std::chrono::milliseconds kAtenFramebufferRequestBackoff{33};
+constexpr std::chrono::milliseconds kAtenFramebufferRequestBackoff{66};
 constexpr std::size_t kMaxQueuedInputPackets = 512;
+constexpr std::size_t kMaxAtenMessagesPerReceiveDrain = 8;
 constexpr std::uint32_t kAtenAstFrameEndWord = 0x90000000U;
 using AtenKeyDownState = std::array<bool, 256>;
 
@@ -259,15 +263,16 @@ void store_aten_frame(AtenViewState& state, AtenViewFrame frame)
 {
     std::lock_guard lock(state.frame_mutex);
     frame.sequence = ++state.frame_sequence;
-    state.frame = std::move(frame);
-    state.has_frame = true;
+    state.frame = std::make_shared<AtenViewFrame>(std::move(frame));
 }
 
-std::optional<AtenViewFrame> take_latest_aten_frame(AtenViewState& state, std::uint64_t last_sequence)
+std::shared_ptr<const AtenViewFrame> take_latest_aten_frame(
+    AtenViewState& state,
+    std::uint64_t last_sequence)
 {
     std::lock_guard lock(state.frame_mutex);
-    if (!state.has_frame || state.frame.sequence == last_sequence) {
-        return std::nullopt;
+    if (!state.frame || state.frame->sequence == last_sequence) {
+        return {};
     }
     return state.frame;
 }
@@ -1178,56 +1183,72 @@ void run_rfb_event_probe(RfbStream& rfb, const AtenRfbServerInit& init, const At
               << " updates=" << updates << '\n';
 }
 
-class AtenAsyncRfbSession : public std::enable_shared_from_this<AtenAsyncRfbSession> {
+class AtenProtocolRfbSession : public std::enable_shared_from_this<AtenProtocolRfbSession> {
 public:
-    AtenAsyncRfbSession(
+    AtenProtocolRfbSession(
         asio::io_context& io,
-        AtenWebSocket& ws,
         AtenViewState& state,
         AtenViewOptions options,
         AtenRfbServerInit init,
-        std::deque<std::uint8_t> initial_bytes,
         std::atomic_bool& stop_requested)
         : io_(io)
-        , ws_(ws)
         , state_(state)
         , options_(std::move(options))
         , init_(std::move(init))
-        , receive_queue_(std::move(initial_bytes))
         , stop_requested_(stop_requested)
         , strand_(asio::make_strand(io))
         , framebuffer_request_timer_(io)
     {
     }
 
-    void start()
+    void set_send_packet_callback(std::function<void(std::vector<std::uint8_t>, bool)> callback)
     {
-        set_aten_status(state_, "waiting for video");
-        auto weak = weak_from_this();
-        install_aten_input_sink(
-            state_,
-            [weak](std::vector<std::uint8_t> packet, bool coalesce_mouse_motion) mutable {
-                if (auto self = weak.lock()) {
-                    self->enqueue_input(std::move(packet), coalesce_mouse_motion);
-                }
-            });
+        send_packet_ = std::move(callback);
+    }
 
-        queue_write(make_framebuffer_update_request(init_.width, init_.height, false), false);
-        std::cout << log_prefix() << "requested ATEN framebuffer update\n";
-        schedule_framebuffer_update_request();
-        parse_receive_queue();
-        start_read();
+    void set_request_close_callback(std::function<void()> callback)
+    {
+        request_close_ = std::move(callback);
+    }
+
+    void start(std::deque<std::uint8_t> initial_bytes)
+    {
+        auto self = shared_from_this();
+        asio::post(strand_, [self, initial_bytes = std::move(initial_bytes)]() mutable {
+            if (self->closed_ || self->stop_requested_.load()) {
+                return;
+            }
+            set_aten_status(self->state_, "waiting for video");
+            self->receive_queue_ = std::move(initial_bytes);
+            self->queue_framebuffer_update_request(false);
+            std::cout << log_prefix() << "requested ATEN framebuffer update\n";
+            self->schedule_receive_parse();
+        });
+    }
+
+    void enqueue_bytes(std::vector<std::uint8_t> bytes)
+    {
+        auto self = shared_from_this();
+        asio::post(strand_, [self, bytes = std::move(bytes)] {
+            if (self->closed_ || self->stop_requested_.load()) {
+                return;
+            }
+            self->stats_rx_bytes_ += bytes.size();
+            self->append_receive_bytes(bytes);
+            self->schedule_receive_parse();
+        });
     }
 
     void request_stop()
     {
-        std::cerr << log_prefix() << "aten websocket stop requested\n";
         auto self = shared_from_this();
         asio::post(strand_, [self] {
-            std::cerr << log_prefix() << "aten websocket stop handler begin\n";
-            self->stop_requested_.store(true);
-            self->close_now();
-            std::cerr << log_prefix() << "aten websocket stop handler end\n";
+            if (self->closed_) {
+                return;
+            }
+            self->closed_ = true;
+            self->framebuffer_request_timer_.cancel();
+            self->receive_queue_.clear();
         });
     }
 
@@ -1235,6 +1256,11 @@ private:
     bool can_read(std::size_t offset, std::size_t count) const
     {
         return offset <= receive_queue_.size() && count <= receive_queue_.size() - offset;
+    }
+
+    std::size_t receive_buffered_bytes() const
+    {
+        return receive_queue_.size();
     }
 
     std::uint8_t peek_u8(std::size_t offset) const
@@ -1301,6 +1327,11 @@ private:
         }
     }
 
+    void append_receive_bytes(const std::vector<std::uint8_t>& bytes)
+    {
+        receive_queue_.insert(receive_queue_.end(), bytes.begin(), bytes.end());
+    }
+
     AtenFramebufferRect read_rect_header()
     {
         AtenFramebufferRect rect;
@@ -1359,7 +1390,7 @@ private:
 
     bool message_available() const
     {
-        if (receive_queue_.empty()) {
+        if (receive_buffered_bytes() == 0) {
             return false;
         }
 
@@ -1386,11 +1417,17 @@ private:
         }
     }
 
-    void parse_available_messages()
+    bool parse_available_messages()
     {
+        std::size_t parsed_messages = 0;
         while (!closed_ && !stop_requested_.load() && message_available()) {
             parse_one_message();
+            ++parsed_messages;
+            if (parsed_messages >= kMaxAtenMessagesPerReceiveDrain) {
+                return false;
+            }
         }
+        return true;
     }
 
     void parse_one_message()
@@ -1402,7 +1439,7 @@ private:
             std::cout << log_prefix() << "aten rfb message #" << total_messages_
                       << " type=" << static_cast<int>(message_type)
                       << " " << aten_server_message_name(message_type)
-                      << " buffered=" << receive_queue_.size() << '\n';
+                      << " buffered=" << receive_buffered_bytes() << '\n';
         }
         switch (message_type) {
         case 0:
@@ -1480,13 +1517,16 @@ private:
             decode_ast_rect(rect, payload);
         }
 
+        framebuffer_request_pending_ = false;
+
         if (options_.framebuffer_update_limit != 0 && updates_ >= options_.framebuffer_update_limit) {
             std::cout << log_prefix() << "aten rfb update limit reached"
                       << " updates=" << updates_ << '\n';
-            close_gracefully();
+            close_protocol_and_network();
             return;
         }
 
+        schedule_framebuffer_update_request();
     }
 
     void decode_ast_rect(const AtenFramebufferRect& rect, const std::vector<std::uint8_t>& payload)
@@ -1597,14 +1637,35 @@ private:
                   << " first-bytes=" << hex_preview(message) << '\n';
     }
 
+    void schedule_receive_parse()
+    {
+        if (closed_ || receive_parse_posted_) {
+            return;
+        }
+
+        receive_parse_posted_ = true;
+        auto self = shared_from_this();
+        asio::post(strand_, [self] {
+            self->parse_receive_queue();
+        });
+    }
+
     void parse_receive_queue()
     {
+        receive_parse_posted_ = false;
+        if (closed_ || stop_requested_.load()) {
+            return;
+        }
+
         try {
-            parse_available_messages();
+            const bool drained = parse_available_messages();
             log_stats_if_due();
+            if (!drained && !closed_ && !stop_requested_.load() && message_available()) {
+                schedule_receive_parse();
+            }
         } catch (...) {
             set_aten_exception(state_, std::current_exception());
-            close_now();
+            close_protocol_and_network();
         }
     }
 
@@ -1626,61 +1687,19 @@ private:
                   << " rx-bytes=" << stats_rx_bytes_
                   << " messages=" << stats_messages_
                   << " framebuffer-updates=" << stats_framebuffer_updates_
-                  << " writes=" << stats_writes_
-                  << " fb-requests=" << stats_framebuffer_request_writes_
-                  << " keys=" << stats_key_writes_
-                  << " pointers=" << stats_pointer_writes_
-                  << " other-writes=" << stats_other_writes_
-                  << " write-queue=" << write_queue_.size()
-                  << " receive-buffer=" << receive_queue_.size()
+                  << " receive-buffer=" << receive_buffered_bytes()
                   << '\n';
 
         stats_started_at_ = now;
         stats_rx_bytes_ = 0;
         stats_messages_ = 0;
         stats_framebuffer_updates_ = 0;
-        stats_writes_ = 0;
-        stats_framebuffer_request_writes_ = 0;
-        stats_key_writes_ = 0;
-        stats_pointer_writes_ = 0;
-        stats_other_writes_ = 0;
-    }
-
-    void record_write_stats(const std::vector<std::uint8_t>& packet)
-    {
-        ++stats_writes_;
-        if (packet.empty()) {
-            ++stats_other_writes_;
-            return;
-        }
-
-        switch (packet.front()) {
-        case 3:
-            ++stats_framebuffer_request_writes_;
-            break;
-        case 4:
-            ++stats_key_writes_;
-            break;
-        case 5:
-            ++stats_pointer_writes_;
-            break;
-        default:
-            ++stats_other_writes_;
-            break;
-        }
-    }
-
-    static bool is_hot_write_packet(const std::vector<std::uint8_t>& packet)
-    {
-        if (packet.empty()) {
-            return false;
-        }
-        return packet.front() == 3 || packet.front() == 4 || packet.front() == 5;
     }
 
     void schedule_framebuffer_update_request()
     {
-        if (closed_ || framebuffer_request_timer_active_) {
+        if (closed_ || stop_requested_.load() || framebuffer_request_pending_ ||
+            framebuffer_request_timer_active_) {
             return;
         }
 
@@ -1697,17 +1716,141 @@ private:
                 if (error) {
                     set_aten_exception(self->state_, std::make_exception_ptr(
                         beast::system_error(error, "ATEN framebuffer request timer failed")));
-                    self->close_now();
+                    self->close_protocol_and_network();
                     return;
                 }
 
-                const auto request_width = static_cast<std::uint16_t>(
-                    self->previous_width_ > 0 ? self->previous_width_ : self->init_.width);
-                const auto request_height = static_cast<std::uint16_t>(
-                    self->previous_height_ > 0 ? self->previous_height_ : self->init_.height);
-                self->queue_write(make_framebuffer_update_request(request_width, request_height, true), false);
-                self->schedule_framebuffer_update_request();
+                self->queue_framebuffer_update_request(true);
             }));
+    }
+
+    void queue_framebuffer_update_request(bool incremental)
+    {
+        if (closed_ || stop_requested_.load() || framebuffer_request_pending_) {
+            return;
+        }
+
+        const auto request_width = static_cast<std::uint16_t>(
+            previous_width_ > 0 ? previous_width_ : init_.width);
+        const auto request_height = static_cast<std::uint16_t>(
+            previous_height_ > 0 ? previous_height_ : init_.height);
+        framebuffer_request_pending_ = true;
+        send_packet(make_framebuffer_update_request(request_width, request_height, incremental), false);
+    }
+
+    void send_packet(std::vector<std::uint8_t> packet, bool coalesce_mouse_motion)
+    {
+        if (send_packet_) {
+            send_packet_(std::move(packet), coalesce_mouse_motion);
+        }
+    }
+
+    void close_protocol_and_network()
+    {
+        if (closed_) {
+            return;
+        }
+        closed_ = true;
+        framebuffer_request_timer_.cancel();
+        if (request_close_) {
+            request_close_();
+        }
+    }
+
+    asio::io_context& io_;
+    AtenViewState& state_;
+    AtenViewOptions options_;
+    AtenRfbServerInit init_;
+    std::deque<std::uint8_t> receive_queue_;
+    std::function<void(std::vector<std::uint8_t>, bool)> send_packet_;
+    std::function<void()> request_close_;
+    std::atomic_bool& stop_requested_;
+    asio::strand<asio::io_context::executor_type> strand_;
+    asio::steady_timer framebuffer_request_timer_;
+    AspeedDecoder decoder_;
+    std::vector<std::uint8_t> previous_rgba_;
+    std::chrono::steady_clock::time_point stats_started_at_ = std::chrono::steady_clock::now();
+    std::uint64_t total_messages_ = 0;
+    std::uint64_t stats_rx_bytes_ = 0;
+    std::uint64_t stats_messages_ = 0;
+    std::uint64_t stats_framebuffer_updates_ = 0;
+    int previous_width_ = 0;
+    int previous_height_ = 0;
+    int updates_ = 0;
+    bool framebuffer_request_pending_ = false;
+    bool framebuffer_request_timer_active_ = false;
+    bool receive_parse_posted_ = false;
+    bool closed_ = false;
+};
+
+class AtenNetworkRfbSession : public std::enable_shared_from_this<AtenNetworkRfbSession> {
+public:
+    AtenNetworkRfbSession(
+        asio::io_context& io,
+        AtenWebSocket& ws,
+        AtenViewState& state,
+        AtenViewOptions options,
+        std::shared_ptr<AtenProtocolRfbSession> protocol,
+        std::atomic_bool& stop_requested)
+        : io_(io)
+        , ws_(ws)
+        , state_(state)
+        , options_(std::move(options))
+        , protocol_(std::move(protocol))
+        , stop_requested_(stop_requested)
+        , strand_(asio::make_strand(io))
+    {
+    }
+
+    void start()
+    {
+        auto weak = weak_from_this();
+        install_aten_input_sink(
+            state_,
+            [weak](
+                std::vector<std::uint8_t> packet,
+                bool coalesce_mouse_motion) mutable {
+                if (auto self = weak.lock()) {
+                    self->enqueue_input(std::move(packet), coalesce_mouse_motion);
+                }
+            });
+
+        auto self = shared_from_this();
+        asio::dispatch(strand_, [self] {
+            self->start_read();
+        });
+    }
+
+    void send_packet(std::vector<std::uint8_t> packet, bool coalesce_mouse_motion)
+    {
+        auto self = shared_from_this();
+        asio::post(strand_, [self, packet = std::move(packet), coalesce_mouse_motion]() mutable {
+            if (self->closed_ || self->stop_requested_.load()) {
+                return;
+            }
+            self->queue_write(std::move(packet), coalesce_mouse_motion);
+        });
+    }
+
+    void request_stop()
+    {
+        std::cerr << log_prefix() << "aten websocket stop requested\n";
+        auto self = shared_from_this();
+        asio::post(strand_, [self] {
+            std::cerr << log_prefix() << "aten websocket stop handler begin\n";
+            self->stop_requested_.store(true);
+            self->close_now();
+            std::cerr << log_prefix() << "aten websocket stop handler end\n";
+        });
+    }
+
+private:
+    static bool is_hot_write_packet(const std::vector<std::uint8_t>& packet)
+    {
+        if (packet.empty()) {
+            return false;
+        }
+        return packet.front() == 3 || packet.front() == 4 || packet.front() == 5;
     }
 
     void enqueue_input(std::vector<std::uint8_t> packet, bool coalesce_mouse_motion)
@@ -1769,13 +1912,13 @@ private:
         }
 
         if (coalesce_mouse_motion && !write_queue_.empty() &&
-            is_coalescible_aten_mouse_motion(write_queue_.back())) {
-            write_queue_.back() = std::move(packet);
+            is_coalescible_aten_mouse_motion(write_queue_.back().packet)) {
+            write_queue_.back() = AtenQueuedWrite{std::move(packet)};
         } else {
             if (write_queue_.size() >= kMaxQueuedInputPackets) {
                 write_queue_.pop_front();
             }
-            write_queue_.push_back(std::move(packet));
+            write_queue_.push_back(AtenQueuedWrite{std::move(packet)});
         }
         start_write();
     }
@@ -1792,7 +1935,7 @@ private:
         ws_.binary(true);
         auto self = shared_from_this();
         ws_.async_write(
-            asio::buffer(active_write_),
+            asio::buffer(active_write_.packet),
             asio::bind_executor(strand_, [self](beast::error_code error, std::size_t) {
                 self->on_write(error);
             }));
@@ -1815,12 +1958,10 @@ private:
             return;
         }
 
-        record_write_stats(active_write_);
-        if (options_.login.verbose && !is_hot_write_packet(active_write_)) {
-            std::cout << log_prefix() << "sent ATEN packet " << describe_aten_client_packet(active_write_) << '\n';
+        if (options_.login.verbose && !is_hot_write_packet(active_write_.packet)) {
+            std::cout << log_prefix() << "sent ATEN packet " << describe_aten_client_packet(active_write_.packet) << '\n';
         }
-        active_write_.clear();
-        log_stats_if_due();
+        active_write_ = {};
         start_write();
     }
 
@@ -1854,10 +1995,9 @@ private:
             return;
         }
 
-        const std::vector<std::uint8_t> bytes = buffer_bytes(read_buffer_);
+        std::vector<std::uint8_t> bytes = buffer_bytes(read_buffer_);
         read_buffer_.consume(read_buffer_.size());
         ++total_websocket_messages_;
-        stats_rx_bytes_ += bytes.size();
         if (options_.login.verbose &&
             (total_websocket_messages_ <= 5 || total_websocket_messages_ % 120 == 0)) {
             std::cout << log_prefix() << "aten websocket message"
@@ -1867,36 +2007,11 @@ private:
             }
             std::cout << '\n';
         }
-        receive_queue_.insert(receive_queue_.end(), bytes.begin(), bytes.end());
-
-        parse_receive_queue();
+        if (protocol_) {
+            protocol_->enqueue_bytes(std::move(bytes));
+        }
 
         start_read();
-    }
-
-    void close_gracefully()
-    {
-        if (closed_) {
-            return;
-        }
-        closed_ = true;
-        clear_aten_input_sink(state_);
-
-        clear_pending_mouse_motion();
-        framebuffer_request_timer_.cancel();
-
-        auto self = shared_from_this();
-        beast::get_lowest_layer(ws_).expires_after(std::chrono::seconds(5));
-        ws_.async_close(
-            stop_requested_.load() ? websocket::close_code::going_away : websocket::close_code::normal,
-            asio::bind_executor(strand_, [self](beast::error_code error) {
-                std::cerr << log_prefix() << "aten websocket close callback"
-                          << " error=" << (error ? error.message() : "ok") << '\n';
-                if (error && error != boost::asio::error::operation_aborted) {
-                    std::cerr << log_prefix() << "aten websocket close warning: "
-                              << error.message() << '\n';
-                }
-            }));
     }
 
     void close_now()
@@ -1908,9 +2023,11 @@ private:
         std::cerr << log_prefix() << "aten websocket close_now begin\n";
         closed_ = true;
         clear_aten_input_sink(state_);
+        if (protocol_) {
+            protocol_->request_stop();
+        }
 
         clear_pending_mouse_motion();
-        framebuffer_request_timer_.cancel();
 
         beast::error_code error;
         beast::get_lowest_layer(ws_).socket().cancel(error);
@@ -1945,35 +2062,17 @@ private:
     AtenWebSocket& ws_;
     AtenViewState& state_;
     AtenViewOptions options_;
-    AtenRfbServerInit init_;
-    beast::flat_buffer read_buffer_;
-    std::deque<std::uint8_t> receive_queue_;
-    std::deque<std::vector<std::uint8_t>> write_queue_;
-    std::vector<std::uint8_t> active_write_;
-    std::mutex input_mutex_;
-    std::optional<std::vector<std::uint8_t>> pending_mouse_motion_;
+    std::shared_ptr<AtenProtocolRfbSession> protocol_;
     std::atomic_bool& stop_requested_;
     asio::strand<asio::io_context::executor_type> strand_;
-    asio::steady_timer framebuffer_request_timer_;
-    AspeedDecoder decoder_;
-    std::vector<std::uint8_t> previous_rgba_;
-    std::chrono::steady_clock::time_point stats_started_at_ = std::chrono::steady_clock::now();
+    beast::flat_buffer read_buffer_;
+    std::deque<AtenQueuedWrite> write_queue_;
+    AtenQueuedWrite active_write_;
+    std::mutex input_mutex_;
+    std::optional<std::vector<std::uint8_t>> pending_mouse_motion_;
     std::uint64_t total_websocket_messages_ = 0;
-    std::uint64_t total_messages_ = 0;
-    std::uint64_t stats_rx_bytes_ = 0;
-    std::uint64_t stats_messages_ = 0;
-    std::uint64_t stats_framebuffer_updates_ = 0;
-    std::uint64_t stats_writes_ = 0;
-    std::uint64_t stats_framebuffer_request_writes_ = 0;
-    std::uint64_t stats_key_writes_ = 0;
-    std::uint64_t stats_pointer_writes_ = 0;
-    std::uint64_t stats_other_writes_ = 0;
-    int previous_width_ = 0;
-    int previous_height_ = 0;
-    int updates_ = 0;
     bool write_in_progress_ = false;
     bool mouse_motion_flush_posted_ = false;
-    bool framebuffer_request_timer_active_ = false;
     bool closed_ = false;
 };
 
@@ -2014,6 +2113,7 @@ void run_aten_network_session(const AtenViewOptions& options, AtenViewState& sta
     const auto endpoints = resolver.resolve(options.login.base_url.host, options.login.base_url.port);
     beast::get_lowest_layer(ws).expires_after(std::chrono::seconds(30));
     beast::get_lowest_layer(ws).connect(endpoints);
+    beast::get_lowest_layer(ws).socket().set_option(tcp::no_delay(true));
     ws.next_layer().handshake(ssl::stream_base::client);
     beast::get_lowest_layer(ws).expires_never();
 
@@ -2093,24 +2193,61 @@ void run_aten_network_session(const AtenViewOptions& options, AtenViewState& sta
                   << " vmedia=" << static_cast<int>(init.virtual_media_enable) << '\n';
     }
 
-    auto async_session = std::make_shared<AtenAsyncRfbSession>(
+    asio::io_context protocol_io;
+    auto protocol_work = asio::make_work_guard(protocol_io);
+    std::thread protocol_thread([&protocol_io] {
+        protocol_io.run();
+    });
+    struct ProtocolIoGuard {
+        asio::io_context& io;
+        decltype(protocol_work)& work;
+        std::thread& thread;
+
+        ~ProtocolIoGuard()
+        {
+            work.reset();
+            io.stop();
+            if (thread.joinable()) {
+                thread.join();
+            }
+        }
+    } protocol_guard{protocol_io, protocol_work, protocol_thread};
+
+    auto protocol_session = std::make_shared<AtenProtocolRfbSession>(
+        protocol_io,
+        state,
+        options,
+        init,
+        stop_requested);
+    auto network_session = std::make_shared<AtenNetworkRfbSession>(
         io,
         ws,
         state,
         options,
-        init,
-        rfb.take_queued_bytes(),
+        protocol_session,
         stop_requested);
+    std::weak_ptr<AtenNetworkRfbSession> weak_network = network_session;
+    protocol_session->set_send_packet_callback(
+        [weak_network](std::vector<std::uint8_t> packet, bool coalesce_mouse_motion) {
+            if (auto network = weak_network.lock()) {
+                network->send_packet(std::move(packet), coalesce_mouse_motion);
+            }
+        });
+    protocol_session->set_request_close_callback([weak_network] {
+        if (auto network = weak_network.lock()) {
+            network->request_stop();
+        }
+    });
     {
-        std::weak_ptr<AtenAsyncRfbSession> weak_session = async_session;
-        set_aten_force_close(state, [weak_session] {
-            if (auto session = weak_session.lock()) {
-                session->request_stop();
+        set_aten_force_close(state, [weak_network] {
+            if (auto network = weak_network.lock()) {
+                network->request_stop();
             }
         });
     }
 
-    async_session->start();
+    network_session->start();
+    protocol_session->start(rfb.take_queued_bytes());
     const auto io_started_at = std::chrono::steady_clock::now();
     if (options.login.verbose) {
         std::cout << log_prefix() << "aten network io running\n";
@@ -2121,6 +2258,7 @@ void run_aten_network_session(const AtenViewOptions& options, AtenViewState& sta
             std::chrono::steady_clock::now() - io_started_at).count();
         std::cout << log_prefix() << "aten network io stopped duration-ms=" << io_elapsed_ms << '\n';
     }
+    protocol_session->request_stop();
     clear_aten_input_sink(state);
     set_aten_force_close(state, {});
 }
@@ -2287,7 +2425,8 @@ void run_aten_view(const AtenViewOptions& options)
                 have_event = SDL_PollEvent(&event);
             }
 
-            const std::optional<AtenViewFrame> frame = take_latest_aten_frame(*state, last_sequence);
+            const std::shared_ptr<const AtenViewFrame> frame =
+                take_latest_aten_frame(*state, last_sequence);
             if (frame) {
                 last_sequence = frame->sequence;
                 if (texture == nullptr || texture_width != frame->width || texture_height != frame->height) {
