@@ -1,0 +1,81 @@
+name: Windows CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build and smoke test
+    runs-on: windows-latest
+
+    defaults:
+      run:
+        shell: pwsh
+
+    env:
+      VCPKG_ROOT: ${{ github.workspace }}\vcpkg
+      VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}\vcpkg-cache,readwrite
+
+    steps:
+      - name: Checkout hitsc
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Checkout vcpkg
+        uses: actions/checkout@v6
+        with:
+          repository: Microsoft/vcpkg
+          path: vcpkg
+          persist-credentials: false
+
+      - name: Bootstrap vcpkg
+        run: .\vcpkg\bootstrap-vcpkg.bat -disableMetrics
+
+      - name: Prepare vcpkg binary cache
+        run: New-Item -ItemType Directory -Force vcpkg-cache | Out-Null
+
+      - name: Cache vcpkg binaries
+        uses: actions/cache@v5
+        with:
+          path: vcpkg-cache
+          key: ${{ runner.os }}-vcpkg-x64-windows-static-${{ hashFiles('vcpkg.json') }}
+          restore-keys: |
+            ${{ runner.os }}-vcpkg-x64-windows-static-
+
+      - name: Build Release
+        run: .\scripts\build_windows.ps1 -BuildType Release
+
+      - name: Verify static dependency closure
+        run: |
+          $exe = ".\build\windows-release\hitsc.exe"
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+          $installPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $vcvars = Join-Path $installPath "VC\Auxiliary\Build\vcvarsall.bat"
+          $dump = & cmd.exe /d /s /c "call `"$vcvars`" amd64 >nul && dumpbin /dependents `"$exe`""
+          $dump
+
+          $blocked = $dump | Select-String -Pattern "VCRUNTIME|MSVCP|ucrtbase|boost_.*\.dll|SDL3\.dll|libssl|libcrypto|zlib" -CaseSensitive:$false
+          if ($blocked) {
+            throw "Release exe imports non-system runtime/dependency DLLs: $($blocked -join '; ')"
+          }
+
+      - name: Smoke test CLI help
+        run: |
+          $exe = ".\build\windows-release\hitsc.exe"
+          & $exe --help
+          & $exe megarac --help
+          & $exe aten --help

@@ -7,6 +7,16 @@ project(
   LANGUAGES C CXX
 )
 
+set(HITSC_STATIC_VCPKG_TRIPLET OFF)
+if(DEFINED VCPKG_TARGET_TRIPLET AND VCPKG_TARGET_TRIPLET MATCHES "-static($|-)")
+  set(HITSC_STATIC_VCPKG_TRIPLET ON)
+endif()
+
+if(MSVC AND HITSC_STATIC_VCPKG_TRIPLET)
+  set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+  set(OPENSSL_MSVC_STATIC_RT TRUE)
+endif()
+
 find_package(Boost REQUIRED CONFIG COMPONENTS json log log_setup system)
 find_package(CLI11 CONFIG REQUIRED)
 find_package(OpenSSL REQUIRED)
@@ -65,13 +75,16 @@ target_compile_definitions(
   PRIVATE
     BOOST_ASIO_NO_DEPRECATED
     BOOST_BEAST_USE_STD_STRING_VIEW
-    BOOST_LOG_DYN_LINK
     NOMINMAX
     SDL_MAIN_HANDLED
     WIN32_LEAN_AND_MEAN
     _CRT_SECURE_NO_WARNINGS
     _WIN32_WINNT=0x0A00
 )
+
+if(NOT HITSC_STATIC_VCPKG_TRIPLET)
+  target_compile_definitions(hitsc PRIVATE BOOST_LOG_DYN_LINK)
+endif()
 
 if(MSVC)
   target_compile_options(hitsc PRIVATE /W4 /permissive- /bigobj)
@@ -106,3 +119,4 @@ target_link_libraries(
 if(WIN32)
   target_link_libraries(hitsc PRIVATE Dbghelp)
 endif()
+

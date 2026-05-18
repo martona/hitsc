@@ -3,7 +3,7 @@ param(
     [ValidateSet("Debug", "Release", "RelWithDebInfo", "MinSizeRel")]
     [string]$BuildType = "Debug",
 
-    [string]$Triplet = "x64-windows",
+    [string]$Triplet = "",
 
     [string]$VcpkgRoot = $env:VCPKG_ROOT,
 
@@ -15,6 +15,15 @@ param(
 $ErrorActionPreference = "Stop"
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
+
+if (-not $Triplet) {
+    if ($BuildType -eq "Release") {
+        $Triplet = "x64-windows-static"
+    }
+    else {
+        $Triplet = "x64-windows"
+    }
+}
 
 function Find-Executable {
     param(
@@ -197,7 +206,9 @@ $configureArgs = @(
     "-S", $repoRoot,
     "-B", $buildDir,
     "-DVCPKG_TARGET_TRIPLET=$Triplet"
+    "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"
 )
+
 
 if (-not (Test-Path $cacheFile)) {
     $configureArgs += "-DCMAKE_TOOLCHAIN_FILE=$toolchainFile"
