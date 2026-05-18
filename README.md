@@ -64,6 +64,8 @@ Open a PiKVM direct H.264 video session:
 .\build\windows-debug\hitsc.exe pikvm -u USERNAME https://pikvm.example.com
 ```
 
+PiKVM video decode defaults to `--video-decode auto`, which tries Windows D3D11 hardware decode when SDL exposes a hardware D3D11 renderer and otherwise uses the software FFmpeg path. Use `--video-decode software` to force software decode or `--video-decode d3d11` to require D3D11.
+
 Common viewer options:
 
 - `-u, --username TEXT`: username for the BMC web login.
@@ -118,7 +120,7 @@ So it works, but it's not great, and it likely won't ever be.
 
 ### PiKVM
 
-The current PiKVM support authenticates with the documented `/api/auth/login` form endpoint, keeps `/api/ws?stream=1` open for KVMD state, opens `/api/media/ws`, requests direct H.264 over the PiKVM media websocket, decodes it with FFmpeg, and displays it in SDL. It does not send input or control power yet.
+The current PiKVM support authenticates with the documented `/api/auth/login` form endpoint, keeps `/api/ws?stream=1` open for KVMD state, opens `/api/media/ws`, requests direct H.264 over the PiKVM media websocket, decodes it with FFmpeg, and displays it in SDL. On Windows it can use D3D11 hardware decode plus GPU-side texture upload when available, with software decode as the fallback. It does not send input or control power yet.
 
 ## License and Third-party Code
 
@@ -138,7 +140,7 @@ This is a work in progress, the current stage not being much more than a sign of
 - Add TLS certificate pinning.
 - Expand PiKVM support beyond direct video
 - Add keyboard and mouse input over the KVMD event WebSocket
-- Add hardware-accelerated H.264 decode and zero-copy or near-zero-copy SDL texture upload where available
+- Extend hardware H.264 decode beyond Windows D3D11 and reduce remaining GPU copy paths where possible
 - Add Apple RDP support (yeah it's not IPMI but it's a pain point for me)
 - Add UI for connection establishment, making CLI optional
 - Add secure credential store (win32 CryptoAPI, macOS keychain, ...)

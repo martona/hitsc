@@ -11,9 +11,14 @@
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/ssl.hpp>
 
+#include <d3d11.h>
+#include <dxgi.h>
+#include <wrl/client.h>
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cwchar>
 #include <cmath>
 #include <exception>
 #include <functional>
@@ -28,6 +33,7 @@
 namespace hitsc {
 namespace asio = boost::asio;
 namespace ssl = asio::ssl;
+using Microsoft::WRL::ComPtr;
 
 namespace {
 
@@ -41,9 +47,197 @@ struct PikvmViewState {
     std::function<void()> force_close;
 };
 
+struct PikvmRendererSetup {
+    SDL_Renderer* renderer = nullptr;
+    std::shared_ptr<PikvmD3D11Context> d3d11_context;
+};
+
 void throw_sdl_error(std::string_view context)
 {
     throw std::runtime_error(std::string(context) + ": " + SDL_GetError());
+}
+
+void release_unknown(void* pointer)
+{
+    if (pointer != nullptr) {
+        static_cast<IUnknown*>(pointer)->Release();
+    }
+}
+
+std::string wide_to_utf8(const wchar_t* value)
+{
+    if (value == nullptr || value[0] == L'\0') {
+        return {};
+    }
+
+    const int wide_length = static_cast<int>(std::wcslen(value));
+    const int length = WideCharToMultiByte(
+        CP_UTF8,
+        0,
+        value,
+        wide_length,
+        nullptr,
+        0,
+        nullptr,
+        nullptr);
+    if (length <= 0) {
+        return {};
+    }
+
+    std::string result(static_cast<std::size_t>(length), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, value, wide_length, result.data(), length, nullptr, nullptr);
+    return result;
+}
+
+bool d3d11_device_is_software_adapter(ID3D11Device* device, std::string& description)
+{
+    if (device == nullptr) {
+        return false;
+    }
+
+    ComPtr<IDXGIDevice> dxgi_device;
+    if (FAILED(device->QueryInterface(IID_PPV_ARGS(&dxgi_device)))) {
+        return false;
+    }
+
+    ComPtr<IDXGIAdapter> adapter;
+    if (FAILED(dxgi_device->GetAdapter(&adapter))) {
+        return false;
+    }
+
+    ComPtr<IDXGIAdapter1> adapter1;
+    if (FAILED(adapter.As(&adapter1))) {
+        return false;
+    }
+
+    DXGI_ADAPTER_DESC1 desc{};
+    if (FAILED(adapter1->GetDesc1(&desc))) {
+        return false;
+    }
+    description = wide_to_utf8(desc.Description);
+    return (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0;
+}
+
+SDL_Renderer* try_create_named_renderer(
+    SDL_Window* window,
+    const char* name,
+    std::string& error)
+{
+    SDL_PropertiesID props = SDL_CreateProperties();
+    if (props == 0) {
+        error = SDL_GetError();
+        return nullptr;
+    }
+
+    if (!SDL_SetPointerProperty(props, SDL_PROP_RENDERER_CREATE_WINDOW_POINTER, window)
+        || !SDL_SetStringProperty(props, SDL_PROP_RENDERER_CREATE_NAME_STRING, name)) {
+        error = SDL_GetError();
+        SDL_DestroyProperties(props);
+        return nullptr;
+    }
+
+    SDL_Renderer* renderer = SDL_CreateRendererWithProperties(props);
+    if (renderer == nullptr) {
+        error = SDL_GetError();
+    }
+    SDL_DestroyProperties(props);
+    return renderer;
+}
+
+std::shared_ptr<PikvmD3D11Context> query_renderer_d3d11_context(SDL_Renderer* renderer)
+{
+    SDL_PropertiesID props = SDL_GetRendererProperties(renderer);
+    if (props == 0) {
+        return {};
+    }
+
+    auto* device = static_cast<ID3D11Device*>(
+        SDL_GetPointerProperty(props, SDL_PROP_RENDERER_D3D11_DEVICE_POINTER, nullptr));
+    if (device == nullptr) {
+        return {};
+    }
+
+    ID3D11DeviceContext* immediate_context = nullptr;
+    device->GetImmediateContext(&immediate_context);
+    if (immediate_context == nullptr) {
+        return {};
+    }
+
+    auto context = std::make_shared<PikvmD3D11Context>();
+    device->AddRef();
+    context->device = device;
+    context->device_owner = std::shared_ptr<void>(device, release_unknown);
+    context->device_context = immediate_context;
+    context->device_context_owner = std::shared_ptr<void>(immediate_context, release_unknown);
+    context->lock = std::make_shared<std::recursive_mutex>();
+    return context;
+}
+
+PikvmRendererSetup create_pikvm_renderer(SDL_Window* window, const PikvmViewOptions& options)
+{
+    const bool allow_d3d11 = options.video_decode != PikvmVideoDecodeMode::software;
+    if (allow_d3d11) {
+        std::string d3d11_error;
+        SDL_Renderer* renderer = try_create_named_renderer(window, "direct3d11", d3d11_error);
+        if (renderer != nullptr) {
+            std::shared_ptr<PikvmD3D11Context> d3d11_context =
+                query_renderer_d3d11_context(renderer);
+            std::string adapter_description;
+            const bool software_adapter =
+                d3d11_context
+                && d3d11_device_is_software_adapter(d3d11_context->device, adapter_description);
+
+            if (d3d11_context && !software_adapter) {
+                if (options.login.verbose) {
+                    log_info() << "SDL renderer selected for PiKVM"
+                               << " name=" << SDL_GetRendererName(renderer)
+                               << " d3d11=yes"
+                               << " adapter=\"" << adapter_description << "\"";
+                }
+                return {renderer, d3d11_context};
+            }
+
+            if (options.video_decode == PikvmVideoDecodeMode::d3d11) {
+                SDL_DestroyRenderer(renderer);
+                if (software_adapter) {
+                    throw std::runtime_error(
+                        "SDL direct3d11 renderer is using a software adapter"
+                        + (adapter_description.empty() ? std::string{} : ": " + adapter_description));
+                }
+                throw std::runtime_error("SDL direct3d11 renderer did not expose a D3D11 device");
+            }
+
+            if (options.login.verbose) {
+                if (software_adapter) {
+                    log_warning() << "D3D11 hardware decode disabled for software adapter"
+                                  << (adapter_description.empty() ? "" : ": ")
+                                  << adapter_description;
+                } else {
+                    log_warning() << "D3D11 hardware decode disabled; renderer did not expose a D3D11 device";
+                }
+            }
+            return {renderer, {}};
+        }
+
+        if (options.video_decode == PikvmVideoDecodeMode::d3d11) {
+            throw std::runtime_error("failed to create SDL direct3d11 renderer: " + d3d11_error);
+        }
+        if (options.login.verbose) {
+            log_warning() << "failed to create SDL direct3d11 renderer; using default renderer: "
+                          << d3d11_error;
+        }
+    }
+
+    SDL_Renderer* renderer = SDL_CreateRenderer(window, nullptr);
+    if (renderer == nullptr) {
+        throw_sdl_error("SDL_CreateRenderer");
+    }
+    if (options.login.verbose) {
+        log_info() << "SDL renderer selected for PiKVM"
+                   << " name=" << SDL_GetRendererName(renderer)
+                   << " d3d11=no";
+    }
+    return {renderer, {}};
 }
 
 SDL_FRect centered_target_rect(int window_width, int window_height, int frame_width, int frame_height)
@@ -77,6 +271,8 @@ SDL_PixelFormat sdl_pixel_format_for_frame(PikvmVideoPixelFormat format)
     case PikvmVideoPixelFormat::i420:
         return SDL_PIXELFORMAT_IYUV;
     case PikvmVideoPixelFormat::nv12:
+        return SDL_PIXELFORMAT_NV12;
+    case PikvmVideoPixelFormat::d3d11_nv12:
         return SDL_PIXELFORMAT_NV12;
     }
     return SDL_PIXELFORMAT_RGBA32;
@@ -114,7 +310,125 @@ void update_pikvm_texture(SDL_Texture* texture, const PikvmVideoFrame& frame)
             throw_sdl_error("SDL_UpdateNVTexture");
         }
         return;
+    case PikvmVideoPixelFormat::d3d11_nv12:
+        throw std::runtime_error("D3D11 PiKVM frames must be uploaded with the D3D11 path");
     }
+}
+
+bool d3d11_frame_can_wrap_direct(const PikvmVideoFrame& frame)
+{
+    if (frame.format != PikvmVideoPixelFormat::d3d11_nv12 || frame.d3d11_texture == nullptr) {
+        return false;
+    }
+
+    D3D11_TEXTURE2D_DESC desc{};
+    frame.d3d11_texture->GetDesc(&desc);
+    return desc.ArraySize == 1
+        && frame.d3d11_array_slice == 0
+        && desc.Format == DXGI_FORMAT_NV12
+        && (desc.BindFlags & D3D11_BIND_SHADER_RESOURCE) != 0;
+}
+
+SDL_Texture* try_create_wrapped_d3d11_texture(
+    SDL_Renderer* renderer,
+    const PikvmVideoFrame& frame,
+    std::string& error)
+{
+    SDL_PropertiesID props = SDL_CreateProperties();
+    if (props == 0) {
+        error = SDL_GetError();
+        return nullptr;
+    }
+
+    const bool ok =
+        SDL_SetNumberProperty(
+            props,
+            SDL_PROP_TEXTURE_CREATE_FORMAT_NUMBER,
+            static_cast<Sint64>(SDL_PIXELFORMAT_NV12))
+        && SDL_SetNumberProperty(
+            props,
+            SDL_PROP_TEXTURE_CREATE_ACCESS_NUMBER,
+            static_cast<Sint64>(SDL_TEXTUREACCESS_STATIC))
+        && SDL_SetNumberProperty(
+            props,
+            SDL_PROP_TEXTURE_CREATE_WIDTH_NUMBER,
+            frame.width)
+        && SDL_SetNumberProperty(
+            props,
+            SDL_PROP_TEXTURE_CREATE_HEIGHT_NUMBER,
+            frame.height)
+        && SDL_SetPointerProperty(
+            props,
+            SDL_PROP_TEXTURE_CREATE_D3D11_TEXTURE_POINTER,
+            frame.d3d11_texture);
+    if (!ok) {
+        error = SDL_GetError();
+        SDL_DestroyProperties(props);
+        return nullptr;
+    }
+
+    SDL_Texture* texture = SDL_CreateTextureWithProperties(renderer, props);
+    if (texture == nullptr) {
+        error = SDL_GetError();
+    }
+    SDL_DestroyProperties(props);
+    return texture;
+}
+
+ID3D11Texture2D* sdl_texture_d3d11_resource(SDL_Texture* texture)
+{
+    SDL_PropertiesID props = SDL_GetTextureProperties(texture);
+    if (props == 0) {
+        return nullptr;
+    }
+    return static_cast<ID3D11Texture2D*>(
+        SDL_GetPointerProperty(props, SDL_PROP_TEXTURE_D3D11_TEXTURE_POINTER, nullptr));
+}
+
+void copy_d3d11_frame_to_texture(
+    SDL_Texture* texture,
+    const PikvmVideoFrame& frame,
+    const std::shared_ptr<PikvmD3D11Context>& d3d11_context)
+{
+    if (!d3d11_context || d3d11_context->device_context == nullptr || !d3d11_context->lock) {
+        throw std::runtime_error("D3D11 PiKVM frame received without a D3D11 renderer context");
+    }
+    if (frame.d3d11_texture == nullptr) {
+        throw std::runtime_error("D3D11 PiKVM frame is missing its source texture");
+    }
+
+    ID3D11Texture2D* destination = sdl_texture_d3d11_resource(texture);
+    if (destination == nullptr) {
+        throw std::runtime_error("SDL texture did not expose a D3D11 texture");
+    }
+
+    D3D11_TEXTURE2D_DESC source_desc{};
+    D3D11_TEXTURE2D_DESC destination_desc{};
+    frame.d3d11_texture->GetDesc(&source_desc);
+    destination->GetDesc(&destination_desc);
+    if (source_desc.Format != DXGI_FORMAT_NV12 || destination_desc.Format != DXGI_FORMAT_NV12) {
+        throw std::runtime_error("D3D11 PiKVM texture copy requires NV12 textures");
+    }
+    if (frame.d3d11_array_slice < 0
+        || static_cast<UINT>(frame.d3d11_array_slice) >= source_desc.ArraySize) {
+        throw std::runtime_error("D3D11 PiKVM frame has an invalid texture array slice");
+    }
+
+    const UINT source_subresource = D3D11CalcSubresource(
+        0,
+        static_cast<UINT>(frame.d3d11_array_slice),
+        source_desc.MipLevels);
+
+    std::lock_guard lock(*d3d11_context->lock);
+    d3d11_context->device_context->CopySubresourceRegion(
+        destination,
+        0,
+        0,
+        0,
+        0,
+        frame.d3d11_texture,
+        source_subresource,
+        nullptr);
 }
 
 void set_pikvm_status(PikvmViewState& state, std::string status)
@@ -167,6 +481,52 @@ std::shared_ptr<const PikvmVideoFrame> take_latest_pikvm_frame(
     return state.frame;
 }
 
+void clear_pikvm_frame(PikvmViewState& state)
+{
+    std::shared_ptr<const PikvmVideoFrame> frame;
+    {
+        std::lock_guard lock(state.frame_mutex);
+        frame = std::move(state.frame);
+    }
+
+    if (frame && frame->d3d11_lock) {
+        std::lock_guard lock(*frame->d3d11_lock);
+        frame.reset();
+    }
+}
+
+void destroy_pikvm_texture(
+    SDL_Texture*& texture,
+    const std::shared_ptr<PikvmD3D11Context>& d3d11_context)
+{
+    if (texture == nullptr) {
+        return;
+    }
+
+    std::unique_lock<std::recursive_mutex> d3d11_lock;
+    if (d3d11_context && d3d11_context->lock) {
+        d3d11_lock = std::unique_lock<std::recursive_mutex>(*d3d11_context->lock);
+    }
+    SDL_DestroyTexture(texture);
+    texture = nullptr;
+}
+
+void destroy_pikvm_renderer(
+    SDL_Renderer*& renderer,
+    const std::shared_ptr<PikvmD3D11Context>& d3d11_context)
+{
+    if (renderer == nullptr) {
+        return;
+    }
+
+    std::unique_lock<std::recursive_mutex> d3d11_lock;
+    if (d3d11_context && d3d11_context->lock) {
+        d3d11_lock = std::unique_lock<std::recursive_mutex>(*d3d11_context->lock);
+    }
+    SDL_DestroyRenderer(renderer);
+    renderer = nullptr;
+}
+
 void force_close_weak_socket(std::weak_ptr<PikvmWebSocket> weak_ws)
 {
     if (std::shared_ptr<PikvmWebSocket> ws = weak_ws.lock()) {
@@ -176,6 +536,7 @@ void force_close_weak_socket(std::weak_ptr<PikvmWebSocket> weak_ws)
 
 void run_pikvm_network_session(
     const PikvmViewOptions& options,
+    std::shared_ptr<PikvmD3D11Context> d3d11_context,
     PikvmViewState& state,
     std::atomic_bool& stop_requested)
 {
@@ -241,6 +602,7 @@ void run_pikvm_network_session(
     start_pikvm_video_stream(
         video_ws,
         options,
+        std::move(d3d11_context),
         stop_requested,
         [&](PikvmVideoFrame frame) {
             store_pikvm_frame(state, std::move(frame));
@@ -294,6 +656,7 @@ void run_pikvm_view(const PikvmViewOptions& options)
     SDL_Window* window = nullptr;
     SDL_Renderer* renderer = nullptr;
     SDL_Texture* texture = nullptr;
+    std::shared_ptr<PikvmD3D11Context> d3d11_context;
     auto state = std::make_shared<PikvmViewState>();
     auto stop_requested = std::make_shared<std::atomic_bool>(false);
     auto network_done = std::make_shared<std::atomic_bool>(false);
@@ -305,15 +668,17 @@ void run_pikvm_view(const PikvmViewOptions& options)
             throw_sdl_error("SDL_CreateWindow");
         }
 
-        renderer = SDL_CreateRenderer(window, nullptr);
-        if (renderer == nullptr) {
-            throw_sdl_error("SDL_CreateRenderer");
-        }
+        PikvmRendererSetup renderer_setup = create_pikvm_renderer(window, options);
+        renderer = renderer_setup.renderer;
+        d3d11_context = renderer_setup.d3d11_context;
 
         PikvmViewOptions network_options = options;
-        network_thread = std::thread([network_options, state, stop_requested, network_done] {
+        if (!d3d11_context && network_options.video_decode == PikvmVideoDecodeMode::auto_select) {
+            network_options.video_decode = PikvmVideoDecodeMode::software;
+        }
+        network_thread = std::thread([network_options, d3d11_context, state, stop_requested, network_done] {
             try {
-                run_pikvm_network_session(network_options, *state, *stop_requested);
+                run_pikvm_network_session(network_options, d3d11_context, *state, *stop_requested);
             } catch (...) {
                 set_pikvm_exception(*state, std::current_exception());
             }
@@ -328,7 +693,12 @@ void run_pikvm_view(const PikvmViewOptions& options)
         std::uint64_t last_status_tick = 0;
         int texture_width = 0;
         int texture_height = 0;
+        int title_width = 0;
+        int title_height = 0;
         PikvmVideoPixelFormat texture_format = PikvmVideoPixelFormat::rgba32;
+        bool texture_wraps_d3d11_source = false;
+        bool d3d11_direct_wrap_disabled = false;
+        ID3D11Texture2D* texture_wrapped_d3d11_source = nullptr;
         int presented_frames = 0;
 
         while (running) {
@@ -355,34 +725,119 @@ void run_pikvm_view(const PikvmViewOptions& options)
             const std::shared_ptr<const PikvmVideoFrame> frame =
                 take_latest_pikvm_frame(*state, last_sequence);
             if (frame) {
+                std::unique_lock<std::recursive_mutex> d3d11_render_lock;
+                if (d3d11_context && d3d11_context->lock) {
+                    d3d11_render_lock = std::unique_lock<std::recursive_mutex>(*d3d11_context->lock);
+                }
+
                 last_sequence = frame->sequence;
-                if (texture == nullptr
-                    || texture_width != frame->width
-                    || texture_height != frame->height
-                    || texture_format != frame->format) {
-                    if (texture != nullptr) {
-                        SDL_DestroyTexture(texture);
+                if (frame->format == PikvmVideoPixelFormat::d3d11_nv12) {
+                    const bool direct_wrap =
+                        !d3d11_direct_wrap_disabled && d3d11_frame_can_wrap_direct(*frame);
+                    if (direct_wrap) {
+                        if (texture == nullptr
+                            || texture_width != frame->width
+                            || texture_height != frame->height
+                            || texture_format != frame->format
+                            || !texture_wraps_d3d11_source
+                            || texture_wrapped_d3d11_source != frame->d3d11_texture) {
+                            if (texture != nullptr) {
+                                SDL_DestroyTexture(texture);
+                            }
+
+                            std::string wrap_error;
+                            texture = try_create_wrapped_d3d11_texture(renderer, *frame, wrap_error);
+                            if (texture != nullptr) {
+                                texture_width = frame->width;
+                                texture_height = frame->height;
+                                texture_format = frame->format;
+                                texture_wraps_d3d11_source = true;
+                                texture_wrapped_d3d11_source = frame->d3d11_texture;
+                                if (options.login.verbose) {
+                                    log_info() << "wrapped PiKVM D3D11 video texture directly";
+                                }
+                            } else {
+                                d3d11_direct_wrap_disabled = true;
+                                texture_width = 0;
+                                texture_height = 0;
+                                texture_format = PikvmVideoPixelFormat::rgba32;
+                                texture_wraps_d3d11_source = false;
+                                texture_wrapped_d3d11_source = nullptr;
+                                if (options.login.verbose) {
+                                    log_warning() << "direct D3D11 texture wrap failed; using GPU copy: "
+                                                  << wrap_error;
+                                }
+                            }
+                        }
                     }
-                    texture = SDL_CreateTexture(
-                        renderer,
-                        sdl_pixel_format_for_frame(frame->format),
-                        SDL_TEXTUREACCESS_STREAMING,
-                        frame->width,
-                        frame->height);
-                    if (texture == nullptr) {
-                        throw_sdl_error("SDL_CreateTexture");
+
+                    if (texture == nullptr || !texture_wraps_d3d11_source) {
+                        if (texture == nullptr
+                            || texture_width != frame->width
+                            || texture_height != frame->height
+                            || texture_format != frame->format
+                            || texture_wraps_d3d11_source) {
+                            if (texture != nullptr) {
+                                SDL_DestroyTexture(texture);
+                            }
+                            texture = SDL_CreateTexture(
+                                renderer,
+                                SDL_PIXELFORMAT_NV12,
+                                SDL_TEXTUREACCESS_STATIC,
+                                frame->width,
+                                frame->height);
+                            if (texture == nullptr) {
+                                throw_sdl_error("SDL_CreateTexture(D3D11 NV12)");
+                            }
+                            if (sdl_texture_d3d11_resource(texture) == nullptr) {
+                                throw std::runtime_error("SDL NV12 texture did not expose a D3D11 resource");
+                            }
+                            texture_width = frame->width;
+                            texture_height = frame->height;
+                            texture_format = frame->format;
+                            texture_wraps_d3d11_source = false;
+                            texture_wrapped_d3d11_source = nullptr;
+                        }
+
+                        copy_d3d11_frame_to_texture(texture, *frame, d3d11_context);
                     }
-                    texture_width = frame->width;
-                    texture_height = frame->height;
-                    texture_format = frame->format;
+                } else {
+                    if (texture == nullptr
+                        || texture_width != frame->width
+                        || texture_height != frame->height
+                        || texture_format != frame->format
+                        || texture_wraps_d3d11_source) {
+                        if (texture != nullptr) {
+                            SDL_DestroyTexture(texture);
+                        }
+                        texture = SDL_CreateTexture(
+                            renderer,
+                            sdl_pixel_format_for_frame(frame->format),
+                            SDL_TEXTUREACCESS_STREAMING,
+                            frame->width,
+                            frame->height);
+                        if (texture == nullptr) {
+                            throw_sdl_error("SDL_CreateTexture");
+                        }
+                        texture_width = frame->width;
+                        texture_height = frame->height;
+                        texture_format = frame->format;
+                        texture_wraps_d3d11_source = false;
+                        texture_wrapped_d3d11_source = nullptr;
+                    }
+
+                    update_pikvm_texture(texture, *frame);
+                }
+
+                if (title_width != frame->width || title_height != frame->height) {
+                    title_width = frame->width;
+                    title_height = frame->height;
                     SDL_SetWindowTitle(
                         window,
                         ("hitsc - PiKVM - " + options.login.base_url.host + " - "
                          + std::to_string(frame->width) + "x" + std::to_string(frame->height))
                             .c_str());
                 }
-
-                update_pikvm_texture(texture, *frame);
 
                 ++presented_frames;
                 if (options.login.verbose && (presented_frames <= 20 || presented_frames % 60 == 0)) {
@@ -394,6 +849,11 @@ void run_pikvm_view(const PikvmViewOptions& options)
             }
 
             if (render_needed) {
+                std::unique_lock<std::recursive_mutex> d3d11_render_lock;
+                if (d3d11_context && d3d11_context->lock) {
+                    d3d11_render_lock = std::unique_lock<std::recursive_mutex>(*d3d11_context->lock);
+                }
+
                 SDL_SetRenderDrawColor(renderer, 12, 14, 18, 255);
                 SDL_RenderClear(renderer);
                 if (texture != nullptr && texture_width > 0 && texture_height > 0) {
@@ -420,27 +880,33 @@ void run_pikvm_view(const PikvmViewOptions& options)
     } catch (...) {
         print_current_exception_with_stack(std::cerr, "pikvm view ui thread");
         stop_pikvm_network(*state, *stop_requested, network_thread, options.login.verbose);
-        if (texture != nullptr) {
-            SDL_DestroyTexture(texture);
-        }
-        if (renderer != nullptr) {
-            SDL_DestroyRenderer(renderer);
-        }
+        destroy_pikvm_texture(texture, d3d11_context);
+        clear_pikvm_frame(*state);
+        destroy_pikvm_renderer(renderer, d3d11_context);
         if (window != nullptr) {
             SDL_DestroyWindow(window);
+            window = nullptr;
         }
+        d3d11_context.reset();
         SDL_Quit();
         throw;
     }
 
     stop_pikvm_network(*state, *stop_requested, network_thread, options.login.verbose);
 
-    if (texture != nullptr) {
-        SDL_DestroyTexture(texture);
+    if (options.login.verbose) {
+        log_debug() << "pikvm ui cleanup begin";
     }
-    SDL_DestroyRenderer(renderer);
+    destroy_pikvm_texture(texture, d3d11_context);
+    clear_pikvm_frame(*state);
+    destroy_pikvm_renderer(renderer, d3d11_context);
     SDL_DestroyWindow(window);
+    window = nullptr;
+    d3d11_context.reset();
     SDL_Quit();
+    if (options.login.verbose) {
+        log_debug() << "pikvm ui cleanup end";
+    }
 }
 
 } // namespace hitsc

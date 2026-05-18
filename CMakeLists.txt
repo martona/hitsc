@@ -126,5 +126,5 @@ target_link_libraries(
 )
 
 if(WIN32)
-  target_link_libraries(hitsc PRIVATE Dbghelp)
+  target_link_libraries(hitsc PRIVATE D3d11 Dbghelp Dxgi)
 endif()

@@ -25,9 +25,16 @@ struct AtenViewOptions {
     bool shared = true;
 };
 
+enum class PikvmVideoDecodeMode {
+    auto_select,
+    software,
+    d3d11,
+};
+
 struct PikvmViewOptions {
     LoginOptions login;
     int idle_timeout_seconds = 0;
+    PikvmVideoDecodeMode video_decode = PikvmVideoDecodeMode::auto_select;
 };
 
 } // namespace hitsc

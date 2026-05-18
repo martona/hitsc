@@ -8,9 +8,15 @@
 #include <boost/beast/websocket.hpp>
 #include <boost/json.hpp>
 
+#include <d3d11.h>
+
 extern "C" {
 #include <libavcodec/avcodec.h>
+#include <libavcodec/codec.h>
+#include <libavutil/buffer.h>
 #include <libavutil/error.h>
+#include <libavutil/hwcontext.h>
+#include <libavutil/hwcontext_d3d11va.h>
 #include <libavutil/pixfmt.h>
 #include <libswscale/swscale.h>
 }
@@ -42,6 +48,8 @@ const char* pikvm_video_pixel_format_name(PikvmVideoPixelFormat format)
         return "i420";
     case PikvmVideoPixelFormat::nv12:
         return "nv12";
+    case PikvmVideoPixelFormat::d3d11_nv12:
+        return "d3d11_nv12";
     }
     return "unknown";
 }
@@ -66,6 +74,9 @@ std::size_t pikvm_video_frame_payload_bytes(const PikvmVideoFrame& frame)
     case PikvmVideoPixelFormat::nv12:
         return plane_bytes(frame.planes[0], frame.pitches[0], frame.height)
              + plane_bytes(frame.planes[1], frame.pitches[1], chroma_height);
+    case PikvmVideoPixelFormat::d3d11_nv12:
+        return static_cast<std::size_t>(frame.width) * static_cast<std::size_t>(frame.height)
+             + static_cast<std::size_t>(frame.width) * static_cast<std::size_t>(chroma_height);
     }
     return 0;
 }
@@ -200,6 +211,31 @@ std::vector<std::uint8_t> pikvm_media_start_message()
     return std::vector<std::uint8_t>(message.begin(), message.end());
 }
 
+void d3d11_lock_callback(void* lock_context)
+{
+    static_cast<std::recursive_mutex*>(lock_context)->lock();
+}
+
+void d3d11_unlock_callback(void* lock_context)
+{
+    static_cast<std::recursive_mutex*>(lock_context)->unlock();
+}
+
+bool codec_supports_d3d11(const AVCodec* codec)
+{
+    for (int i = 0;; ++i) {
+        const AVCodecHWConfig* config = avcodec_get_hw_config(codec, i);
+        if (config == nullptr) {
+            return false;
+        }
+        if (config->device_type == AV_HWDEVICE_TYPE_D3D11VA
+            && config->pix_fmt == AV_PIX_FMT_D3D11
+            && (config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX) != 0) {
+            return true;
+        }
+    }
+}
+
 } // namespace
 
 struct PikvmH264Decoder::Impl {
@@ -209,8 +245,16 @@ struct PikvmH264Decoder::Impl {
     AVPacket* packet = nullptr;
     AVFrame* frame = nullptr;
     SwsContext* sws = nullptr;
+    AVBufferRef* d3d11_device_ref = nullptr;
+    PikvmVideoDecodeMode requested_decode_mode = PikvmVideoDecodeMode::auto_select;
+    std::shared_ptr<PikvmD3D11Context> d3d11_context;
+    bool d3d11_decode = false;
 
-    Impl()
+    Impl(
+        PikvmVideoDecodeMode decode_mode,
+        std::shared_ptr<PikvmD3D11Context> d3d11_context_in)
+        : requested_decode_mode(decode_mode)
+        , d3d11_context(std::move(d3d11_context_in))
     {
         codec = avcodec_find_decoder(AV_CODEC_ID_H264);
         if (codec == nullptr) {
@@ -222,24 +266,13 @@ struct PikvmH264Decoder::Impl {
             throw std::runtime_error("FFmpeg H.264 parser is not available");
         }
 
-        context = avcodec_alloc_context3(codec);
-        if (context == nullptr) {
-            throw std::runtime_error("failed to allocate FFmpeg H.264 decoder context");
-        }
-        context->flags2 |= AV_CODEC_FLAG2_FAST;
-        context->thread_count = 0;
-        context->thread_type = FF_THREAD_FRAME;
-
-        int result = avcodec_open2(context, codec, nullptr);
-        if (result < 0) {
-            throw ffmpeg_error(result, "failed to open FFmpeg H.264 decoder");
-        }
-
         packet = av_packet_alloc();
         frame = av_frame_alloc();
         if (packet == nullptr || frame == nullptr) {
             throw std::runtime_error("failed to allocate FFmpeg packet/frame");
         }
+
+        open_best_decoder();
     }
 
     ~Impl()
@@ -256,9 +289,138 @@ struct PikvmH264Decoder::Impl {
         if (context != nullptr) {
             avcodec_free_context(&context);
         }
+        if (d3d11_device_ref != nullptr) {
+            av_buffer_unref(&d3d11_device_ref);
+        }
         if (parser != nullptr) {
             av_parser_close(parser);
         }
+    }
+
+    void open_best_decoder()
+    {
+        if (requested_decode_mode != PikvmVideoDecodeMode::software) {
+            try {
+                open_decoder(true);
+                d3d11_decode = true;
+                log_info() << "ffmpeg H.264 decoder opened"
+                           << " mode=d3d11";
+                return;
+            } catch (const std::exception& error) {
+                close_decoder_context();
+                if (requested_decode_mode == PikvmVideoDecodeMode::d3d11) {
+                    throw;
+                }
+                log_warning() << "D3D11 H.264 decode unavailable; using software decode: "
+                              << error.what();
+            }
+        }
+
+        open_decoder(false);
+        log_info() << "ffmpeg H.264 decoder opened"
+                   << " mode=software";
+    }
+
+    void close_decoder_context()
+    {
+        if (context != nullptr) {
+            avcodec_free_context(&context);
+        }
+        if (d3d11_device_ref != nullptr) {
+            av_buffer_unref(&d3d11_device_ref);
+        }
+        d3d11_decode = false;
+    }
+
+    void open_decoder(bool use_d3d11)
+    {
+        if (context != nullptr || d3d11_device_ref != nullptr) {
+            close_decoder_context();
+        }
+
+        context = avcodec_alloc_context3(codec);
+        if (context == nullptr) {
+            throw std::runtime_error("failed to allocate FFmpeg H.264 decoder context");
+        }
+        context->flags2 |= AV_CODEC_FLAG2_FAST;
+        context->opaque = this;
+
+        if (use_d3d11) {
+            if (!codec_supports_d3d11(codec)) {
+                throw std::runtime_error("FFmpeg H.264 decoder does not advertise D3D11VA");
+            }
+            if (!d3d11_context || d3d11_context->device == nullptr || !d3d11_context->lock) {
+                throw std::runtime_error("SDL D3D11 renderer device is not available");
+            }
+
+            context->thread_count = 1;
+            context->thread_type = 0;
+            context->get_format = &Impl::choose_pixel_format;
+            d3d11_device_ref = create_d3d11_device_context();
+            context->hw_device_ctx = av_buffer_ref(d3d11_device_ref);
+            if (context->hw_device_ctx == nullptr) {
+                throw std::runtime_error("failed to reference FFmpeg D3D11 device context");
+            }
+        } else {
+            context->thread_count = 0;
+            context->thread_type = FF_THREAD_FRAME;
+        }
+
+        const int result = avcodec_open2(context, codec, nullptr);
+        if (result < 0) {
+            throw ffmpeg_error(
+                result,
+                use_d3d11
+                    ? "failed to open FFmpeg D3D11 H.264 decoder"
+                    : "failed to open FFmpeg H.264 decoder");
+        }
+    }
+
+    AVBufferRef* create_d3d11_device_context()
+    {
+        AVBufferRef* device_ref = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_D3D11VA);
+        if (device_ref == nullptr) {
+            throw std::runtime_error("failed to allocate FFmpeg D3D11 device context");
+        }
+
+        AVHWDeviceContext* device_context =
+            reinterpret_cast<AVHWDeviceContext*>(device_ref->data);
+        auto* d3d11 =
+            reinterpret_cast<AVD3D11VADeviceContext*>(device_context->hwctx);
+        d3d11->device = d3d11_context->device;
+        d3d11->device->AddRef();
+        d3d11->lock = &d3d11_lock_callback;
+        d3d11->unlock = &d3d11_unlock_callback;
+        d3d11->lock_ctx = d3d11_context->lock.get();
+        d3d11->BindFlags = D3D11_BIND_DECODER | D3D11_BIND_SHADER_RESOURCE;
+
+        const int result = av_hwdevice_ctx_init(device_ref);
+        if (result < 0) {
+            av_buffer_unref(&device_ref);
+            throw ffmpeg_error(result, "failed to initialize FFmpeg D3D11 device context");
+        }
+
+        return device_ref;
+    }
+
+    static AVPixelFormat choose_pixel_format(
+        AVCodecContext* decoder_context,
+        const AVPixelFormat* formats)
+    {
+        auto* self = static_cast<Impl*>(decoder_context->opaque);
+        for (const AVPixelFormat* format = formats; *format != AV_PIX_FMT_NONE; ++format) {
+            if (*format == AV_PIX_FMT_D3D11) {
+                if (self != nullptr && self->verbose) {
+                    log_info() << "selected FFmpeg D3D11 pixel format";
+                }
+                return *format;
+            }
+        }
+
+        if (self != nullptr) {
+            log_warning() << "FFmpeg did not offer D3D11 frames for H.264 decode";
+        }
+        return formats[0];
     }
 
     std::vector<PikvmVideoFrame> ingest(std::span<const std::uint8_t> bytes)
@@ -335,12 +497,17 @@ struct PikvmH264Decoder::Impl {
             ++frames_decoded;
             if (verbose && (frames_decoded <= 12 || frames_decoded % 120 == 0)) {
                 const PikvmVideoFrame& decoded = frames.back();
-                log_info() << "ffmpeg decoded H.264 frame"
-                           << " frame=" << frames_decoded
-                           << " size=" << decoded.width << 'x' << decoded.height
-                           << " source-format=" << frame->format
-                           << " output-format=" << pikvm_video_pixel_format_name(decoded.format)
-                           << " payload-bytes=" << pikvm_video_frame_payload_bytes(decoded);
+                LogLine line = log_info();
+                line << "ffmpeg decoded H.264 frame"
+                     << " frame=" << frames_decoded
+                     << " size=" << decoded.width << 'x' << decoded.height
+                     << " source-format=" << frame->format
+                     << " output-format=" << pikvm_video_pixel_format_name(decoded.format)
+                     << " payload-bytes=" << pikvm_video_frame_payload_bytes(decoded);
+                if (decoded.format == PikvmVideoPixelFormat::d3d11_nv12) {
+                    line << " d3d11-texture=" << decoded.d3d11_texture
+                         << " d3d11-slice=" << decoded.d3d11_array_slice;
+                }
             }
             av_frame_unref(frame);
         }
@@ -354,6 +521,8 @@ struct PikvmH264Decoder::Impl {
 
         const auto source_format = static_cast<AVPixelFormat>(frame->format);
         switch (source_format) {
+        case AV_PIX_FMT_D3D11:
+            return reference_d3d11_frame();
         case AV_PIX_FMT_YUV420P:
         case AV_PIX_FMT_YUVJ420P:
             if (has_positive_planes(3)) {
@@ -370,6 +539,40 @@ struct PikvmH264Decoder::Impl {
         }
 
         return convert_frame_to_rgba(source_format);
+    }
+
+    PikvmVideoFrame reference_d3d11_frame()
+    {
+        auto* texture = reinterpret_cast<ID3D11Texture2D*>(frame->data[0]);
+        if (texture == nullptr) {
+            throw std::runtime_error("decoded D3D11 H.264 frame is missing its texture");
+        }
+
+        D3D11_TEXTURE2D_DESC desc{};
+        texture->GetDesc(&desc);
+        if (desc.Format != DXGI_FORMAT_NV12) {
+            throw std::runtime_error("decoded D3D11 H.264 frame is not NV12");
+        }
+
+        AVFrame* cloned = av_frame_clone(frame);
+        if (cloned == nullptr) {
+            throw std::runtime_error("failed to reference decoded D3D11 FFmpeg frame");
+        }
+
+        PikvmVideoFrame output;
+        output.width = cloned->width;
+        output.height = cloned->height;
+        output.format = PikvmVideoPixelFormat::d3d11_nv12;
+        output.d3d11_texture = reinterpret_cast<ID3D11Texture2D*>(cloned->data[0]);
+        output.d3d11_array_slice = static_cast<int>(reinterpret_cast<intptr_t>(cloned->data[1]));
+        if (d3d11_context) {
+            output.d3d11_lock = d3d11_context->lock;
+        }
+        output.owner = std::shared_ptr<void>(cloned, [](void* pointer) {
+            AVFrame* frame = static_cast<AVFrame*>(pointer);
+            av_frame_free(&frame);
+        });
+        return output;
     }
 
     bool has_positive_planes(int count) const
@@ -455,7 +658,14 @@ struct PikvmH264Decoder::Impl {
 };
 
 PikvmH264Decoder::PikvmH264Decoder()
-    : impl_(std::make_unique<Impl>())
+    : PikvmH264Decoder(PikvmVideoDecodeMode::software, {})
+{
+}
+
+PikvmH264Decoder::PikvmH264Decoder(
+    PikvmVideoDecodeMode decode_mode,
+    std::shared_ptr<PikvmD3D11Context> d3d11_context)
+    : impl_(std::make_unique<Impl>(decode_mode, std::move(d3d11_context)))
 {
 }
 
@@ -478,6 +688,7 @@ public:
     PikvmVideoStream(
         std::shared_ptr<PikvmWebSocket> ws,
         PikvmViewOptions options,
+        std::shared_ptr<PikvmD3D11Context> d3d11_context,
         const std::atomic_bool& stop_requested,
         std::function<void(PikvmVideoFrame)> on_frame,
         std::function<void(std::exception_ptr)> on_error)
@@ -486,6 +697,7 @@ public:
         , stop_requested_(stop_requested)
         , on_frame_(std::move(on_frame))
         , on_error_(std::move(on_error))
+        , decoder_(options_.video_decode, std::move(d3d11_context))
     {
     }
 
@@ -667,11 +879,16 @@ private:
         if (options_.login.verbose && !frames.empty()
             && (frames_decoded_ <= 12 || frames_decoded_ % 120 == 0)) {
             const PikvmVideoFrame& frame = frames.back();
-            log_info() << "published PiKVM frame"
-                       << " count=" << frames_decoded_
-                       << " size=" << frame.width << 'x' << frame.height
-                       << " format=" << pikvm_video_pixel_format_name(frame.format)
-                       << " payload-bytes=" << pikvm_video_frame_payload_bytes(frame);
+            LogLine line = log_info();
+            line << "published PiKVM frame"
+                 << " count=" << frames_decoded_
+                 << " size=" << frame.width << 'x' << frame.height
+                 << " format=" << pikvm_video_pixel_format_name(frame.format)
+                 << " payload-bytes=" << pikvm_video_frame_payload_bytes(frame);
+            if (frame.format == PikvmVideoPixelFormat::d3d11_nv12) {
+                line << " d3d11-texture=" << frame.d3d11_texture
+                     << " d3d11-slice=" << frame.d3d11_array_slice;
+            }
         }
     }
 
@@ -696,6 +913,7 @@ private:
 void start_pikvm_video_stream(
     std::shared_ptr<PikvmWebSocket> ws,
     PikvmViewOptions options,
+    std::shared_ptr<PikvmD3D11Context> d3d11_context,
     const std::atomic_bool& stop_requested,
     std::function<void(PikvmVideoFrame)> on_frame,
     std::function<void(std::exception_ptr)> on_error)
@@ -703,6 +921,7 @@ void start_pikvm_video_stream(
     std::make_shared<PikvmVideoStream>(
         std::move(ws),
         std::move(options),
+        std::move(d3d11_context),
         stop_requested,
         std::move(on_frame),
         std::move(on_error))

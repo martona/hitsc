@@ -72,6 +72,20 @@ void configure_view_options(
         ->check(CLI::NonNegativeNumber);
 }
 
+PikvmVideoDecodeMode parse_pikvm_video_decode_mode(const std::string& value)
+{
+    if (value == "auto") {
+        return PikvmVideoDecodeMode::auto_select;
+    }
+    if (value == "software") {
+        return PikvmVideoDecodeMode::software;
+    }
+    if (value == "d3d11") {
+        return PikvmVideoDecodeMode::d3d11;
+    }
+    throw std::invalid_argument("unknown PiKVM video decode mode: " + value);
+}
+
 } // namespace
 
 int run_cli(int argc, char* argv[])
@@ -109,6 +123,7 @@ int run_cli(int argc, char* argv[])
     PikvmViewOptions pikvm_options;
     std::string pikvm_url;
     std::string pikvm_password_env_name;
+    std::string pikvm_video_decode = "auto";
     CLI::App* pikvm =
         app.add_subcommand("pikvm", "Open a PiKVM H.264 video window.");
     configure_view_options(
@@ -116,6 +131,12 @@ int run_cli(int argc, char* argv[])
         pikvm_options.login,
         pikvm_options.idle_timeout_seconds,
         pikvm_password_env_name);
+    pikvm
+        ->add_option(
+            "--video-decode",
+            pikvm_video_decode,
+            "Video decoder to use: auto, software, or d3d11.")
+        ->check(CLI::IsMember({"auto", "software", "d3d11"}));
     pikvm->add_option("url", pikvm_url, "https://host[:port]")->required();
 
     if (argc == 1) {
@@ -164,6 +185,7 @@ int run_cli(int argc, char* argv[])
     if (*pikvm) {
         pikvm_options.login.base_url = parse_https_url(pikvm_url);
         pikvm_options.login.base_url.target = "/";
+        pikvm_options.video_decode = parse_pikvm_video_decode_mode(pikvm_video_decode);
         fill_default_credentials(pikvm_options.login, pikvm_password_env_name);
 
         run_pikvm_view(pikvm_options);
