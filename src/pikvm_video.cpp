@@ -39,6 +39,8 @@ namespace beast = boost::beast;
 namespace json = boost::json;
 namespace websocket = boost::beast::websocket;
 
+using PikvmClock = std::chrono::steady_clock;
+
 const char* pikvm_video_pixel_format_name(PikvmVideoPixelFormat format)
 {
     switch (format) {
@@ -451,12 +453,6 @@ struct PikvmH264Decoder::Impl {
 
             if (packet_size > 0) {
                 ++packets_parsed;
-                if (verbose && (packets_parsed <= 12 || packets_parsed % 120 == 0)) {
-                    log_info() << "ffmpeg H.264 parser packet"
-                               << " packet=" << packets_parsed
-                               << " bytes=" << packet_size
-                               << " remaining=" << remaining;
-                }
                 decode_packet(packet_data, packet_size, frames);
             }
         }
@@ -495,20 +491,6 @@ struct PikvmH264Decoder::Impl {
 
             frames.push_back(make_output_frame());
             ++frames_decoded;
-            if (verbose && (frames_decoded <= 12 || frames_decoded % 120 == 0)) {
-                const PikvmVideoFrame& decoded = frames.back();
-                LogLine line = log_info();
-                line << "ffmpeg decoded H.264 frame"
-                     << " frame=" << frames_decoded
-                     << " size=" << decoded.width << 'x' << decoded.height
-                     << " source-format=" << frame->format
-                     << " output-format=" << pikvm_video_pixel_format_name(decoded.format)
-                     << " payload-bytes=" << pikvm_video_frame_payload_bytes(decoded);
-                if (decoded.format == PikvmVideoPixelFormat::d3d11_nv12) {
-                    line << " d3d11-texture=" << decoded.d3d11_texture
-                         << " d3d11-slice=" << decoded.d3d11_array_slice;
-                }
-            }
             av_frame_unref(frame);
         }
     }
@@ -827,6 +809,7 @@ private:
 
     void handle_binary_message(std::size_t bytes_transferred)
     {
+        const auto media_received_at = PikvmClock::now();
         std::vector<std::uint8_t> bytes = buffer_bytes(read_buffer_);
         read_buffer_.consume(read_buffer_.size());
 
@@ -861,34 +844,17 @@ private:
         }
 
         const bool key = bytes[1] != 0;
+        (void)key;
         const std::span<const std::uint8_t> payload(bytes.data() + 2, bytes.size() - 2);
         ++messages_seen_;
-        if (options_.login.verbose && (messages_seen_ <= 12 || messages_seen_ % 120 == 0)) {
-            log_info() << "pikvm video websocket frame"
-                       << " message=" << messages_seen_
-                       << " websocket-bytes=" << bytes_transferred
-                       << " payload-bytes=" << payload.size()
-                       << " key=" << (key ? "yes" : "no");
-        }
 
         std::vector<PikvmVideoFrame> frames = decoder_.ingest(payload);
+        const auto decoded_at = PikvmClock::now();
         for (PikvmVideoFrame& frame : frames) {
+            frame.timing.media_received_at = media_received_at;
+            frame.timing.decoded_at = decoded_at;
             on_frame_(std::move(frame));
             ++frames_decoded_;
-        }
-        if (options_.login.verbose && !frames.empty()
-            && (frames_decoded_ <= 12 || frames_decoded_ % 120 == 0)) {
-            const PikvmVideoFrame& frame = frames.back();
-            LogLine line = log_info();
-            line << "published PiKVM frame"
-                 << " count=" << frames_decoded_
-                 << " size=" << frame.width << 'x' << frame.height
-                 << " format=" << pikvm_video_pixel_format_name(frame.format)
-                 << " payload-bytes=" << pikvm_video_frame_payload_bytes(frame);
-            if (frame.format == PikvmVideoPixelFormat::d3d11_nv12) {
-                line << " d3d11-texture=" << frame.d3d11_texture
-                     << " d3d11-slice=" << frame.d3d11_array_slice;
-            }
         }
     }
 

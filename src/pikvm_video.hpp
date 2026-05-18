@@ -5,6 +5,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -32,10 +33,17 @@ struct PikvmD3D11Context {
     std::shared_ptr<std::recursive_mutex> lock;
 };
 
+struct PikvmVideoFrameTiming {
+    std::chrono::steady_clock::time_point media_received_at;
+    std::chrono::steady_clock::time_point decoded_at;
+    std::chrono::steady_clock::time_point stored_at;
+};
+
 struct PikvmVideoFrame {
     int width = 0;
     int height = 0;
     std::uint64_t sequence = 0;
+    PikvmVideoFrameTiming timing;
     PikvmVideoPixelFormat format = PikvmVideoPixelFormat::rgba32;
     std::array<const std::uint8_t*, 4> planes{};
     std::array<int, 4> pitches{};

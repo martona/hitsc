@@ -39,6 +39,8 @@ using tcp = asio::ip::tcp;
 
 namespace {
 
+using PikvmClock = std::chrono::steady_clock;
+
 std::string buffer_text(const beast::flat_buffer& buffer)
 {
     std::string text(boost::asio::buffer_size(buffer.data()), '\0');
@@ -100,9 +102,61 @@ std::string json_event_type(std::string_view text)
     return std::string(*event_type_string);
 }
 
-struct QueuedPikvmWrite {
-    std::vector<std::uint8_t> packet;
+struct DurationStats {
+    std::uint64_t count = 0;
+    std::chrono::microseconds total{};
+    std::chrono::microseconds max{};
+
+    void add(PikvmClock::duration duration)
+    {
+        const auto micros = std::chrono::duration_cast<std::chrono::microseconds>(duration);
+        if (micros.count() < 0) {
+            return;
+        }
+        ++count;
+        total += micros;
+        max = std::max(max, micros);
+    }
+
+    double average_ms() const
+    {
+        if (count == 0) {
+            return 0.0;
+        }
+        return static_cast<double>(total.count()) / static_cast<double>(count) / 1000.0;
+    }
+
+    double max_ms() const
+    {
+        return static_cast<double>(max.count()) / 1000.0;
+    }
 };
+
+struct InputLatencyBatch {
+    std::uint64_t packets = 0;
+    std::uint64_t bytes = 0;
+    DurationStats ui_to_enqueue;
+    DurationStats queue_wait;
+    DurationStats write;
+    DurationStats ui_to_done;
+
+    void clear()
+    {
+        *this = {};
+    }
+};
+
+struct QueuedPikvmWrite {
+    PikvmInputWork work;
+    PikvmClock::time_point write_started_at;
+};
+
+std::string format_ms(double value)
+{
+    std::ostringstream out;
+    out << std::fixed << std::setprecision(2) << value;
+    return out.str();
+}
 
 } // namespace
 
@@ -129,13 +183,13 @@ public:
         });
     }
 
-    void enqueue_input(std::vector<std::uint8_t> packet, bool coalesce_mouse_motion)
+    void enqueue_input(PikvmInputWork work)
     {
         auto self = shared_from_this();
         asio::post(
             ws_->get_executor(),
-            [self, packet = std::move(packet), coalesce_mouse_motion]() mutable {
-                self->do_enqueue_input(std::move(packet), coalesce_mouse_motion);
+            [self, work = std::move(work)]() mutable {
+                self->do_enqueue_input(std::move(work));
             });
     }
 
@@ -218,18 +272,20 @@ private:
         }
     }
 
-    void do_enqueue_input(std::vector<std::uint8_t> packet, bool coalesce_mouse_motion)
+    void do_enqueue_input(PikvmInputWork work)
     {
-        if (closed_ || stopping_ || packet.empty()) {
+        if (closed_ || stopping_ || work.packet.empty()) {
             return;
         }
 
-        if (coalesce_mouse_motion
+        const std::size_t writable_queue_offset = write_in_progress_ ? 1U : 0U;
+        if (work.coalesce_mouse_motion
+            && write_queue_.size() > writable_queue_offset
             && !write_queue_.empty()
-            && is_pikvm_mouse_move_packet(write_queue_.back().packet)) {
-            write_queue_.back().packet = std::move(packet);
+            && is_pikvm_mouse_move_packet(write_queue_.back().work.packet)) {
+            write_queue_.back().work = std::move(work);
         } else {
-            write_queue_.push_back(QueuedPikvmWrite{std::move(packet)});
+            write_queue_.push_back(QueuedPikvmWrite{std::move(work), {}});
         }
 
         if (!write_in_progress_) {
@@ -248,10 +304,11 @@ private:
         }
 
         write_in_progress_ = true;
+        write_queue_.front().write_started_at = PikvmClock::now();
         ws_->binary(true);
         auto self = shared_from_this();
         ws_->async_write(
-            boost::asio::buffer(write_queue_.front().packet),
+            boost::asio::buffer(write_queue_.front().work.packet),
             [self](beast::error_code error, std::size_t bytes_transferred) {
                 self->on_write(error, bytes_transferred);
             });
@@ -281,6 +338,8 @@ private:
         }
 
         if (!write_queue_.empty()) {
+            const QueuedPikvmWrite completed = std::move(write_queue_.front());
+            record_input_latency(completed, PikvmClock::now());
             write_queue_.pop_front();
         }
 
@@ -293,6 +352,51 @@ private:
         if (stopping_) {
             force_close_now();
         }
+    }
+
+    void record_input_latency(const QueuedPikvmWrite& completed, PikvmClock::time_point write_done_at)
+    {
+        const PikvmInputTiming& timing = completed.work.timing;
+        ++input_latency_.packets;
+        input_latency_.bytes += completed.work.packet.size();
+        if (timing.ui_event_at != PikvmClock::time_point{} &&
+            timing.enqueued_at != PikvmClock::time_point{}) {
+            input_latency_.ui_to_enqueue.add(timing.enqueued_at - timing.ui_event_at);
+            input_latency_.ui_to_done.add(write_done_at - timing.ui_event_at);
+        }
+        if (timing.enqueued_at != PikvmClock::time_point{} &&
+            completed.write_started_at != PikvmClock::time_point{}) {
+            input_latency_.queue_wait.add(completed.write_started_at - timing.enqueued_at);
+        }
+        if (completed.write_started_at != PikvmClock::time_point{}) {
+            input_latency_.write.add(write_done_at - completed.write_started_at);
+        }
+        maybe_log_input_latency(write_done_at, false);
+    }
+
+    void maybe_log_input_latency(PikvmClock::time_point now, bool force)
+    {
+        if (!options_.login.verbose || input_latency_.packets == 0) {
+            return;
+        }
+        if (!force && input_latency_.packets < 32
+            && now - last_input_latency_log_ < std::chrono::seconds(2)) {
+            return;
+        }
+
+        log_info() << "pikvm input latency"
+                   << " packets=" << input_latency_.packets
+                   << " bytes=" << input_latency_.bytes
+                   << " ui-enqueue-avg-ms=" << format_ms(input_latency_.ui_to_enqueue.average_ms())
+                   << " ui-enqueue-max-ms=" << format_ms(input_latency_.ui_to_enqueue.max_ms())
+                   << " queue-avg-ms=" << format_ms(input_latency_.queue_wait.average_ms())
+                   << " queue-max-ms=" << format_ms(input_latency_.queue_wait.max_ms())
+                   << " write-avg-ms=" << format_ms(input_latency_.write.average_ms())
+                   << " write-max-ms=" << format_ms(input_latency_.write.max_ms())
+                   << " ui-done-avg-ms=" << format_ms(input_latency_.ui_to_done.average_ms())
+                   << " ui-done-max-ms=" << format_ms(input_latency_.ui_to_done.max_ms());
+        input_latency_.clear();
+        last_input_latency_log_ = now;
     }
 
     void arm_force_close_timer(std::chrono::milliseconds grace_period)
@@ -313,6 +417,7 @@ private:
         }
 
         closed_ = true;
+        maybe_log_input_latency(PikvmClock::now(), true);
         force_close_timer_.cancel();
         force_close_pikvm_websocket(*ws_);
     }
@@ -324,6 +429,8 @@ private:
     asio::steady_timer force_close_timer_;
     beast::flat_buffer read_buffer_;
     std::deque<QueuedPikvmWrite> write_queue_;
+    InputLatencyBatch input_latency_;
+    PikvmClock::time_point last_input_latency_log_ = PikvmClock::now();
     std::uint64_t messages_seen_ = 0;
     bool write_in_progress_ = false;
     bool stopping_ = false;
@@ -408,11 +515,10 @@ std::shared_ptr<PikvmEventSession> start_pikvm_event_session(
 
 void queue_pikvm_event_input(
     const std::shared_ptr<PikvmEventSession>& session,
-    std::vector<std::uint8_t> packet,
-    bool coalesce_mouse_motion)
+    PikvmInputWork work)
 {
     if (session) {
-        session->enqueue_input(std::move(packet), coalesce_mouse_motion);
+        session->enqueue_input(std::move(work));
     }
 }
 

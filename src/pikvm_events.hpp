@@ -36,6 +36,17 @@ void force_close_pikvm_websocket(PikvmWebSocket& ws);
 
 class PikvmEventSession;
 
+struct PikvmInputTiming {
+    std::chrono::steady_clock::time_point ui_event_at;
+    std::chrono::steady_clock::time_point enqueued_at;
+};
+
+struct PikvmInputWork {
+    std::vector<std::uint8_t> packet;
+    bool coalesce_mouse_motion = false;
+    PikvmInputTiming timing;
+};
+
 std::shared_ptr<PikvmEventSession> start_pikvm_event_session(
     std::shared_ptr<PikvmWebSocket> ws,
     PikvmViewOptions options,
@@ -44,8 +55,7 @@ std::shared_ptr<PikvmEventSession> start_pikvm_event_session(
 
 void queue_pikvm_event_input(
     const std::shared_ptr<PikvmEventSession>& session,
-    std::vector<std::uint8_t> packet,
-    bool coalesce_mouse_motion);
+    PikvmInputWork work);
 
 void stop_pikvm_event_session(
     const std::shared_ptr<PikvmEventSession>& session,

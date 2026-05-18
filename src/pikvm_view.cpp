@@ -27,14 +27,17 @@
 #include <deque>
 #include <exception>
 #include <functional>
+#include <iomanip>
 #include <iostream>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace hitsc {
@@ -44,25 +47,106 @@ using Microsoft::WRL::ComPtr;
 
 namespace {
 
+using PikvmClock = std::chrono::steady_clock;
+
 constexpr std::uint64_t kPikvmMouseMotionIntervalMilliseconds = 8;
 constexpr std::chrono::milliseconds kPikvmInputStopGrace{250};
 constexpr std::size_t kPikvmMouseButtonSlots = 8;
-
-struct PendingPikvmInputPacket {
-    std::vector<std::uint8_t> packet;
-    bool coalesce_mouse_motion = false;
-};
 
 struct PikvmViewState {
     std::mutex frame_mutex;
     std::mutex control_mutex;
     std::shared_ptr<const PikvmVideoFrame> frame;
+    std::atomic_uint32_t frame_event_type{0};
+    std::atomic_bool frame_event_pending{false};
     std::uint64_t frame_sequence = 0;
     std::string status = "starting";
     std::exception_ptr exception;
     std::function<void()> force_close;
-    std::function<void(std::vector<std::uint8_t>, bool)> input_sink;
-    std::deque<PendingPikvmInputPacket> pending_input;
+    std::function<void(PikvmInputWork)> input_sink;
+    std::deque<PikvmInputWork> pending_input;
+};
+
+struct DurationStats {
+    std::uint64_t count = 0;
+    std::chrono::microseconds total{};
+    std::chrono::microseconds max{};
+
+    void add(PikvmClock::duration duration)
+    {
+        const auto micros = std::chrono::duration_cast<std::chrono::microseconds>(duration);
+        if (micros.count() < 0) {
+            return;
+        }
+        ++count;
+        total += micros;
+        max = std::max(max, micros);
+    }
+
+    double average_ms() const
+    {
+        if (count == 0) {
+            return 0.0;
+        }
+        return static_cast<double>(total.count()) / static_cast<double>(count) / 1000.0;
+    }
+
+    double max_ms() const
+    {
+        return static_cast<double>(max.count()) / 1000.0;
+    }
+};
+
+struct PikvmFrameLatencyBatch {
+    std::uint64_t frames = 0;
+    std::uint64_t payload_bytes = 0;
+    DurationStats receive_to_decode;
+    DurationStats decode_to_store;
+    DurationStats store_to_present;
+    DurationStats receive_to_present;
+    int last_width = 0;
+    int last_height = 0;
+    PikvmVideoPixelFormat last_format = PikvmVideoPixelFormat::rgba32;
+
+    void clear()
+    {
+        *this = {};
+    }
+};
+
+struct PikvmNetworkStopHandles {
+    std::mutex mutex;
+    std::function<void()> control_stop;
+    std::function<void()> video_stop;
+
+    void set_control(std::function<void()> stop)
+    {
+        std::lock_guard lock(mutex);
+        control_stop = std::move(stop);
+    }
+
+    void set_video(std::function<void()> stop)
+    {
+        std::lock_guard lock(mutex);
+        video_stop = std::move(stop);
+    }
+
+    void stop_all()
+    {
+        std::function<void()> control;
+        std::function<void()> video;
+        {
+            std::lock_guard lock(mutex);
+            control = control_stop;
+            video = video_stop;
+        }
+        if (control) {
+            control();
+        }
+        if (video) {
+            video();
+        }
+    }
 };
 
 struct PikvmRendererSetup {
@@ -76,6 +160,13 @@ using PikvmMouseButtonDownState = std::array<bool, kPikvmMouseButtonSlots>;
 void throw_sdl_error(std::string_view context)
 {
     throw std::runtime_error(std::string(context) + ": " + SDL_GetError());
+}
+
+std::string format_ms(double value)
+{
+    std::ostringstream out;
+    out << std::fixed << std::setprecision(2) << value;
+    return out.str();
 }
 
 std::string wide_to_utf8(const wchar_t* value)
@@ -512,43 +603,48 @@ void set_pikvm_force_close(PikvmViewState& state, std::function<void()> force_cl
 bool queue_pikvm_input_packet(
     PikvmViewState& state,
     std::vector<std::uint8_t> packet,
-    bool coalesce_mouse_motion)
+    bool coalesce_mouse_motion,
+    PikvmClock::time_point ui_event_at = PikvmClock::now())
 {
-    std::function<void(std::vector<std::uint8_t>, bool)> input_sink;
+    PikvmInputWork work;
+    work.packet = std::move(packet);
+    work.coalesce_mouse_motion = coalesce_mouse_motion;
+    work.timing.ui_event_at = ui_event_at;
+    work.timing.enqueued_at = PikvmClock::now();
+
+    std::function<void(PikvmInputWork)> input_sink;
     {
         std::lock_guard lock(state.control_mutex);
         input_sink = state.input_sink;
         if (!input_sink && coalesce_mouse_motion &&
             !state.pending_input.empty() &&
             is_pikvm_mouse_move_packet(state.pending_input.back().packet)) {
-            state.pending_input.back() =
-                PendingPikvmInputPacket{std::move(packet), coalesce_mouse_motion};
+            state.pending_input.back() = std::move(work);
             return true;
         }
         if (!input_sink) {
-            state.pending_input.push_back(
-                PendingPikvmInputPacket{std::move(packet), coalesce_mouse_motion});
+            state.pending_input.push_back(std::move(work));
             return true;
         }
     }
 
-    input_sink(std::move(packet), coalesce_mouse_motion);
+    input_sink(std::move(work));
     return true;
 }
 
 void install_pikvm_input_sink(
     PikvmViewState& state,
-    std::function<void(std::vector<std::uint8_t>, bool)> input_sink)
+    std::function<void(PikvmInputWork)> input_sink)
 {
-    std::deque<PendingPikvmInputPacket> pending;
+    std::deque<PikvmInputWork> pending;
     {
         std::lock_guard lock(state.control_mutex);
         state.input_sink = input_sink;
         pending.swap(state.pending_input);
     }
 
-    for (PendingPikvmInputPacket& packet : pending) {
-        input_sink(std::move(packet.packet), packet.coalesce_mouse_motion);
+    for (PikvmInputWork& work : pending) {
+        input_sink(std::move(work));
     }
 }
 
@@ -563,50 +659,50 @@ void queue_pikvm_key_event(
     PikvmViewState& state,
     std::string_view code,
     bool pressed,
-    bool verbose)
+    bool verbose,
+    PikvmClock::time_point ui_event_at = PikvmClock::now())
 {
-    queue_pikvm_input_packet(state, make_pikvm_key_packet(code, pressed), false);
-    if (verbose) {
-        log_info() << "queued PiKVM key"
-                   << " code=" << code
-                   << " state=" << (pressed ? "down" : "up");
-    }
+    (void)verbose;
+    queue_pikvm_input_packet(state, make_pikvm_key_packet(code, pressed), false, ui_event_at);
 }
 
 void queue_pikvm_mouse_button_event(
     PikvmViewState& state,
     std::string_view button,
     bool pressed,
-    bool verbose)
+    bool verbose,
+    PikvmClock::time_point ui_event_at = PikvmClock::now())
 {
-    queue_pikvm_input_packet(state, make_pikvm_mouse_button_packet(button, pressed), false);
-    if (verbose) {
-        log_info() << "queued PiKVM mouse button"
-                   << " button=" << button
-                   << " state=" << (pressed ? "down" : "up");
-    }
+    (void)verbose;
+    queue_pikvm_input_packet(state, make_pikvm_mouse_button_packet(button, pressed), false, ui_event_at);
 }
 
 void queue_pikvm_mouse_move_event(
     PikvmViewState& state,
     const PikvmAbsoluteMousePosition& position,
-    bool coalesce_mouse_motion)
+    bool coalesce_mouse_motion,
+    PikvmClock::time_point ui_event_at = PikvmClock::now())
 {
-    queue_pikvm_input_packet(state, make_pikvm_mouse_move_packet(position), coalesce_mouse_motion);
+    queue_pikvm_input_packet(
+        state,
+        make_pikvm_mouse_move_packet(position),
+        coalesce_mouse_motion,
+        ui_event_at);
 }
 
 void queue_pikvm_mouse_wheel_event(
     PikvmViewState& state,
     int delta_x,
     int delta_y,
-    bool verbose)
+    bool verbose,
+    PikvmClock::time_point ui_event_at = PikvmClock::now())
 {
-    queue_pikvm_input_packet(state, make_pikvm_mouse_wheel_packet(delta_x, delta_y), false);
-    if (verbose) {
-        log_info() << "queued PiKVM mouse wheel"
-                   << " delta_x=" << delta_x
-                   << " delta_y=" << delta_y;
-    }
+    (void)verbose;
+    queue_pikvm_input_packet(
+        state,
+        make_pikvm_mouse_wheel_packet(delta_x, delta_y),
+        false,
+        ui_event_at);
 }
 
 bool any_pikvm_mouse_button_down(const PikvmMouseButtonDownState& mouse_down)
@@ -669,9 +765,21 @@ void release_all_pikvm_input(
 
 void store_pikvm_frame(PikvmViewState& state, PikvmVideoFrame frame)
 {
-    std::lock_guard lock(state.frame_mutex);
-    frame.sequence = ++state.frame_sequence;
-    state.frame = std::make_shared<PikvmVideoFrame>(std::move(frame));
+    frame.timing.stored_at = PikvmClock::now();
+    {
+        std::lock_guard lock(state.frame_mutex);
+        frame.sequence = ++state.frame_sequence;
+        state.frame = std::make_shared<PikvmVideoFrame>(std::move(frame));
+    }
+
+    const auto frame_event_type = static_cast<Uint32>(state.frame_event_type.load());
+    if (frame_event_type != 0 && !state.frame_event_pending.exchange(true)) {
+        SDL_Event event{};
+        event.type = frame_event_type;
+        if (!SDL_PushEvent(&event)) {
+            state.frame_event_pending.store(false);
+        }
+    }
 }
 
 std::shared_ptr<const PikvmVideoFrame> take_latest_pikvm_frame(
@@ -697,6 +805,62 @@ void clear_pikvm_frame(PikvmViewState& state)
         std::lock_guard lock(*frame->d3d11_lock);
         frame.reset();
     }
+}
+
+void add_pikvm_frame_latency(
+    PikvmFrameLatencyBatch& batch,
+    const PikvmVideoFrame& frame,
+    PikvmClock::time_point presented_at)
+{
+    ++batch.frames;
+    batch.payload_bytes += pikvm_video_frame_payload_bytes(frame);
+    batch.last_width = frame.width;
+    batch.last_height = frame.height;
+    batch.last_format = frame.format;
+
+    const PikvmVideoFrameTiming& timing = frame.timing;
+    if (timing.media_received_at != PikvmClock::time_point{} &&
+        timing.decoded_at != PikvmClock::time_point{}) {
+        batch.receive_to_decode.add(timing.decoded_at - timing.media_received_at);
+        batch.receive_to_present.add(presented_at - timing.media_received_at);
+    }
+    if (timing.decoded_at != PikvmClock::time_point{} &&
+        timing.stored_at != PikvmClock::time_point{}) {
+        batch.decode_to_store.add(timing.stored_at - timing.decoded_at);
+    }
+    if (timing.stored_at != PikvmClock::time_point{}) {
+        batch.store_to_present.add(presented_at - timing.stored_at);
+    }
+}
+
+void maybe_log_pikvm_frame_latency(
+    PikvmFrameLatencyBatch& batch,
+    PikvmClock::time_point& last_log,
+    bool force)
+{
+    const auto now = PikvmClock::now();
+    if (batch.frames == 0) {
+        return;
+    }
+    if (!force && batch.frames < 60 && now - last_log < std::chrono::seconds(2)) {
+        return;
+    }
+
+    log_info() << "pikvm frame latency"
+               << " frames=" << batch.frames
+               << " payload-bytes=" << batch.payload_bytes
+               << " size=" << batch.last_width << 'x' << batch.last_height
+               << " format=" << pikvm_video_pixel_format_name(batch.last_format)
+               << " receive-decode-avg-ms=" << format_ms(batch.receive_to_decode.average_ms())
+               << " receive-decode-max-ms=" << format_ms(batch.receive_to_decode.max_ms())
+               << " decode-store-avg-ms=" << format_ms(batch.decode_to_store.average_ms())
+               << " decode-store-max-ms=" << format_ms(batch.decode_to_store.max_ms())
+               << " store-present-avg-ms=" << format_ms(batch.store_to_present.average_ms())
+               << " store-present-max-ms=" << format_ms(batch.store_to_present.max_ms())
+               << " receive-present-avg-ms=" << format_ms(batch.receive_to_present.average_ms())
+               << " receive-present-max-ms=" << format_ms(batch.receive_to_present.max_ms());
+    batch.clear();
+    last_log = now;
 }
 
 void destroy_pikvm_texture(
@@ -738,6 +902,152 @@ void force_close_weak_socket(std::weak_ptr<PikvmWebSocket> weak_ws)
     }
 }
 
+struct PikvmControlStopState {
+    std::weak_ptr<PikvmWebSocket> ws;
+    std::weak_ptr<PikvmEventSession> session;
+    std::atomic_bool* stop_requested = nullptr;
+};
+
+struct PikvmVideoStopState {
+    std::weak_ptr<PikvmWebSocket> ws;
+    std::atomic_bool* stop_requested = nullptr;
+};
+
+void request_pikvm_control_stop(const std::shared_ptr<PikvmControlStopState>& stop_state)
+{
+    if (!stop_state) {
+        return;
+    }
+    if (stop_state->stop_requested != nullptr) {
+        stop_state->stop_requested->store(true);
+    }
+    if (std::shared_ptr<PikvmEventSession> event_session = stop_state->session.lock()) {
+        stop_pikvm_event_session(event_session, kPikvmInputStopGrace);
+    } else {
+        force_close_weak_socket(stop_state->ws);
+    }
+}
+
+void request_pikvm_video_stop(const std::shared_ptr<PikvmVideoStopState>& stop_state)
+{
+    if (!stop_state) {
+        return;
+    }
+    if (stop_state->stop_requested != nullptr) {
+        stop_state->stop_requested->store(true);
+    }
+    force_close_weak_socket(stop_state->ws);
+}
+
+void run_pikvm_control_worker(
+    PikvmViewOptions options,
+    CookieJar cookies,
+    PikvmViewState& state,
+    std::atomic_bool& stop_requested,
+    const std::shared_ptr<PikvmNetworkStopHandles>& stop_handles,
+    std::function<void(std::exception_ptr)> on_error)
+{
+    auto stop_state = std::make_shared<PikvmControlStopState>();
+    stop_state->stop_requested = &stop_requested;
+
+    try {
+        asio::io_context io;
+        ssl::context tls_context(ssl::context::tls_client);
+
+        set_pikvm_status(state, "connecting control websocket");
+        std::shared_ptr<PikvmWebSocket> event_ws =
+            connect_pikvm_websocket(
+                io,
+                tls_context,
+                options.login,
+                cookies,
+                options.idle_timeout_seconds,
+                "/api/ws?stream=1");
+        stop_state->ws = event_ws;
+        stop_handles->set_control([stop_state] {
+            request_pikvm_control_stop(stop_state);
+        });
+
+        if (stop_requested.load()) {
+            request_pikvm_control_stop(stop_state);
+        } else {
+            std::shared_ptr<PikvmEventSession> event_session =
+                start_pikvm_event_session(event_ws, options, stop_requested, on_error);
+            stop_state->session = event_session;
+            install_pikvm_input_sink(
+                state,
+                [event_session](PikvmInputWork work) {
+                    queue_pikvm_event_input(event_session, std::move(work));
+                });
+            set_pikvm_status(state, "control websocket connected");
+        }
+
+        io.run();
+    } catch (...) {
+        if (!stop_requested.load()) {
+            on_error(std::current_exception());
+        }
+    }
+
+    clear_pikvm_input_sink(state);
+    stop_handles->set_control({});
+}
+
+void run_pikvm_video_worker(
+    PikvmViewOptions options,
+    CookieJar cookies,
+    std::shared_ptr<PikvmD3D11Context> d3d11_context,
+    PikvmViewState& state,
+    std::atomic_bool& stop_requested,
+    const std::shared_ptr<PikvmNetworkStopHandles>& stop_handles,
+    std::function<void(std::exception_ptr)> on_error)
+{
+    auto stop_state = std::make_shared<PikvmVideoStopState>();
+    stop_state->stop_requested = &stop_requested;
+
+    try {
+        asio::io_context io;
+        ssl::context tls_context(ssl::context::tls_client);
+
+        set_pikvm_status(state, "connecting video websocket");
+        std::shared_ptr<PikvmWebSocket> video_ws =
+            connect_pikvm_websocket(
+                io,
+                tls_context,
+                options.login,
+                cookies,
+                options.idle_timeout_seconds,
+                "/api/media/ws");
+        stop_state->ws = video_ws;
+        stop_handles->set_video([stop_state] {
+            request_pikvm_video_stop(stop_state);
+        });
+
+        if (stop_requested.load()) {
+            request_pikvm_video_stop(stop_state);
+        } else {
+            start_pikvm_video_stream(
+                video_ws,
+                options,
+                std::move(d3d11_context),
+                stop_requested,
+                [&](PikvmVideoFrame frame) {
+                    store_pikvm_frame(state, std::move(frame));
+                },
+                on_error);
+            set_pikvm_status(state, "connected");
+        }
+
+        io.run();
+    } catch (...) {
+        if (!stop_requested.load()) {
+            on_error(std::current_exception());
+        }
+    }
+
+    stop_handles->set_video({});
+}
+
 void run_pikvm_network_session(
     const PikvmViewOptions& options,
     std::shared_ptr<PikvmD3D11Context> d3d11_context,
@@ -757,47 +1067,11 @@ void run_pikvm_network_session(
         return;
     }
 
-    asio::io_context io;
-    ssl::context tls_context(ssl::context::tls_client);
-
-    std::weak_ptr<PikvmWebSocket> weak_event_ws;
-    std::weak_ptr<PikvmWebSocket> weak_video_ws;
-    std::weak_ptr<PikvmEventSession> weak_event_session;
-    auto request_stop = [&] {
+    auto stop_handles = std::make_shared<PikvmNetworkStopHandles>();
+    auto request_stop = [stop_handles, &stop_requested] {
         stop_requested.store(true);
-        if (std::shared_ptr<PikvmEventSession> event_session = weak_event_session.lock()) {
-            stop_pikvm_event_session(event_session, kPikvmInputStopGrace);
-        } else {
-            force_close_weak_socket(weak_event_ws);
-        }
-        force_close_weak_socket(weak_video_ws);
+        stop_handles->stop_all();
     };
-
-    set_pikvm_status(state, "connecting event websocket");
-    std::shared_ptr<PikvmWebSocket> event_ws =
-        connect_pikvm_websocket(
-            io,
-            tls_context,
-            options.login,
-            session.cookies,
-            options.idle_timeout_seconds,
-            "/api/ws?stream=1");
-    weak_event_ws = event_ws;
-    if (stop_requested.load()) {
-        request_stop();
-        return;
-    }
-
-    set_pikvm_status(state, "connecting video websocket");
-    std::shared_ptr<PikvmWebSocket> video_ws =
-        connect_pikvm_websocket(
-            io,
-            tls_context,
-            options.login,
-            session.cookies,
-            options.idle_timeout_seconds,
-            "/api/media/ws");
-    weak_video_ws = video_ws;
     set_pikvm_force_close(state, request_stop);
 
     auto on_error = [&](std::exception_ptr exception) {
@@ -805,26 +1079,42 @@ void run_pikvm_network_session(
         request_stop();
     };
 
-    set_pikvm_status(state, "connected");
-    std::shared_ptr<PikvmEventSession> event_session =
-        start_pikvm_event_session(event_ws, options, stop_requested, on_error);
-    weak_event_session = event_session;
-    install_pikvm_input_sink(
-        state,
-        [event_session](std::vector<std::uint8_t> packet, bool coalesce_mouse_motion) {
-            queue_pikvm_event_input(event_session, std::move(packet), coalesce_mouse_motion);
-        });
-    start_pikvm_video_stream(
-        video_ws,
-        options,
-        std::move(d3d11_context),
-        stop_requested,
-        [&](PikvmVideoFrame frame) {
-            store_pikvm_frame(state, std::move(frame));
-        },
-        on_error);
+    std::thread control_thread;
+    std::thread video_thread;
+    try {
+        control_thread = std::thread(
+            run_pikvm_control_worker,
+            options,
+            session.cookies,
+            std::ref(state),
+            std::ref(stop_requested),
+            stop_handles,
+            on_error);
+        video_thread = std::thread(
+            run_pikvm_video_worker,
+            options,
+            session.cookies,
+            std::move(d3d11_context),
+            std::ref(state),
+            std::ref(stop_requested),
+            stop_handles,
+            on_error);
 
-    io.run();
+        control_thread.join();
+        video_thread.join();
+    } catch (...) {
+        request_stop();
+        if (control_thread.joinable()) {
+            control_thread.join();
+        }
+        if (video_thread.joinable()) {
+            video_thread.join();
+        }
+        clear_pikvm_input_sink(state);
+        set_pikvm_force_close(state, {});
+        throw;
+    }
+
     clear_pikvm_input_sink(state);
     set_pikvm_force_close(state, {});
     if (stop_requested.load()) {
@@ -881,6 +1171,12 @@ void run_pikvm_view(const PikvmViewOptions& options)
     PikvmMouseButtonDownState mouse_down{};
 
     try {
+        const Uint32 frame_event_type = SDL_RegisterEvents(1);
+        if (frame_event_type == 0) {
+            throw_sdl_error("SDL_RegisterEvents");
+        }
+        state->frame_event_type.store(frame_event_type);
+
         window = SDL_CreateWindow("hitsc - PiKVM", 1024, 768, SDL_WINDOW_RESIZABLE);
         if (window == nullptr) {
             throw_sdl_error("SDL_CreateWindow");
@@ -918,7 +1214,9 @@ void run_pikvm_view(const PikvmViewOptions& options)
         bool texture_wraps_d3d11_source = false;
         bool d3d11_direct_wrap_disabled = false;
         ID3D11Texture2D* texture_wrapped_d3d11_source = nullptr;
-        int presented_frames = 0;
+        PikvmFrameLatencyBatch frame_latency;
+        PikvmClock::time_point last_frame_latency_log = PikvmClock::now();
+        std::shared_ptr<const PikvmVideoFrame> pending_present_latency_frame;
         std::uint64_t last_mouse_motion_ticks = 0;
 
         while (running) {
@@ -926,6 +1224,7 @@ void run_pikvm_view(const PikvmViewOptions& options)
             SDL_Event event{};
             bool have_event = SDL_WaitEventTimeout(&event, 16);
             while (have_event) {
+                const auto ui_event_at = PikvmClock::now();
                 if (event.type == SDL_EVENT_QUIT ||
                     event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED) {
                     if (!close_event_logged) {
@@ -935,6 +1234,9 @@ void run_pikvm_view(const PikvmViewOptions& options)
                     }
                     release_all_pikvm_input(*state, key_down, mouse_down, options.login.verbose);
                     running = false;
+                } else if (event.type == state->frame_event_type.load()) {
+                    state->frame_event_pending.store(false);
+                    render_needed = true;
                 } else if (event.type == SDL_EVENT_WINDOW_RESIZED ||
                            event.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED ||
                            event.type == SDL_EVENT_WINDOW_EXPOSED) {
@@ -957,7 +1259,12 @@ void run_pikvm_view(const PikvmViewOptions& options)
                             const bool down = event.type == SDL_EVENT_KEY_DOWN;
                             if (key_down[scancode] != down) {
                                 key_down[scancode] = down;
-                                queue_pikvm_key_event(*state, *code, down, options.login.verbose);
+                                queue_pikvm_key_event(
+                                    *state,
+                                    *code,
+                                    down,
+                                    options.login.verbose,
+                                    ui_event_at);
                             }
                         }
                     }
@@ -982,12 +1289,17 @@ void run_pikvm_view(const PikvmViewOptions& options)
                             continue;
                         }
                         if (position) {
-                            queue_pikvm_mouse_move_event(*state, *position, false);
+                            queue_pikvm_mouse_move_event(*state, *position, false, ui_event_at);
                         }
 
                         if (mouse_down[button_slot] != down) {
                             mouse_down[button_slot] = down;
-                            queue_pikvm_mouse_button_event(*state, *button, down, options.login.verbose);
+                            queue_pikvm_mouse_button_event(
+                                *state,
+                                *button,
+                                down,
+                                options.login.verbose,
+                                ui_event_at);
                         }
                         SDL_CaptureMouse(any_pikvm_mouse_button_down(mouse_down));
                     } else if (options.login.verbose) {
@@ -1009,7 +1321,11 @@ void run_pikvm_view(const PikvmViewOptions& options)
                             target,
                             drag_active);
                         if (position) {
-                            queue_pikvm_mouse_move_event(*state, *position, !drag_active);
+                            queue_pikvm_mouse_move_event(
+                                *state,
+                                *position,
+                                !drag_active,
+                                ui_event_at);
                             last_mouse_motion_ticks = ticks;
                         }
                     }
@@ -1022,7 +1338,7 @@ void run_pikvm_view(const PikvmViewOptions& options)
                         target,
                         any_pikvm_mouse_button_down(mouse_down));
                     if (position) {
-                        queue_pikvm_mouse_move_event(*state, *position, false);
+                        queue_pikvm_mouse_move_event(*state, *position, false, ui_event_at);
                         const float x = event.wheel.direction == SDL_MOUSEWHEEL_FLIPPED
                             ? -event.wheel.x
                             : event.wheel.x;
@@ -1036,7 +1352,8 @@ void run_pikvm_view(const PikvmViewOptions& options)
                                 *state,
                                 delta_x,
                                 delta_y,
-                                options.login.verbose);
+                                options.login.verbose,
+                                ui_event_at);
                         }
                     }
                 }
@@ -1160,12 +1477,7 @@ void run_pikvm_view(const PikvmViewOptions& options)
                             .c_str());
                 }
 
-                ++presented_frames;
-                if (options.login.verbose && (presented_frames <= 20 || presented_frames % 60 == 0)) {
-                    log_info() << "presented PiKVM frame #" << presented_frames
-                               << " sequence=" << frame->sequence
-                               << " format=" << pikvm_video_pixel_format_name(frame->format);
-                }
+                pending_present_latency_frame = frame;
                 render_needed = true;
             }
 
@@ -1182,6 +1494,14 @@ void run_pikvm_view(const PikvmViewOptions& options)
                     SDL_RenderTexture(renderer, texture, nullptr, &target);
                 }
                 SDL_RenderPresent(renderer);
+                if (options.login.verbose && pending_present_latency_frame) {
+                    add_pikvm_frame_latency(
+                        frame_latency,
+                        *pending_present_latency_frame,
+                        PikvmClock::now());
+                    pending_present_latency_frame.reset();
+                    maybe_log_pikvm_frame_latency(frame_latency, last_frame_latency_log, false);
+                }
                 first_render = false;
             }
 
@@ -1197,6 +1517,9 @@ void run_pikvm_view(const PikvmViewOptions& options)
                 }
                 running = false;
             }
+        }
+        if (options.login.verbose) {
+            maybe_log_pikvm_frame_latency(frame_latency, last_frame_latency_log, true);
         }
     } catch (...) {
         print_current_exception_with_stack(std::cerr, "pikvm view ui thread");
