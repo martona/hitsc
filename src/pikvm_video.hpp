@@ -29,9 +29,6 @@ enum class PikvmVideoPixelFormat {
 
 struct PikvmD3D11Context {
     ID3D11Device* device = nullptr;
-    ID3D11DeviceContext* device_context = nullptr;
-    std::shared_ptr<void> device_owner;
-    std::shared_ptr<void> device_context_owner;
     std::shared_ptr<std::recursive_mutex> lock;
 };
 

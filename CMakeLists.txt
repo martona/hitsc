@@ -93,6 +93,13 @@ endif()
 
 if(MSVC)
   target_compile_options(hitsc PRIVATE /W4 /permissive- /bigobj)
+  target_compile_options(hitsc PRIVATE "$<$<CONFIG:Release>:/Zi>")
+  target_link_options(
+    hitsc
+    PRIVATE
+      "$<$<CONFIG:Release>:/DEBUG:FULL>"
+      "$<$<CONFIG:Release>:/MAP>"
+  )
 else()
   target_compile_options(hitsc PRIVATE -Wall -Wextra -Wpedantic)
 endif()

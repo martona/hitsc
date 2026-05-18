@@ -57,13 +57,6 @@ void throw_sdl_error(std::string_view context)
     throw std::runtime_error(std::string(context) + ": " + SDL_GetError());
 }
 
-void release_unknown(void* pointer)
-{
-    if (pointer != nullptr) {
-        static_cast<IUnknown*>(pointer)->Release();
-    }
-}
-
 std::string wide_to_utf8(const wchar_t* value)
 {
     if (value == nullptr || value[0] == L'\0') {
@@ -157,20 +150,20 @@ std::shared_ptr<PikvmD3D11Context> query_renderer_d3d11_context(SDL_Renderer* re
         return {};
     }
 
-    ID3D11DeviceContext* immediate_context = nullptr;
-    device->GetImmediateContext(&immediate_context);
-    if (immediate_context == nullptr) {
-        return {};
-    }
-
     auto context = std::make_shared<PikvmD3D11Context>();
-    device->AddRef();
     context->device = device;
-    context->device_owner = std::shared_ptr<void>(device, release_unknown);
-    context->device_context = immediate_context;
-    context->device_context_owner = std::shared_ptr<void>(immediate_context, release_unknown);
     context->lock = std::make_shared<std::recursive_mutex>();
     return context;
+}
+
+ComPtr<ID3D11DeviceContext> get_immediate_d3d11_context(
+    const std::shared_ptr<PikvmD3D11Context>& d3d11_context)
+{
+    ComPtr<ID3D11DeviceContext> immediate_context;
+    if (d3d11_context && d3d11_context->device != nullptr) {
+        d3d11_context->device->GetImmediateContext(&immediate_context);
+    }
+    return immediate_context;
 }
 
 PikvmRendererSetup create_pikvm_renderer(SDL_Window* window, const PikvmViewOptions& options)
@@ -390,7 +383,7 @@ void copy_d3d11_frame_to_texture(
     const PikvmVideoFrame& frame,
     const std::shared_ptr<PikvmD3D11Context>& d3d11_context)
 {
-    if (!d3d11_context || d3d11_context->device_context == nullptr || !d3d11_context->lock) {
+    if (!d3d11_context || d3d11_context->device == nullptr || !d3d11_context->lock) {
         throw std::runtime_error("D3D11 PiKVM frame received without a D3D11 renderer context");
     }
     if (frame.d3d11_texture == nullptr) {
@@ -420,7 +413,11 @@ void copy_d3d11_frame_to_texture(
         source_desc.MipLevels);
 
     std::lock_guard lock(*d3d11_context->lock);
-    d3d11_context->device_context->CopySubresourceRegion(
+    ComPtr<ID3D11DeviceContext> immediate_context = get_immediate_d3d11_context(d3d11_context);
+    if (!immediate_context) {
+        throw std::runtime_error("failed to get D3D11 immediate context");
+    }
+    immediate_context->CopySubresourceRegion(
         destination,
         0,
         0,
@@ -880,8 +877,8 @@ void run_pikvm_view(const PikvmViewOptions& options)
     } catch (...) {
         print_current_exception_with_stack(std::cerr, "pikvm view ui thread");
         stop_pikvm_network(*state, *stop_requested, network_thread, options.login.verbose);
-        destroy_pikvm_texture(texture, d3d11_context);
         clear_pikvm_frame(*state);
+        destroy_pikvm_texture(texture, d3d11_context);
         destroy_pikvm_renderer(renderer, d3d11_context);
         if (window != nullptr) {
             SDL_DestroyWindow(window);
@@ -894,19 +891,13 @@ void run_pikvm_view(const PikvmViewOptions& options)
 
     stop_pikvm_network(*state, *stop_requested, network_thread, options.login.verbose);
 
-    if (options.login.verbose) {
-        log_debug() << "pikvm ui cleanup begin";
-    }
-    destroy_pikvm_texture(texture, d3d11_context);
     clear_pikvm_frame(*state);
+    destroy_pikvm_texture(texture, d3d11_context);
     destroy_pikvm_renderer(renderer, d3d11_context);
     SDL_DestroyWindow(window);
     window = nullptr;
     d3d11_context.reset();
     SDL_Quit();
-    if (options.login.verbose) {
-        log_debug() << "pikvm ui cleanup end";
-    }
 }
 
 } // namespace hitsc

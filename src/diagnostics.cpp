@@ -47,6 +47,13 @@ void print_symbolized_address_locked(std::ostream& output, std::size_t index, DW
 
     output << "  #" << index << " 0x" << std::hex << address << std::dec;
 
+    IMAGEHLP_MODULE64 module{};
+    module.SizeOfStruct = sizeof(module);
+    if (SymGetModuleInfo64(process, address, &module)) {
+        output << " " << module.ModuleName
+               << "+0x" << std::hex << (address - module.BaseOfImage) << std::dec;
+    }
+
     alignas(SYMBOL_INFO) std::array<unsigned char, sizeof(SYMBOL_INFO) + MAX_SYM_NAME> symbol_storage{};
     auto* symbol = reinterpret_cast<SYMBOL_INFO*>(symbol_storage.data());
     symbol->SizeOfStruct = sizeof(SYMBOL_INFO);
