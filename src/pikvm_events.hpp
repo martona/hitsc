@@ -11,10 +11,13 @@
 #include <boost/beast/websocket/ssl.hpp>
 
 #include <atomic>
+#include <chrono>
+#include <cstdint>
 #include <exception>
 #include <functional>
 #include <memory>
 #include <string_view>
+#include <vector>
 
 namespace hitsc {
 
@@ -31,10 +34,21 @@ std::shared_ptr<PikvmWebSocket> connect_pikvm_websocket(
 
 void force_close_pikvm_websocket(PikvmWebSocket& ws);
 
-void start_pikvm_event_drain(
+class PikvmEventSession;
+
+std::shared_ptr<PikvmEventSession> start_pikvm_event_session(
     std::shared_ptr<PikvmWebSocket> ws,
     PikvmViewOptions options,
     const std::atomic_bool& stop_requested,
     std::function<void(std::exception_ptr)> on_error);
+
+void queue_pikvm_event_input(
+    const std::shared_ptr<PikvmEventSession>& session,
+    std::vector<std::uint8_t> packet,
+    bool coalesce_mouse_motion);
+
+void stop_pikvm_event_session(
+    const std::shared_ptr<PikvmEventSession>& session,
+    std::chrono::milliseconds grace_period);
 
 } // namespace hitsc

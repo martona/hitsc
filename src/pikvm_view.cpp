@@ -3,6 +3,7 @@
 #include "diagnostics.hpp"
 #include "log.hpp"
 #include "pikvm_events.hpp"
+#include "pikvm_input.hpp"
 #include "pikvm_session.hpp"
 #include "pikvm_video.hpp"
 
@@ -16,19 +17,25 @@
 #include <wrl/client.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <cwchar>
 #include <cmath>
+#include <cstdint>
+#include <deque>
 #include <exception>
 #include <functional>
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <vector>
 
 namespace hitsc {
 namespace asio = boost::asio;
@@ -36,6 +43,15 @@ namespace ssl = asio::ssl;
 using Microsoft::WRL::ComPtr;
 
 namespace {
+
+constexpr std::uint64_t kPikvmMouseMotionIntervalMilliseconds = 8;
+constexpr std::chrono::milliseconds kPikvmInputStopGrace{250};
+constexpr std::size_t kPikvmMouseButtonSlots = 8;
+
+struct PendingPikvmInputPacket {
+    std::vector<std::uint8_t> packet;
+    bool coalesce_mouse_motion = false;
+};
 
 struct PikvmViewState {
     std::mutex frame_mutex;
@@ -45,12 +61,17 @@ struct PikvmViewState {
     std::string status = "starting";
     std::exception_ptr exception;
     std::function<void()> force_close;
+    std::function<void(std::vector<std::uint8_t>, bool)> input_sink;
+    std::deque<PendingPikvmInputPacket> pending_input;
 };
 
 struct PikvmRendererSetup {
     SDL_Renderer* renderer = nullptr;
     std::shared_ptr<PikvmD3D11Context> d3d11_context;
 };
+
+using PikvmKeyDownState = std::array<bool, SDL_SCANCODE_COUNT>;
+using PikvmMouseButtonDownState = std::array<bool, kPikvmMouseButtonSlots>;
 
 void throw_sdl_error(std::string_view context)
 {
@@ -254,6 +275,34 @@ SDL_FRect current_target_rect(SDL_Window* window, int frame_width, int frame_hei
         SDL_GetWindowSize(window, &window_width, &window_height);
     }
     return centered_target_rect(window_width, window_height, frame_width, frame_height);
+}
+
+std::optional<PikvmAbsoluteMousePosition> pikvm_mouse_position(
+    float window_x,
+    float window_y,
+    const SDL_FRect& target,
+    bool clamp_to_target)
+{
+    if (target.w <= 0.0f || target.h <= 0.0f) {
+        return std::nullopt;
+    }
+
+    const bool inside =
+        window_x >= target.x
+        && window_y >= target.y
+        && window_x <= target.x + target.w
+        && window_y <= target.y + target.h;
+    if (!inside && !clamp_to_target) {
+        return std::nullopt;
+    }
+
+    const float clamped_x = std::clamp(window_x, target.x, target.x + target.w);
+    const float clamped_y = std::clamp(window_y, target.y, target.y + target.h);
+    const double normalized_x =
+        (static_cast<double>(clamped_x) - static_cast<double>(target.x)) / static_cast<double>(target.w);
+    const double normalized_y =
+        (static_cast<double>(clamped_y) - static_cast<double>(target.y)) / static_cast<double>(target.h);
+    return make_pikvm_absolute_mouse_position(normalized_x, normalized_y);
 }
 
 SDL_PixelFormat sdl_pixel_format_for_frame(PikvmVideoPixelFormat format)
@@ -460,6 +509,164 @@ void set_pikvm_force_close(PikvmViewState& state, std::function<void()> force_cl
     state.force_close = std::move(force_close);
 }
 
+bool queue_pikvm_input_packet(
+    PikvmViewState& state,
+    std::vector<std::uint8_t> packet,
+    bool coalesce_mouse_motion)
+{
+    std::function<void(std::vector<std::uint8_t>, bool)> input_sink;
+    {
+        std::lock_guard lock(state.control_mutex);
+        input_sink = state.input_sink;
+        if (!input_sink && coalesce_mouse_motion &&
+            !state.pending_input.empty() &&
+            is_pikvm_mouse_move_packet(state.pending_input.back().packet)) {
+            state.pending_input.back() =
+                PendingPikvmInputPacket{std::move(packet), coalesce_mouse_motion};
+            return true;
+        }
+        if (!input_sink) {
+            state.pending_input.push_back(
+                PendingPikvmInputPacket{std::move(packet), coalesce_mouse_motion});
+            return true;
+        }
+    }
+
+    input_sink(std::move(packet), coalesce_mouse_motion);
+    return true;
+}
+
+void install_pikvm_input_sink(
+    PikvmViewState& state,
+    std::function<void(std::vector<std::uint8_t>, bool)> input_sink)
+{
+    std::deque<PendingPikvmInputPacket> pending;
+    {
+        std::lock_guard lock(state.control_mutex);
+        state.input_sink = input_sink;
+        pending.swap(state.pending_input);
+    }
+
+    for (PendingPikvmInputPacket& packet : pending) {
+        input_sink(std::move(packet.packet), packet.coalesce_mouse_motion);
+    }
+}
+
+void clear_pikvm_input_sink(PikvmViewState& state)
+{
+    std::lock_guard lock(state.control_mutex);
+    state.input_sink = {};
+    state.pending_input.clear();
+}
+
+void queue_pikvm_key_event(
+    PikvmViewState& state,
+    std::string_view code,
+    bool pressed,
+    bool verbose)
+{
+    queue_pikvm_input_packet(state, make_pikvm_key_packet(code, pressed), false);
+    if (verbose) {
+        log_info() << "queued PiKVM key"
+                   << " code=" << code
+                   << " state=" << (pressed ? "down" : "up");
+    }
+}
+
+void queue_pikvm_mouse_button_event(
+    PikvmViewState& state,
+    std::string_view button,
+    bool pressed,
+    bool verbose)
+{
+    queue_pikvm_input_packet(state, make_pikvm_mouse_button_packet(button, pressed), false);
+    if (verbose) {
+        log_info() << "queued PiKVM mouse button"
+                   << " button=" << button
+                   << " state=" << (pressed ? "down" : "up");
+    }
+}
+
+void queue_pikvm_mouse_move_event(
+    PikvmViewState& state,
+    const PikvmAbsoluteMousePosition& position,
+    bool coalesce_mouse_motion)
+{
+    queue_pikvm_input_packet(state, make_pikvm_mouse_move_packet(position), coalesce_mouse_motion);
+}
+
+void queue_pikvm_mouse_wheel_event(
+    PikvmViewState& state,
+    int delta_x,
+    int delta_y,
+    bool verbose)
+{
+    queue_pikvm_input_packet(state, make_pikvm_mouse_wheel_packet(delta_x, delta_y), false);
+    if (verbose) {
+        log_info() << "queued PiKVM mouse wheel"
+                   << " delta_x=" << delta_x
+                   << " delta_y=" << delta_y;
+    }
+}
+
+bool any_pikvm_mouse_button_down(const PikvmMouseButtonDownState& mouse_down)
+{
+    return std::any_of(mouse_down.begin(), mouse_down.end(), [](bool down) {
+        return down;
+    });
+}
+
+bool pikvm_mouse_button_slot(std::uint8_t button, std::size_t& slot)
+{
+    slot = static_cast<std::size_t>(button);
+    return slot < kPikvmMouseButtonSlots;
+}
+
+void release_all_pikvm_keys(
+    PikvmViewState& state,
+    PikvmKeyDownState& key_down,
+    bool verbose)
+{
+    for (std::size_t scancode = 0; scancode < key_down.size(); ++scancode) {
+        if (!key_down[scancode]) {
+            continue;
+        }
+        key_down[scancode] = false;
+        const auto code = pikvm_key_code_from_sdl_scancode(static_cast<SDL_Scancode>(scancode));
+        if (code) {
+            queue_pikvm_key_event(state, *code, false, verbose);
+        }
+    }
+}
+
+void release_all_pikvm_mouse_buttons(
+    PikvmViewState& state,
+    PikvmMouseButtonDownState& mouse_down,
+    bool verbose)
+{
+    for (std::size_t slot = 0; slot < mouse_down.size(); ++slot) {
+        if (!mouse_down[slot]) {
+            continue;
+        }
+        mouse_down[slot] = false;
+        const auto button = pikvm_mouse_button_from_sdl_button(static_cast<std::uint8_t>(slot));
+        if (button) {
+            queue_pikvm_mouse_button_event(state, *button, false, verbose);
+        }
+    }
+    SDL_CaptureMouse(false);
+}
+
+void release_all_pikvm_input(
+    PikvmViewState& state,
+    PikvmKeyDownState& key_down,
+    PikvmMouseButtonDownState& mouse_down,
+    bool verbose)
+{
+    release_all_pikvm_keys(state, key_down, verbose);
+    release_all_pikvm_mouse_buttons(state, mouse_down, verbose);
+}
+
 void store_pikvm_frame(PikvmViewState& state, PikvmVideoFrame frame)
 {
     std::lock_guard lock(state.frame_mutex);
@@ -555,11 +762,15 @@ void run_pikvm_network_session(
 
     std::weak_ptr<PikvmWebSocket> weak_event_ws;
     std::weak_ptr<PikvmWebSocket> weak_video_ws;
+    std::weak_ptr<PikvmEventSession> weak_event_session;
     auto request_stop = [&] {
         stop_requested.store(true);
-        force_close_weak_socket(weak_event_ws);
+        if (std::shared_ptr<PikvmEventSession> event_session = weak_event_session.lock()) {
+            stop_pikvm_event_session(event_session, kPikvmInputStopGrace);
+        } else {
+            force_close_weak_socket(weak_event_ws);
+        }
         force_close_weak_socket(weak_video_ws);
-        io.stop();
     };
 
     set_pikvm_status(state, "connecting event websocket");
@@ -595,7 +806,14 @@ void run_pikvm_network_session(
     };
 
     set_pikvm_status(state, "connected");
-    start_pikvm_event_drain(event_ws, options, stop_requested, on_error);
+    std::shared_ptr<PikvmEventSession> event_session =
+        start_pikvm_event_session(event_ws, options, stop_requested, on_error);
+    weak_event_session = event_session;
+    install_pikvm_input_sink(
+        state,
+        [event_session](std::vector<std::uint8_t> packet, bool coalesce_mouse_motion) {
+            queue_pikvm_event_input(event_session, std::move(packet), coalesce_mouse_motion);
+        });
     start_pikvm_video_stream(
         video_ws,
         options,
@@ -607,6 +825,7 @@ void run_pikvm_network_session(
         on_error);
 
     io.run();
+    clear_pikvm_input_sink(state);
     set_pikvm_force_close(state, {});
     if (stop_requested.load()) {
         set_pikvm_status(state, "stopped");
@@ -658,6 +877,8 @@ void run_pikvm_view(const PikvmViewOptions& options)
     auto stop_requested = std::make_shared<std::atomic_bool>(false);
     auto network_done = std::make_shared<std::atomic_bool>(false);
     std::thread network_thread;
+    PikvmKeyDownState key_down{};
+    PikvmMouseButtonDownState mouse_down{};
 
     try {
         window = SDL_CreateWindow("hitsc - PiKVM", 1024, 768, SDL_WINDOW_RESIZABLE);
@@ -679,6 +900,7 @@ void run_pikvm_view(const PikvmViewOptions& options)
             } catch (...) {
                 set_pikvm_exception(*state, std::current_exception());
             }
+            clear_pikvm_input_sink(*state);
             set_pikvm_force_close(*state, {});
             network_done->store(true);
         });
@@ -697,6 +919,7 @@ void run_pikvm_view(const PikvmViewOptions& options)
         bool d3d11_direct_wrap_disabled = false;
         ID3D11Texture2D* texture_wrapped_d3d11_source = nullptr;
         int presented_frames = 0;
+        std::uint64_t last_mouse_motion_ticks = 0;
 
         while (running) {
             bool render_needed = first_render;
@@ -710,11 +933,112 @@ void run_pikvm_view(const PikvmViewOptions& options)
                         log_info() << "pikvm window close event"
                                    << " type=" << event.type;
                     }
+                    release_all_pikvm_input(*state, key_down, mouse_down, options.login.verbose);
                     running = false;
                 } else if (event.type == SDL_EVENT_WINDOW_RESIZED ||
                            event.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED ||
                            event.type == SDL_EVENT_WINDOW_EXPOSED) {
                     render_needed = true;
+                } else if (event.type == SDL_EVENT_WINDOW_FOCUS_LOST) {
+                    release_all_pikvm_keys(*state, key_down, options.login.verbose);
+                } else if (event.type == SDL_EVENT_KEY_DOWN ||
+                           event.type == SDL_EVENT_KEY_UP) {
+                    if (!(event.type == SDL_EVENT_KEY_DOWN && event.key.repeat)) {
+                        const std::optional<std::string_view> code =
+                            pikvm_key_code_from_sdl_scancode(event.key.scancode);
+                        const auto scancode = static_cast<std::size_t>(event.key.scancode);
+                        if (!code || scancode >= key_down.size()) {
+                            if (options.login.verbose) {
+                                log_info() << "ignored PiKVM key"
+                                           << " scancode=" << event.key.scancode
+                                           << " key=" << event.key.key;
+                            }
+                        } else {
+                            const bool down = event.type == SDL_EVENT_KEY_DOWN;
+                            if (key_down[scancode] != down) {
+                                key_down[scancode] = down;
+                                queue_pikvm_key_event(*state, *code, down, options.login.verbose);
+                            }
+                        }
+                    }
+                } else if (texture_width > 0 && texture_height > 0 &&
+                           (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
+                            event.type == SDL_EVENT_MOUSE_BUTTON_UP)) {
+                    const std::optional<std::string_view> button =
+                        pikvm_mouse_button_from_sdl_button(event.button.button);
+                    std::size_t button_slot = 0;
+                    if (button && pikvm_mouse_button_slot(event.button.button, button_slot)) {
+                        const bool down = event.type == SDL_EVENT_MOUSE_BUTTON_DOWN;
+                        const SDL_FRect target = current_target_rect(window, texture_width, texture_height);
+                        const bool drag_active = any_pikvm_mouse_button_down(mouse_down);
+                        const std::optional<PikvmAbsoluteMousePosition> position = pikvm_mouse_position(
+                            event.button.x,
+                            event.button.y,
+                            target,
+                            drag_active || !down);
+
+                        if (down && !position) {
+                            have_event = SDL_PollEvent(&event);
+                            continue;
+                        }
+                        if (position) {
+                            queue_pikvm_mouse_move_event(*state, *position, false);
+                        }
+
+                        if (mouse_down[button_slot] != down) {
+                            mouse_down[button_slot] = down;
+                            queue_pikvm_mouse_button_event(*state, *button, down, options.login.verbose);
+                        }
+                        SDL_CaptureMouse(any_pikvm_mouse_button_down(mouse_down));
+                    } else if (options.login.verbose) {
+                        log_info() << "ignored PiKVM mouse button"
+                                   << " button=" << static_cast<int>(event.button.button);
+                    }
+                } else if (texture_width > 0 && texture_height > 0 &&
+                           event.type == SDL_EVENT_MOUSE_MOTION) {
+                    const bool drag_active = any_pikvm_mouse_button_down(mouse_down);
+                    const std::uint64_t ticks = SDL_GetTicks();
+                    const bool throttled =
+                        !drag_active
+                        && ticks - last_mouse_motion_ticks < kPikvmMouseMotionIntervalMilliseconds;
+                    if (!throttled) {
+                        const SDL_FRect target = current_target_rect(window, texture_width, texture_height);
+                        const std::optional<PikvmAbsoluteMousePosition> position = pikvm_mouse_position(
+                            event.motion.x,
+                            event.motion.y,
+                            target,
+                            drag_active);
+                        if (position) {
+                            queue_pikvm_mouse_move_event(*state, *position, !drag_active);
+                            last_mouse_motion_ticks = ticks;
+                        }
+                    }
+                } else if (texture_width > 0 && texture_height > 0 &&
+                           event.type == SDL_EVENT_MOUSE_WHEEL) {
+                    const SDL_FRect target = current_target_rect(window, texture_width, texture_height);
+                    const std::optional<PikvmAbsoluteMousePosition> position = pikvm_mouse_position(
+                        event.wheel.mouse_x,
+                        event.wheel.mouse_y,
+                        target,
+                        any_pikvm_mouse_button_down(mouse_down));
+                    if (position) {
+                        queue_pikvm_mouse_move_event(*state, *position, false);
+                        const float x = event.wheel.direction == SDL_MOUSEWHEEL_FLIPPED
+                            ? -event.wheel.x
+                            : event.wheel.x;
+                        const float y = event.wheel.direction == SDL_MOUSEWHEEL_FLIPPED
+                            ? -event.wheel.y
+                            : event.wheel.y;
+                        const int delta_x = x == 0.0f ? 0 : (x > 0.0f ? 5 : -5);
+                        const int delta_y = y == 0.0f ? 0 : (y > 0.0f ? 5 : -5);
+                        if (delta_x != 0 || delta_y != 0) {
+                            queue_pikvm_mouse_wheel_event(
+                                *state,
+                                delta_x,
+                                delta_y,
+                                options.login.verbose);
+                        }
+                    }
                 }
                 have_event = SDL_PollEvent(&event);
             }
@@ -876,6 +1200,7 @@ void run_pikvm_view(const PikvmViewOptions& options)
         }
     } catch (...) {
         print_current_exception_with_stack(std::cerr, "pikvm view ui thread");
+        release_all_pikvm_input(*state, key_down, mouse_down, options.login.verbose);
         stop_pikvm_network(*state, *stop_requested, network_thread, options.login.verbose);
         clear_pikvm_frame(*state);
         destroy_pikvm_texture(texture, d3d11_context);
@@ -889,6 +1214,7 @@ void run_pikvm_view(const PikvmViewOptions& options)
         throw;
     }
 
+    release_all_pikvm_input(*state, key_down, mouse_down, options.login.verbose);
     stop_pikvm_network(*state, *stop_requested, network_thread, options.login.verbose);
 
     clear_pikvm_frame(*state);

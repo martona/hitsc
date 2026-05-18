@@ -64,6 +64,7 @@ add_executable(
   src/megarac_video.cpp
   src/megarac_session.cpp
   src/pikvm_events.cpp
+  src/pikvm_input.cpp
   src/pikvm_session.cpp
   src/pikvm_video.cpp
   src/pikvm_view.cpp

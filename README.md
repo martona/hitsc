@@ -4,7 +4,7 @@
 
 It's a fast, small, and efficient utility to provide a secure iKVM interface to IPMI targets without wading through vendor-specific web interfaces with their subpar-to-downright-hostile UX. The **Terminal Services Client** part is an homage to `mstsc.exe`.
 
-The two supported vendors are **MegaRAC** (ASRockRack and ASUS, works well) and **ATEN** (Supermicro, passable, see notes.) There is also experimental **PiKVM** direct H.264 video support.
+The two supported vendors are **MegaRAC** (ASRockRack and ASUS, works well) and **ATEN** (Supermicro, passable, see notes.) There is also experimental **PiKVM** direct H.264 video and input support.
 
 The goal is narrow: speak HTTPS, verify TLS certificates, authenticate through the BMC web session, establish a secure `wss://` tunnel, then provide a clean and consistent UX for iKVM interaction through it.
 
@@ -16,7 +16,7 @@ Supported today:
 
 - iKVM with basic keyboard and mouse input
 - MegaRAC and ATEN
-- Experimental PiKVM direct H.264 video
+- Experimental PiKVM direct H.264 video with keyboard and mouse input
 - Console interface to provide target information and options
 - Windows only for now
 
@@ -58,7 +58,7 @@ Open an ATEN/Supermicro iKVM session:
 .\build\windows-debug\hitsc.exe aten -u USERNAME https://bmc.example.com
 ```
 
-Open a PiKVM direct H.264 video session:
+Open a PiKVM direct H.264 video and input session:
 
 ```powershell
 .\build\windows-debug\hitsc.exe pikvm -u USERNAME https://pikvm.example.com
@@ -120,7 +120,7 @@ So it works, but it's not great, and it likely won't ever be.
 
 ### PiKVM
 
-The current PiKVM support authenticates with the documented `/api/auth/login` form endpoint, keeps `/api/ws?stream=1` open for KVMD state, opens `/api/media/ws`, requests direct H.264 over the PiKVM media websocket, decodes it with FFmpeg, and displays it in SDL. On Windows it can use D3D11 hardware decode plus GPU-side texture upload when available, with software decode as the fallback. It does not send input or control power yet.
+The current PiKVM support authenticates with the documented `/api/auth/login` form endpoint, keeps `/api/ws?stream=1` open for KVMD state and HID input, opens `/api/media/ws`, requests direct H.264 over the PiKVM media websocket, decodes it with FFmpeg, and displays it in SDL. On Windows it can use D3D11 hardware decode plus GPU-side texture upload when available, with software decode as the fallback. Keyboard and absolute mouse input are sent over the KVMD event WebSocket; power control and other side channels are not implemented yet.
 
 ## License and Third-party Code
 
@@ -138,8 +138,7 @@ This is a work in progress, the current stage not being much more than a sign of
 
 - Add Linux and macOS support.
 - Add TLS certificate pinning.
-- Expand PiKVM support beyond direct video
-- Add keyboard and mouse input over the KVMD event WebSocket
+- Expand PiKVM support beyond video and basic input
 - Extend hardware H.264 decode beyond Windows D3D11 and reduce remaining GPU copy paths where possible
 - Add Apple RDP support (yeah it's not IPMI but it's a pain point for me)
 - Add UI for connection establishment, making CLI optional

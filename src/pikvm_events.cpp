@@ -2,6 +2,7 @@
 
 #include "app_info.hpp"
 #include "log.hpp"
+#include "pikvm_input.hpp"
 #include "text.hpp"
 #include "tls.hpp"
 #include "url.hpp"
@@ -9,6 +10,8 @@
 #include <boost/asio/buffer.hpp>
 #include <boost/asio/dispatch.hpp>
 #include <boost/asio/ip/tcp.hpp>
+#include <boost/asio/post.hpp>
+#include <boost/asio/steady_timer.hpp>
 #include <boost/beast/http.hpp>
 #include <boost/json.hpp>
 #include <boost/version.hpp>
@@ -17,6 +20,7 @@
 #include <chrono>
 #include <cctype>
 #include <cstdint>
+#include <deque>
 #include <iomanip>
 #include <sstream>
 #include <stdexcept>
@@ -96,9 +100,15 @@ std::string json_event_type(std::string_view text)
     return std::string(*event_type_string);
 }
 
-class PikvmEventDrain : public std::enable_shared_from_this<PikvmEventDrain> {
+struct QueuedPikvmWrite {
+    std::vector<std::uint8_t> packet;
+};
+
+} // namespace
+
+class PikvmEventSession : public std::enable_shared_from_this<PikvmEventSession> {
 public:
-    PikvmEventDrain(
+    PikvmEventSession(
         std::shared_ptr<PikvmWebSocket> ws,
         PikvmViewOptions options,
         const std::atomic_bool& stop_requested,
@@ -107,6 +117,7 @@ public:
         , options_(std::move(options))
         , stop_requested_(stop_requested)
         , on_error_(std::move(on_error))
+        , force_close_timer_(ws_->get_executor())
     {
     }
 
@@ -115,6 +126,35 @@ public:
         auto self = shared_from_this();
         asio::dispatch(ws_->get_executor(), [self] {
             self->start_read();
+        });
+    }
+
+    void enqueue_input(std::vector<std::uint8_t> packet, bool coalesce_mouse_motion)
+    {
+        auto self = shared_from_this();
+        asio::post(
+            ws_->get_executor(),
+            [self, packet = std::move(packet), coalesce_mouse_motion]() mutable {
+                self->do_enqueue_input(std::move(packet), coalesce_mouse_motion);
+            });
+    }
+
+    void request_stop(std::chrono::milliseconds grace_period)
+    {
+        auto self = shared_from_this();
+        asio::post(ws_->get_executor(), [self, grace_period] {
+            if (self->closed_) {
+                return;
+            }
+            self->stopping_ = true;
+            if (!self->write_in_progress_ && !self->write_queue_.empty()) {
+                self->start_write();
+            }
+            if (self->write_in_progress_ || !self->write_queue_.empty()) {
+                self->arm_force_close_timer(grace_period);
+                return;
+            }
+            self->force_close_now();
         });
     }
 
@@ -142,6 +182,7 @@ private:
         if (error) {
             const bool expected_stop =
                 stop_requested_.load()
+                || stopping_
                 || error == websocket::error::closed
                 || error == asio::error::operation_aborted
                 || error == asio::error::bad_descriptor;
@@ -150,7 +191,7 @@ private:
                 on_error_(std::make_exception_ptr(
                     beast::system_error(error, "PiKVM event websocket read failed")));
             }
-            closed_ = true;
+            force_close_now();
             return;
         }
 
@@ -172,19 +213,122 @@ private:
         }
 
         read_buffer_.consume(read_buffer_.size());
-        start_read();
+        if (!stopping_) {
+            start_read();
+        }
+    }
+
+    void do_enqueue_input(std::vector<std::uint8_t> packet, bool coalesce_mouse_motion)
+    {
+        if (closed_ || stopping_ || packet.empty()) {
+            return;
+        }
+
+        if (coalesce_mouse_motion
+            && !write_queue_.empty()
+            && is_pikvm_mouse_move_packet(write_queue_.back().packet)) {
+            write_queue_.back().packet = std::move(packet);
+        } else {
+            write_queue_.push_back(QueuedPikvmWrite{std::move(packet)});
+        }
+
+        if (!write_in_progress_) {
+            start_write();
+        }
+    }
+
+    void start_write()
+    {
+        if (closed_ || write_queue_.empty()) {
+            write_in_progress_ = false;
+            if (stopping_) {
+                force_close_now();
+            }
+            return;
+        }
+
+        write_in_progress_ = true;
+        ws_->binary(true);
+        auto self = shared_from_this();
+        ws_->async_write(
+            boost::asio::buffer(write_queue_.front().packet),
+            [self](beast::error_code error, std::size_t bytes_transferred) {
+                self->on_write(error, bytes_transferred);
+            });
+    }
+
+    void on_write(beast::error_code error, std::size_t bytes_transferred)
+    {
+        (void)bytes_transferred;
+        if (closed_) {
+            return;
+        }
+
+        if (error) {
+            const bool expected_stop =
+                stop_requested_.load()
+                || stopping_
+                || error == websocket::error::closed
+                || error == asio::error::operation_aborted
+                || error == asio::error::bad_descriptor;
+            if (!expected_stop) {
+                log_error() << "pikvm event websocket write error: " << error.message();
+                on_error_(std::make_exception_ptr(
+                    beast::system_error(error, "PiKVM event websocket write failed")));
+            }
+            force_close_now();
+            return;
+        }
+
+        if (!write_queue_.empty()) {
+            write_queue_.pop_front();
+        }
+
+        if (!write_queue_.empty()) {
+            start_write();
+            return;
+        }
+
+        write_in_progress_ = false;
+        if (stopping_) {
+            force_close_now();
+        }
+    }
+
+    void arm_force_close_timer(std::chrono::milliseconds grace_period)
+    {
+        force_close_timer_.expires_after(grace_period);
+        auto self = shared_from_this();
+        force_close_timer_.async_wait([self](beast::error_code error) {
+            if (!error) {
+                self->force_close_now();
+            }
+        });
+    }
+
+    void force_close_now()
+    {
+        if (closed_) {
+            return;
+        }
+
+        closed_ = true;
+        force_close_timer_.cancel();
+        force_close_pikvm_websocket(*ws_);
     }
 
     std::shared_ptr<PikvmWebSocket> ws_;
     PikvmViewOptions options_;
     const std::atomic_bool& stop_requested_;
     std::function<void(std::exception_ptr)> on_error_;
+    asio::steady_timer force_close_timer_;
     beast::flat_buffer read_buffer_;
+    std::deque<QueuedPikvmWrite> write_queue_;
     std::uint64_t messages_seen_ = 0;
+    bool write_in_progress_ = false;
+    bool stopping_ = false;
     bool closed_ = false;
 };
-
-} // namespace
 
 std::shared_ptr<PikvmWebSocket> connect_pikvm_websocket(
     asio::io_context& io,
@@ -247,18 +391,38 @@ void force_close_pikvm_websocket(PikvmWebSocket& ws)
     beast::get_lowest_layer(ws).socket().close(error);
 }
 
-void start_pikvm_event_drain(
+std::shared_ptr<PikvmEventSession> start_pikvm_event_session(
     std::shared_ptr<PikvmWebSocket> ws,
     PikvmViewOptions options,
     const std::atomic_bool& stop_requested,
     std::function<void(std::exception_ptr)> on_error)
 {
-    std::make_shared<PikvmEventDrain>(
+    auto session = std::make_shared<PikvmEventSession>(
         std::move(ws),
         std::move(options),
         stop_requested,
-        std::move(on_error))
-        ->start();
+        std::move(on_error));
+    session->start();
+    return session;
+}
+
+void queue_pikvm_event_input(
+    const std::shared_ptr<PikvmEventSession>& session,
+    std::vector<std::uint8_t> packet,
+    bool coalesce_mouse_motion)
+{
+    if (session) {
+        session->enqueue_input(std::move(packet), coalesce_mouse_motion);
+    }
+}
+
+void stop_pikvm_event_session(
+    const std::shared_ptr<PikvmEventSession>& session,
+    std::chrono::milliseconds grace_period)
+{
+    if (session) {
+        session->request_stop(grace_period);
+    }
 }
 
 } // namespace hitsc

@@ -125,7 +125,7 @@ int run_cli(int argc, char* argv[])
     std::string pikvm_password_env_name;
     std::string pikvm_video_decode = "auto";
     CLI::App* pikvm =
-        app.add_subcommand("pikvm", "Open a PiKVM H.264 video window.");
+        app.add_subcommand("pikvm", "Open a PiKVM H.264 video and input window.");
     configure_view_options(
         *pikvm,
         pikvm_options.login,
