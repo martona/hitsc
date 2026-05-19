@@ -490,6 +490,14 @@ std::shared_ptr<PikvmWebSocket> connect_pikvm_websocket(
         configure_tls(tls_context, ws->next_layer(), options.base_url.host, options.insecure);
         set_server_name_indication(ws->next_layer(), options.base_url.host);
 
+        const std::string host = make_host_header(options.base_url);
+        const auto websocket_started_at = std::chrono::steady_clock::now();
+        if (options.verbose) {
+            log_info() << "pikvm websocket connecting"
+                       << " path=" << path
+                       << " url=wss://" << host << path
+                       << " idle-timeout=" << (idle_timeout_seconds > 0 ? std::to_string(idle_timeout_seconds) + "s" : "disabled");
+        }
         const auto endpoints = resolver.resolve(options.base_url.host, options.base_url.port);
         beast::get_lowest_layer(*ws).expires_after(std::chrono::seconds(30));
         beast::get_lowest_layer(*ws).connect(endpoints);
@@ -508,7 +516,6 @@ std::shared_ptr<PikvmWebSocket> connect_pikvm_websocket(
         }
         ws->set_option(timeout);
 
-        const std::string host = make_host_header(options.base_url);
         ws->set_option(websocket::stream_base::decorator([&](websocket::request_type& request) {
             request.set(http::field::user_agent, std::string(kName) + "/" + std::string(BOOST_LIB_VERSION));
             request.set(http::field::origin, make_origin(options.base_url));
@@ -519,19 +526,18 @@ std::shared_ptr<PikvmWebSocket> connect_pikvm_websocket(
             }
         }));
 
-        if (options.verbose) {
-            log_info() << "pikvm websocket connecting"
-                       << " path=" << path
-                       << " idle-timeout=" << (idle_timeout_seconds > 0 ? std::to_string(idle_timeout_seconds) + "s" : "disabled");
-        }
         ws->handshake(response, host, std::string(path));
+        const auto websocket_elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - websocket_started_at).count();
+        log_info() << "pikvm websocket connected"
+                   << " path=" << path
+                   << " url=wss://" << host << path
+                   << " duration-ms=" << websocket_elapsed_ms
+                   << " idle-timeout=" << (idle_timeout_seconds > 0 ? std::to_string(idle_timeout_seconds) + "s" : "disabled");
     } catch (const boost::system::system_error& ex) {
         const std::string message = websocket_handshake_error_message(path, ex, response);
         throw UserError(message);
     }
-    log_info() << "pikvm websocket connected"
-               << " path=" << path
-               << " idle-timeout=" << (idle_timeout_seconds > 0 ? std::to_string(idle_timeout_seconds) + "s" : "disabled");
     return ws;
 }
 

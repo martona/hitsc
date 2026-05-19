@@ -1218,6 +1218,16 @@ void run_megarac_view_session(const MegaracViewOptions& options, MegaracViewSess
         set_server_name_indication(ws->next_layer(), options.login.base_url.host);
 
         set_megarac_view_status(state, "connecting");
+        const std::string host = make_host_header(options.login.base_url);
+        const std::string path = "/kvm";
+        const auto websocket_started_at = std::chrono::steady_clock::now();
+        if (options.login.verbose) {
+            log_info() << "kvm websocket connecting"
+                       << " path=" << path
+                       << " url=wss://" << host << path
+                       << " idle-timeout=" << (options.idle_timeout_seconds > 0 ? std::to_string(options.idle_timeout_seconds) + "s" : "disabled");
+        }
+
         const auto endpoints = resolver.resolve(options.login.base_url.host, options.login.base_url.port);
         beast::get_lowest_layer(*ws).expires_after(std::chrono::seconds(30));
         beast::get_lowest_layer(*ws).connect(endpoints);
@@ -1235,7 +1245,6 @@ void run_megarac_view_session(const MegaracViewOptions& options, MegaracViewSess
         }
         ws->set_option(timeout);
 
-        const std::string host = make_host_header(options.login.base_url);
         ws->set_option(websocket::stream_base::decorator([&](websocket::request_type& request) {
             request.set(http::field::user_agent, std::string(kName) + "/" + std::string(BOOST_LIB_VERSION));
             request.set(http::field::origin, make_origin(options.login.base_url));
@@ -1248,13 +1257,18 @@ void run_megarac_view_session(const MegaracViewOptions& options, MegaracViewSess
         }));
 
         websocket::response_type response;
-        ws->handshake(response, host, "/kvm");
+        ws->handshake(response, host, path);
+        const auto websocket_elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - websocket_started_at).count();
         const std::string subprotocol = selected_subprotocol(response);
         set_subprotocol(state, subprotocol);
         set_megarac_view_status(state, "connected");
         {
             LogLine line = log_info();
             line << "kvm websocket connected"
+                 << " path=" << path
+                 << " url=wss://" << host << path
+                 << " duration-ms=" << websocket_elapsed_ms
                  << " subprotocol=" << subprotocol;
             if (options.idle_timeout_seconds > 0) {
                 line << " idle-timeout=" << options.idle_timeout_seconds << "s";
