@@ -673,12 +673,14 @@ public:
         PikvmViewOptions options,
         std::shared_ptr<PikvmD3D11Context> d3d11_context,
         const std::atomic_bool& stop_requested,
+        const std::atomic_bool& video_decode_paused,
         std::function<void(std::size_t)> on_data,
         std::function<void(PikvmVideoFrame)> on_frame,
         std::function<void(std::exception_ptr)> on_error)
         : ws_(std::move(ws))
         , options_(std::move(options))
         , stop_requested_(stop_requested)
+        , video_decode_paused_(video_decode_paused)
         , on_data_(std::move(on_data))
         , on_frame_(std::move(on_frame))
         , on_error_(std::move(on_error))
@@ -850,9 +852,19 @@ private:
         }
 
         const bool key = bytes[1] != 0;
-        (void)key;
         const std::span<const std::uint8_t> payload(bytes.data() + 2, bytes.size() - 2);
         ++messages_seen_;
+
+        if (video_decode_paused_.load()) {
+            waiting_for_keyframe_ = true;
+            return;
+        }
+        if (waiting_for_keyframe_) {
+            if (!key) {
+                return;
+            }
+            waiting_for_keyframe_ = false;
+        }
 
         std::vector<PikvmVideoFrame> frames = decoder_.ingest(payload);
         const auto decoded_at = PikvmClock::now();
@@ -867,6 +879,7 @@ private:
     std::shared_ptr<PikvmWebSocket> ws_;
     PikvmViewOptions options_;
     const std::atomic_bool& stop_requested_;
+    const std::atomic_bool& video_decode_paused_;
     std::function<void(std::size_t)> on_data_;
     std::function<void(PikvmVideoFrame)> on_frame_;
     std::function<void(std::exception_ptr)> on_error_;
@@ -879,6 +892,7 @@ private:
     int missed_heartbeats_ = 0;
     bool start_sent_ = false;
     bool closed_ = false;
+    bool waiting_for_keyframe_ = false;
 };
 
 } // namespace
@@ -888,6 +902,7 @@ void start_pikvm_video_stream(
     PikvmViewOptions options,
     std::shared_ptr<PikvmD3D11Context> d3d11_context,
     const std::atomic_bool& stop_requested,
+    const std::atomic_bool& video_decode_paused,
     std::function<void(std::size_t)> on_data,
     std::function<void(PikvmVideoFrame)> on_frame,
     std::function<void(std::exception_ptr)> on_error)
@@ -897,6 +912,7 @@ void start_pikvm_video_stream(
         std::move(options),
         std::move(d3d11_context),
         stop_requested,
+        video_decode_paused,
         std::move(on_data),
         std::move(on_frame),
         std::move(on_error))

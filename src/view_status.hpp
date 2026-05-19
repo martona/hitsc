@@ -16,6 +16,7 @@ public:
     void frame_presented(int width, int height);
     void kvm_display_status(bool online);
     void kvm_connection(bool connected);
+    void minimize();
 
     std::string title(std::string_view hostname);
 

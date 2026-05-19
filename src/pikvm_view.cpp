@@ -61,6 +61,7 @@ struct PikvmViewState {
     std::shared_ptr<const PikvmVideoFrame> frame;
     std::atomic_uint32_t frame_event_type{0};
     std::atomic_bool frame_event_pending{false};
+    std::atomic_bool video_decode_paused{false};
     std::uint64_t frame_sequence = 0;
     std::string status = "starting";
     ViewStatus view_status;
@@ -854,6 +855,23 @@ void destroy_pikvm_texture(
     texture = nullptr;
 }
 
+void reset_pikvm_texture_state(
+    SDL_Texture*& texture,
+    int& texture_width,
+    int& texture_height,
+    PikvmVideoPixelFormat& texture_format,
+    bool& texture_wraps_d3d11_source,
+    ID3D11Texture2D*& texture_wrapped_d3d11_source,
+    const std::shared_ptr<PikvmD3D11Context>& d3d11_context)
+{
+    destroy_pikvm_texture(texture, d3d11_context);
+    texture_width = 0;
+    texture_height = 0;
+    texture_format = PikvmVideoPixelFormat::rgba32;
+    texture_wraps_d3d11_source = false;
+    texture_wrapped_d3d11_source = nullptr;
+}
+
 void destroy_pikvm_renderer(
     SDL_Renderer*& renderer,
     const std::shared_ptr<PikvmD3D11Context>& d3d11_context)
@@ -1013,11 +1031,14 @@ void run_pikvm_video_worker(
             options,
             std::move(d3d11_context),
             stop_requested,
+            state.video_decode_paused,
             [&](std::size_t bytes) {
                 state.view_status.data_received(bytes);
             },
             [&](PikvmVideoFrame frame) {
-                store_pikvm_frame(state, std::move(frame));
+                if (!state.video_decode_paused.load()) {
+                    store_pikvm_frame(state, std::move(frame));
+                }
             },
             on_error);
         set_pikvm_status(state, "connected");
@@ -1230,6 +1251,30 @@ void run_pikvm_view(const PikvmViewOptions& options)
                     }
                     clear_pikvm_local_mouse_capture(mouse_down);
                     running = false;
+                } else if (event.type == SDL_EVENT_WINDOW_MINIMIZED ||
+                           event.type == SDL_EVENT_WINDOW_HIDDEN) {
+                    state->video_decode_paused.store(true);
+                    state->frame_event_pending.store(false);
+                    state->view_status.minimize();
+                    clear_pikvm_frame(*state);
+                    pending_present_latency_frame.reset();
+                    reset_pikvm_texture_state(
+                        texture,
+                        texture_width,
+                        texture_height,
+                        texture_format,
+                        texture_wraps_d3d11_source,
+                        texture_wrapped_d3d11_source,
+                        d3d11_context);
+                    last_sequence = 0;
+                    last_status_tick = 0;
+                    SDL_SetWindowTitle(window, state->view_status.title(options.login.base_url.host).c_str());
+                } else if (event.type == SDL_EVENT_WINDOW_RESTORED ||
+                           event.type == SDL_EVENT_WINDOW_SHOWN) {
+                    state->video_decode_paused.store(false);
+                    render_needed = true;
+                    last_status_tick = 0;
+                    SDL_SetWindowTitle(window, state->view_status.title(options.login.base_url.host).c_str());
                 } else if (event.type == state->frame_event_type.load()) {
                     state->frame_event_pending.store(false);
                     render_needed = true;
@@ -1357,7 +1402,9 @@ void run_pikvm_view(const PikvmViewOptions& options)
             }
 
             const std::shared_ptr<const PikvmVideoFrame> frame =
-                take_latest_pikvm_frame(*state, last_sequence);
+                state->video_decode_paused.load()
+                    ? nullptr
+                    : take_latest_pikvm_frame(*state, last_sequence);
             if (frame) {
                 std::unique_lock<std::recursive_mutex> d3d11_render_lock;
                 if (d3d11_context && d3d11_context->lock) {
@@ -1467,7 +1514,7 @@ void run_pikvm_view(const PikvmViewOptions& options)
                 render_needed = true;
             }
 
-            if (render_needed) {
+            if (render_needed && !state->video_decode_paused.load()) {
                 std::unique_lock<std::recursive_mutex> d3d11_render_lock;
                 if (d3d11_context && d3d11_context->lock) {
                     d3d11_render_lock = std::unique_lock<std::recursive_mutex>(*d3d11_context->lock);

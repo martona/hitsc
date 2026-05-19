@@ -81,6 +81,7 @@ void start_pikvm_video_stream(
     PikvmViewOptions options,
     std::shared_ptr<PikvmD3D11Context> d3d11_context,
     const std::atomic_bool& stop_requested,
+    const std::atomic_bool& video_decode_paused,
     std::function<void(std::size_t)> on_data,
     std::function<void(PikvmVideoFrame)> on_frame,
     std::function<void(std::exception_ptr)> on_error);

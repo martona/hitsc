@@ -47,6 +47,14 @@ void ViewStatus::kvm_connection(bool connected)
     }
 }
 
+void ViewStatus::minimize()
+{
+    std::lock_guard lock(mutex_);
+    frame_ready_ = false;
+    bucket_frames_ = 0;
+    fps_ = 0.0;
+}
+
 std::string ViewStatus::title(std::string_view hostname)
 {
     std::lock_guard lock(mutex_);
