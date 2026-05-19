@@ -45,6 +45,8 @@ endif()
 
 add_executable(
   hitsc
+  src/aten_network.cpp
+  src/aten_protocol.cpp
   src/aten_session.cpp
   src/aten_view.cpp
   src/aspeed_decoder.cpp
@@ -137,3 +139,23 @@ target_link_libraries(
 if(WIN32)
   target_link_libraries(hitsc PRIVATE D3d11 Dbghelp Dxgi)
 endif()
+
+enable_testing()
+
+add_executable(
+  hitsc_tests
+  src/aten_protocol.cpp
+  tests/aten_protocol_tests.cpp
+)
+
+target_compile_features(hitsc_tests PRIVATE cxx_std_20)
+
+target_include_directories(hitsc_tests PRIVATE src)
+
+if(MSVC)
+  target_compile_options(hitsc_tests PRIVATE /W4 /permissive-)
+else()
+  target_compile_options(hitsc_tests PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+add_test(NAME aten_protocol_tests COMMAND hitsc_tests)

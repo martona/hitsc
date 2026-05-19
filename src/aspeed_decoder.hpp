@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <span>
 #include <vector>
 
 namespace hitsc {
@@ -24,6 +25,11 @@ public:
         const AspeedDecodeOptions& options,
         const std::vector<std::uint8_t>& compressed,
         const std::vector<std::uint8_t>* previous_rgba = nullptr);
+
+    void decode_rgba_into(
+        const AspeedDecodeOptions& options,
+        const std::vector<std::uint8_t>& compressed,
+        std::span<std::uint8_t> output_rgba);
 };
 
 } // namespace hitsc
