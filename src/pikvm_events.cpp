@@ -516,6 +516,9 @@ std::shared_ptr<PikvmEventSession> start_pikvm_event_session(
 std::function<void(PikvmInputWork)> make_pikvm_event_input_sink(
     const std::shared_ptr<PikvmEventSession>& session)
 {
+    // The UI may still queue input while the control worker is shutting down.
+    // Capturing a shared_ptr here would keep the session alive past its websocket/io_context.
+    // A weak sink makes those late packets harmless no-ops instead.
     std::weak_ptr<PikvmEventSession> weak_session = session;
     return [weak_session](PikvmInputWork work) {
         if (std::shared_ptr<PikvmEventSession> session = weak_session.lock()) {

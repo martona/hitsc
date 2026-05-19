@@ -639,25 +639,6 @@ void clear_pikvm_input_sink(PikvmViewState& state)
     state.pending_input.clear();
 }
 
-class PikvmInputSinkToken {
-public:
-    explicit PikvmInputSinkToken(PikvmViewState& state)
-        : state_(&state)
-    {
-    }
-
-    ~PikvmInputSinkToken()
-    {
-        clear_pikvm_input_sink(*state_);
-    }
-
-    PikvmInputSinkToken(const PikvmInputSinkToken&) = delete;
-    PikvmInputSinkToken& operator=(const PikvmInputSinkToken&) = delete;
-
-private:
-    PikvmViewState* state_ = nullptr;
-};
-
 void install_pikvm_input_sink(
     PikvmViewState& state,
     std::function<void(PikvmInputWork)> input_sink)
@@ -754,32 +735,10 @@ void release_all_pikvm_keys(
     }
 }
 
-void release_all_pikvm_mouse_buttons(
-    PikvmViewState& state,
-    PikvmMouseButtonDownState& mouse_down,
-    bool verbose)
+void clear_pikvm_local_mouse_capture(PikvmMouseButtonDownState& mouse_down)
 {
-    for (std::size_t slot = 0; slot < mouse_down.size(); ++slot) {
-        if (!mouse_down[slot]) {
-            continue;
-        }
-        mouse_down[slot] = false;
-        const auto button = pikvm_mouse_button_from_sdl_button(static_cast<std::uint8_t>(slot));
-        if (button) {
-            queue_pikvm_mouse_button_event(state, *button, false, verbose);
-        }
-    }
+    mouse_down.fill(false);
     SDL_CaptureMouse(false);
-}
-
-void release_all_pikvm_input(
-    PikvmViewState& state,
-    PikvmKeyDownState& key_down,
-    PikvmMouseButtonDownState& mouse_down,
-    bool verbose)
-{
-    release_all_pikvm_keys(state, key_down, verbose);
-    release_all_pikvm_mouse_buttons(state, mouse_down, verbose);
 }
 
 void store_pikvm_frame(PikvmViewState& state, PikvmVideoFrame frame)
@@ -995,7 +954,6 @@ void run_pikvm_control_worker(
         std::shared_ptr<PikvmEventSession> event_session =
             start_pikvm_event_session(event_ws, options, stop_requested, on_error);
         stop_state->session = event_session;
-        PikvmInputSinkToken input_sink_token(state);
         install_pikvm_input_sink(state, make_pikvm_event_input_sink(event_session));
         set_pikvm_status(state, "control websocket connected");
         io.run();
@@ -1248,7 +1206,7 @@ void run_pikvm_view(const PikvmViewOptions& options)
                         log_info() << "pikvm window close event"
                                    << " type=" << event.type;
                     }
-                    release_all_pikvm_input(*state, key_down, mouse_down, options.login.verbose);
+                    clear_pikvm_local_mouse_capture(mouse_down);
                     running = false;
                 } else if (event.type == state->frame_event_type.load()) {
                     state->frame_event_pending.store(false);
@@ -1539,7 +1497,7 @@ void run_pikvm_view(const PikvmViewOptions& options)
         }
     } catch (...) {
         print_current_exception_with_stack(std::cerr, "pikvm view ui thread");
-        release_all_pikvm_input(*state, key_down, mouse_down, options.login.verbose);
+        clear_pikvm_local_mouse_capture(mouse_down);
         stop_pikvm_network(*state, *stop_requested, network_thread, options.login.verbose);
         clear_pikvm_frame(*state);
         destroy_pikvm_texture(texture, d3d11_context);
@@ -1553,7 +1511,7 @@ void run_pikvm_view(const PikvmViewOptions& options)
         throw;
     }
 
-    release_all_pikvm_input(*state, key_down, mouse_down, options.login.verbose);
+    clear_pikvm_local_mouse_capture(mouse_down);
     stop_pikvm_network(*state, *stop_requested, network_thread, options.login.verbose);
 
     clear_pikvm_frame(*state);
