@@ -51,6 +51,8 @@ PikvmSession login_pikvm(const LoginOptions& options)
 
 bool logout_pikvm(const LoginOptions& options, BmcWebSession& web)
 {
+    web.close_all_websockets();
+
     try {
         auto response = web.request(
             http::verb::post,

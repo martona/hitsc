@@ -206,6 +206,8 @@ AtenSession login_aten(const LoginOptions& options)
 
 bool logout_aten(const LoginOptions& options, BmcWebSession& web)
 {
+    web.close_all_websockets();
+
     const auto started_at = std::chrono::steady_clock::now();
     const auto log_duration = [&] {
         if (!options.verbose) {

@@ -11,9 +11,6 @@
 
 #include <SDL3/SDL.h>
 
-#include <boost/asio/io_context.hpp>
-#include <boost/asio/ssl.hpp>
-
 #include <d3d11.h>
 #include <dxgi.h>
 #include <wrl/client.h>
@@ -43,8 +40,6 @@
 #include <vector>
 
 namespace hitsc {
-namespace asio = boost::asio;
-namespace ssl = asio::ssl;
 using Microsoft::WRL::ComPtr;
 
 namespace {
@@ -888,22 +883,15 @@ void destroy_pikvm_renderer(
     renderer = nullptr;
 }
 
-void force_close_weak_socket(std::weak_ptr<PikvmWebSocket> weak_ws)
-{
-    if (std::shared_ptr<PikvmWebSocket> ws = weak_ws.lock()) {
-        force_close_pikvm_websocket(*ws);
-    }
-}
-
 struct PikvmControlStopState {
-    std::weak_ptr<PikvmWebSocket> ws;
     std::weak_ptr<PikvmEventSession> session;
     std::atomic_bool* stop_requested = nullptr;
+    BmcWebSession* web = nullptr;
 };
 
 struct PikvmVideoStopState {
-    std::weak_ptr<PikvmWebSocket> ws;
     std::atomic_bool* stop_requested = nullptr;
+    BmcWebSession* web = nullptr;
 };
 
 void request_pikvm_control_stop(const std::shared_ptr<PikvmControlStopState>& stop_state)
@@ -916,8 +904,8 @@ void request_pikvm_control_stop(const std::shared_ptr<PikvmControlStopState>& st
     }
     if (std::shared_ptr<PikvmEventSession> event_session = stop_state->session.lock()) {
         stop_pikvm_event_session(event_session, kPikvmInputStopGrace);
-    } else {
-        force_close_weak_socket(stop_state->ws);
+    } else if (stop_state->web != nullptr) {
+        stop_state->web->force_close_websocket("pikvm-control");
     }
 }
 
@@ -929,40 +917,26 @@ void request_pikvm_video_stop(const std::shared_ptr<PikvmVideoStopState>& stop_s
     if (stop_state->stop_requested != nullptr) {
         stop_state->stop_requested->store(true);
     }
-    force_close_weak_socket(stop_state->ws);
+    if (stop_state->web != nullptr) {
+        stop_state->web->force_close_websocket("pikvm-video");
+    }
 }
 
 void run_pikvm_control_worker(
     PikvmViewOptions options,
-    CookieJar cookies,
+    BmcWebSocketConnectionPtr websocket,
     PikvmViewState& state,
     std::atomic_bool& stop_requested,
-    const std::shared_ptr<PikvmNetworkStopHandles>& stop_handles,
+    std::shared_ptr<PikvmControlStopState> stop_state,
     std::function<void(std::exception_ptr)> on_error)
 {
-    auto stop_state = std::make_shared<PikvmControlStopState>();
-    stop_state->stop_requested = &stop_requested;
-
     try {
-        asio::io_context io;
-        ssl::context tls_context(ssl::context::tls_client);
-
-        set_pikvm_status(state, "connecting control websocket");
-        std::shared_ptr<PikvmWebSocket> event_ws = connect_pikvm_websocket(
-            io,
-            tls_context,
-            options.login,
-            cookies,
-            options.idle_timeout_seconds,
-            "/api/ws?stream=1");
-        stop_state->ws = event_ws;
-        stop_handles->set_control([stop_state] {
-            request_pikvm_control_stop(stop_state);
-        });
+        std::shared_ptr<PikvmWebSocket> event_ws = websocket->stream();
 
         if (stop_requested.load()) {
-            force_close_pikvm_websocket(*event_ws);
-            stop_handles->set_control({});
+            if (stop_state->web != nullptr) {
+                stop_state->web->force_close_websocket("pikvm-control");
+            }
             return;
         }
 
@@ -979,50 +953,32 @@ void run_pikvm_control_worker(
         stop_state->session = event_session;
         install_pikvm_input_sink(state, make_pikvm_event_input_sink(event_session));
         set_pikvm_status(state, "control websocket connected");
-        io.run();
+        websocket->io_context().run();
     } catch (...) {
         if (!stop_requested.load()) {
             on_error(std::current_exception());
         }
     }
 
-    stop_handles->set_control({});
     state.view_status.kvm_connection(false);
 }
 
 void run_pikvm_video_worker(
     PikvmViewOptions options,
-    CookieJar cookies,
+    BmcWebSocketConnectionPtr websocket,
     std::shared_ptr<PikvmD3D11Context> d3d11_context,
     PikvmViewState& state,
     std::atomic_bool& stop_requested,
-    const std::shared_ptr<PikvmNetworkStopHandles>& stop_handles,
+    std::shared_ptr<PikvmVideoStopState> stop_state,
     std::function<void(std::exception_ptr)> on_error)
 {
-    auto stop_state = std::make_shared<PikvmVideoStopState>();
-    stop_state->stop_requested = &stop_requested;
-
     try {
-        asio::io_context io;
-        ssl::context tls_context(ssl::context::tls_client);
-
-        set_pikvm_status(state, "connecting video websocket");
-        std::shared_ptr<PikvmWebSocket> video_ws =
-            connect_pikvm_websocket(
-                io,
-                tls_context,
-                options.login,
-                cookies,
-                options.idle_timeout_seconds,
-                "/api/media/ws");
-        stop_state->ws = video_ws;
-        stop_handles->set_video([stop_state] {
-            request_pikvm_video_stop(stop_state);
-        });
+        std::shared_ptr<PikvmWebSocket> video_ws = websocket->stream();
 
         if (stop_requested.load()) {
-            force_close_pikvm_websocket(*video_ws);
-            stop_handles->set_video({});
+            if (stop_state->web != nullptr) {
+                stop_state->web->force_close_websocket("pikvm-video");
+            }
             return;
         }
 
@@ -1042,14 +998,12 @@ void run_pikvm_video_worker(
             },
             on_error);
         set_pikvm_status(state, "connected");
-        io.run();
+        websocket->io_context().run();
     } catch (...) {
         if (!stop_requested.load()) {
             on_error(std::current_exception());
         }
     }
-
-    stop_handles->set_video({});
 }
 
 void run_pikvm_network_session(
@@ -1064,7 +1018,7 @@ void run_pikvm_network_session(
     logout_guard.arm(session);
     log_info() << "pikvm login succeeded";
     if (options.login.verbose) {
-        log_info() << "cookies stored: " << session.web.cookies().size();
+        log_info() << "cookies stored: " << session.web.cookie_count();
     }
 
     if (stop_requested.load()) {
@@ -1083,25 +1037,65 @@ void run_pikvm_network_session(
         request_stop();
     };
 
+    auto control_stop_state = std::make_shared<PikvmControlStopState>();
+    control_stop_state->stop_requested = &stop_requested;
+    control_stop_state->web = &session.web;
+    auto video_stop_state = std::make_shared<PikvmVideoStopState>();
+    video_stop_state->stop_requested = &stop_requested;
+    video_stop_state->web = &session.web;
+
     std::thread control_thread;
     std::thread video_thread;
     try {
+        if (stop_requested.load()) {
+            return;
+        }
+
+        set_pikvm_status(state, "connecting control websocket");
+        BmcWebSocketOpenResult control_websocket = session.web.open_websocket(BmcWebSocketConnectOptions{
+            .role = "pikvm-control",
+            .log_name = "pikvm websocket",
+            .path = "/api/ws?stream=1",
+            .idle_timeout_seconds = options.idle_timeout_seconds,
+            .tcp_no_delay = true,
+        });
+        stop_handles->set_control([control_stop_state] {
+            request_pikvm_control_stop(control_stop_state);
+        });
+
+        if (stop_requested.load()) {
+            return;
+        }
+
+        set_pikvm_status(state, "connecting video websocket");
+        BmcWebSocketOpenResult video_websocket = session.web.open_websocket(BmcWebSocketConnectOptions{
+            .role = "pikvm-video",
+            .log_name = "pikvm websocket",
+            .path = "/api/media/ws",
+            .idle_timeout_seconds = options.idle_timeout_seconds,
+            .tcp_no_delay = true,
+        });
+
+        stop_handles->set_video([video_stop_state] {
+            request_pikvm_video_stop(video_stop_state);
+        });
+
         control_thread = std::thread(
             run_pikvm_control_worker,
             options,
-            session.web.cookies(),
+            control_websocket.connection,
             std::ref(state),
             std::ref(stop_requested),
-            stop_handles,
+            control_stop_state,
             on_error);
         video_thread = std::thread(
             run_pikvm_video_worker,
             options,
-            session.web.cookies(),
+            video_websocket.connection,
             std::move(d3d11_context),
             std::ref(state),
             std::ref(stop_requested),
-            stop_handles,
+            video_stop_state,
             on_error);
 
         control_thread.join();
@@ -1119,6 +1113,8 @@ void run_pikvm_network_session(
         throw;
     }
 
+    stop_handles->set_control({});
+    stop_handles->set_video({});
     clear_pikvm_input_sink(state);
     set_pikvm_force_close(state, {});
     if (stop_requested.load()) {

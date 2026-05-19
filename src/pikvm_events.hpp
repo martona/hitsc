@@ -1,6 +1,6 @@
 #pragma once
 
-#include "cookie_jar.hpp"
+#include "bmc_session.hpp"
 #include "options.hpp"
 
 #include <boost/asio/io_context.hpp>
@@ -21,16 +21,7 @@
 
 namespace hitsc {
 
-using PikvmWebSocket = boost::beast::websocket::stream<
-    boost::beast::ssl_stream<boost::beast::tcp_stream>>;
-
-std::shared_ptr<PikvmWebSocket> connect_pikvm_websocket(
-    boost::asio::io_context& io,
-    boost::asio::ssl::context& tls_context,
-    const LoginOptions& options,
-    const CookieJar& cookies,
-    int idle_timeout_seconds,
-    std::string_view path);
+using PikvmWebSocket = BmcWebSocketStream;
 
 void force_close_pikvm_websocket(PikvmWebSocket& ws);
 

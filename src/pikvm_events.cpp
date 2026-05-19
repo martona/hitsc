@@ -1,22 +1,16 @@
 #include "pikvm_events.hpp"
 
-#include "app_info.hpp"
 #include "errors.hpp"
 #include "log.hpp"
 #include "pikvm_input.hpp"
-#include "text.hpp"
-#include "tls.hpp"
-#include "url.hpp"
 
 #include <boost/asio/buffer.hpp>
 #include <boost/asio/dispatch.hpp>
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/asio/post.hpp>
 #include <boost/asio/steady_timer.hpp>
-#include <boost/beast/http.hpp>
 #include <boost/json.hpp>
 #include <boost/system/system_error.hpp>
-#include <boost/version.hpp>
 
 #include <algorithm>
 #include <chrono>
@@ -34,9 +28,7 @@
 namespace hitsc {
 namespace asio = boost::asio;
 namespace beast = boost::beast;
-namespace http = boost::beast::http;
 namespace json = boost::json;
-namespace ssl = asio::ssl;
 namespace websocket = boost::beast::websocket;
 using tcp = asio::ip::tcp;
 
@@ -77,28 +69,6 @@ std::string printable_preview(std::string_view value, std::size_t limit = 120)
         preview += "...";
     }
     return preview;
-}
-
-std::string websocket_handshake_error_message(
-    std::string_view path,
-    const boost::system::system_error& error,
-    const websocket::response_type& response)
-{
-    std::ostringstream message;
-    message << "PiKVM websocket connection failed"
-            << " path=" << path
-            << ": " << error.code().message();
-    if (error.code() == websocket::error::upgrade_declined) {
-        message << " HTTP " << response.result_int();
-        if (!response.reason().empty()) {
-            message << " " << response.reason();
-        }
-        const std::string& body = response.body();
-        if (!body.empty()) {
-            message << ": " << body_snippet(body);
-        }
-    }
-    return message.str();
 }
 
 struct PikvmJsonEventSummary {
@@ -473,73 +443,6 @@ private:
     bool stopping_ = false;
     bool closed_ = false;
 };
-
-std::shared_ptr<PikvmWebSocket> connect_pikvm_websocket(
-    asio::io_context& io,
-    ssl::context& tls_context,
-    const LoginOptions& options,
-    const CookieJar& cookies,
-    int idle_timeout_seconds,
-    std::string_view path)
-{
-    auto ws = std::make_shared<PikvmWebSocket>(io, tls_context);
-    tcp::resolver resolver(io);
-    websocket::response_type response;
-
-    try {
-        configure_tls(tls_context, ws->next_layer(), options.base_url.host, options.insecure);
-        set_server_name_indication(ws->next_layer(), options.base_url.host);
-
-        const std::string host = make_host_header(options.base_url);
-        const auto websocket_started_at = std::chrono::steady_clock::now();
-        if (options.verbose) {
-            log_info() << "pikvm websocket connecting"
-                       << " path=" << path
-                       << " url=wss://" << host << path
-                       << " idle-timeout=" << (idle_timeout_seconds > 0 ? std::to_string(idle_timeout_seconds) + "s" : "disabled");
-        }
-        const auto endpoints = resolver.resolve(options.base_url.host, options.base_url.port);
-        beast::get_lowest_layer(*ws).expires_after(std::chrono::seconds(30));
-        beast::get_lowest_layer(*ws).connect(endpoints);
-        beast::get_lowest_layer(*ws).socket().set_option(tcp::no_delay(true));
-        ws->next_layer().handshake(ssl::stream_base::client);
-        beast::get_lowest_layer(*ws).expires_never();
-
-        websocket::stream_base::timeout timeout;
-        timeout.handshake_timeout = std::chrono::seconds(30);
-        if (idle_timeout_seconds > 0) {
-            timeout.idle_timeout = std::chrono::seconds(idle_timeout_seconds);
-            timeout.keep_alive_pings = true;
-        } else {
-            timeout.idle_timeout = websocket::stream_base::none();
-            timeout.keep_alive_pings = false;
-        }
-        ws->set_option(timeout);
-
-        ws->set_option(websocket::stream_base::decorator([&](websocket::request_type& request) {
-            request.set(http::field::user_agent, std::string(kName) + "/" + std::string(BOOST_LIB_VERSION));
-            request.set(http::field::origin, make_origin(options.base_url));
-
-            const std::string cookie_header = cookies.header();
-            if (!cookie_header.empty()) {
-                request.set(http::field::cookie, cookie_header);
-            }
-        }));
-
-        ws->handshake(response, host, std::string(path));
-        const auto websocket_elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - websocket_started_at).count();
-        log_info() << "pikvm websocket connected"
-                   << " path=" << path
-                   << " url=wss://" << host << path
-                   << " duration-ms=" << websocket_elapsed_ms
-                   << " idle-timeout=" << (idle_timeout_seconds > 0 ? std::to_string(idle_timeout_seconds) + "s" : "disabled");
-    } catch (const boost::system::system_error& ex) {
-        const std::string message = websocket_handshake_error_message(path, ex, response);
-        throw UserError(message);
-    }
-    return ws;
-}
 
 void force_close_pikvm_websocket(PikvmWebSocket& ws)
 {

@@ -1,10 +1,7 @@
 #include "aten_network.hpp"
 
-#include "app_info.hpp"
 #include "aten_session.hpp"
 #include "log.hpp"
-#include "tls.hpp"
-#include "url.hpp"
 
 #include <SDL3/SDL.h>
 
@@ -17,11 +14,9 @@
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/strand.hpp>
 #include <boost/beast/core.hpp>
-#include <boost/beast/http.hpp>
 #include <boost/beast/ssl.hpp>
 #include <boost/beast/websocket.hpp>
 #include <boost/beast/websocket/ssl.hpp>
-#include <boost/version.hpp>
 
 #include <algorithm>
 #include <chrono>
@@ -36,7 +31,6 @@
 namespace hitsc {
 namespace asio = boost::asio;
 namespace beast = boost::beast;
-namespace http = boost::beast::http;
 namespace ssl = asio::ssl;
 namespace websocket = boost::beast::websocket;
 using tcp = asio::ip::tcp;
@@ -45,7 +39,7 @@ std::atomic_bool g_aten_full_framebuffer_refresh_requested{true};
 
 namespace {
 
-using AtenWebSocket = websocket::stream<beast::ssl_stream<beast::tcp_stream>>;
+using AtenWebSocket = BmcWebSocketStream;
 
 constexpr std::chrono::milliseconds kAtenFramebufferRequestBackoff{33};
 constexpr std::size_t kMaxQueuedInputPackets = 512;
@@ -1053,7 +1047,7 @@ void run_aten_network_session(
     logout_guard.arm(session);
     log_info() << "aten login succeeded";
     if (options.login.verbose) {
-        log_info() << "cookies stored: " << session.web.cookies().size();
+        log_info() << "cookies stored: " << session.web.cookie_count();
     }
 
     std::string rfb_credential = options.login.username;
@@ -1066,75 +1060,18 @@ void run_aten_network_session(
                          "falling back to login username for RFB auth";
     }
 
-    asio::io_context io;
-    ssl::context tls_context(ssl::context::tls_client);
-    AtenWebSocket ws(io, tls_context);
-    tcp::resolver resolver(io);
-
-    configure_tls(tls_context, ws.next_layer(), options.login.base_url.host, options.login.insecure);
-    set_server_name_indication(ws.next_layer(), options.login.base_url.host);
-
-    const std::string host = make_host_header(options.login.base_url);
-    const std::string path = "/";
-    const auto websocket_started_at = std::chrono::steady_clock::now();
-    if (options.login.verbose) {
-        log_info() << "aten websocket connecting"
-                   << " path=" << path
-                   << " url=wss://" << host << path
-                   << " idle-timeout=" << (options.idle_timeout_seconds > 0 ? std::to_string(options.idle_timeout_seconds) + "s" : "disabled");
-    }
-
-    const auto endpoints = resolver.resolve(options.login.base_url.host, options.login.base_url.port);
-    beast::get_lowest_layer(ws).expires_after(std::chrono::seconds(30));
-    beast::get_lowest_layer(ws).connect(endpoints);
-    beast::get_lowest_layer(ws).socket().set_option(tcp::no_delay(true));
-    ws.next_layer().handshake(ssl::stream_base::client);
-    beast::get_lowest_layer(ws).expires_never();
-
-    websocket::stream_base::timeout timeout;
-    timeout.handshake_timeout = std::chrono::seconds(30);
-    if (options.idle_timeout_seconds > 0) {
-        timeout.idle_timeout = std::chrono::seconds(options.idle_timeout_seconds);
-        timeout.keep_alive_pings = true;
-    } else {
-        timeout.idle_timeout = websocket::stream_base::none();
-        timeout.keep_alive_pings = false;
-    }
-    ws.set_option(timeout);
-
-    ws.set_option(websocket::stream_base::decorator([&](websocket::request_type& request) {
-        request.set(http::field::user_agent, std::string(kName) + "/" + std::string(BOOST_LIB_VERSION));
-        request.set(http::field::origin, make_origin(options.login.base_url));
-
-        const std::string cookie_header = session.web.cookies().header();
-        if (!cookie_header.empty()) {
-            request.set(http::field::cookie, cookie_header);
-        }
-    }));
-
-    websocket::response_type response;
-    ws.handshake(response, host, path);
-    const auto websocket_elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - websocket_started_at).count();
-    {
-        LogLine line = log_info();
-        line << "aten websocket connected"
-             << " path=" << path
-             << " url=wss://" << host << path
-             << " duration-ms=" << websocket_elapsed_ms;
-        if (options.idle_timeout_seconds > 0) {
-            line << " idle-timeout=" << options.idle_timeout_seconds << "s";
-        } else {
-            line << " idle-timeout=disabled";
-        }
-    }
-    set_aten_force_close(state, [&ws] {
-        beast::error_code error;
-        beast::get_lowest_layer(ws).socket().cancel(error);
-        error.clear();
-        beast::get_lowest_layer(ws).socket().shutdown(tcp::socket::shutdown_both, error);
-        error.clear();
-        beast::get_lowest_layer(ws).socket().close(error);
+    auto websocket = session.web.open_websocket(BmcWebSocketConnectOptions{
+        .role = "aten",
+        .log_name = "aten websocket",
+        .path = "/",
+        .idle_timeout_seconds = options.idle_timeout_seconds,
+        .tcp_no_delay = true,
+    });
+    auto ws_ptr = websocket.connection->stream();
+    AtenWebSocket& ws = *ws_ptr;
+    asio::io_context& io = websocket.connection->io_context();
+    set_aten_force_close(state, [&web = session.web] {
+        web.force_close_websocket("aten");
     });
 
     RfbHandshakeStream rfb(ws);

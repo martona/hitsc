@@ -1,6 +1,5 @@
 #include "megarac_view_session.hpp"
 
-#include "app_info.hpp"
 #include "aspeed_decoder.hpp"
 #include "diagnostics.hpp"
 #include "http_client.hpp"
@@ -10,8 +9,6 @@
 #include "megarac_session.hpp"
 #include "megarac_video.hpp"
 #include "text.hpp"
-#include "tls.hpp"
-#include "url.hpp"
 
 #include <boost/asio/bind_executor.hpp>
 #include <boost/asio/io_context.hpp>
@@ -24,7 +21,6 @@
 #include <boost/beast/websocket.hpp>
 #include <boost/beast/websocket/ssl.hpp>
 #include <boost/json.hpp>
-#include <boost/version.hpp>
 
 #include <algorithm>
 #include <atomic>
@@ -50,7 +46,7 @@ namespace json = boost::json;
 namespace ssl = asio::ssl;
 namespace websocket = boost::beast::websocket;
 using tcp = asio::ip::tcp;
-using KvmWebSocket = websocket::stream<beast::ssl_stream<beast::tcp_stream>>;
+using KvmWebSocket = BmcWebSocketStream;
 
 constexpr int kInitialFramebufferWidth = 800;
 constexpr int kInitialFramebufferHeight = 600;
@@ -1195,87 +1191,24 @@ void run_megarac_view_session(const MegaracViewOptions& options, MegaracViewSess
                    << " token=present"
                    << " reconnect=" << (config.reconnect_enabled ? "yes" : "no");
 
-        asio::io_context io;
-        ssl::context tls_context(ssl::context::tls_client);
-        auto ws = std::make_shared<KvmWebSocket>(io, tls_context);
-        std::weak_ptr<KvmWebSocket> weak_ws = ws;
-        store_force_close_callback(state, [weak_ws] {
-            const std::shared_ptr<KvmWebSocket> ws = weak_ws.lock();
-            if (!ws) {
-                return;
-            }
-
-            beast::error_code error;
-            beast::get_lowest_layer(*ws).socket().cancel(error);
-            error.clear();
-            beast::get_lowest_layer(*ws).socket().shutdown(tcp::socket::shutdown_both, error);
-            error.clear();
-            beast::get_lowest_layer(*ws).socket().close(error);
+        store_force_close_callback(state, [&web = session.web] {
+            web.force_close_websocket("megarac-kvm");
         });
-        tcp::resolver resolver(io);
-
-        configure_tls(tls_context, ws->next_layer(), options.login.base_url.host, options.login.insecure);
-        set_server_name_indication(ws->next_layer(), options.login.base_url.host);
 
         set_megarac_view_status(state, "connecting");
-        const std::string host = make_host_header(options.login.base_url);
-        const std::string path = "/kvm";
-        const auto websocket_started_at = std::chrono::steady_clock::now();
-        if (options.login.verbose) {
-            log_info() << "kvm websocket connecting"
-                       << " path=" << path
-                       << " url=wss://" << host << path
-                       << " idle-timeout=" << (options.idle_timeout_seconds > 0 ? std::to_string(options.idle_timeout_seconds) + "s" : "disabled");
-        }
-
-        const auto endpoints = resolver.resolve(options.login.base_url.host, options.login.base_url.port);
-        beast::get_lowest_layer(*ws).expires_after(std::chrono::seconds(30));
-        beast::get_lowest_layer(*ws).connect(endpoints);
-        ws->next_layer().handshake(ssl::stream_base::client);
-        beast::get_lowest_layer(*ws).expires_never();
-
-        websocket::stream_base::timeout timeout;
-        timeout.handshake_timeout = std::chrono::seconds(30);
-        if (options.idle_timeout_seconds > 0) {
-            timeout.idle_timeout = std::chrono::seconds(options.idle_timeout_seconds);
-            timeout.keep_alive_pings = true;
-        } else {
-            timeout.idle_timeout = websocket::stream_base::none();
-            timeout.keep_alive_pings = false;
-        }
-        ws->set_option(timeout);
-
-        ws->set_option(websocket::stream_base::decorator([&](websocket::request_type& request) {
-            request.set(http::field::user_agent, std::string(kName) + "/" + std::string(BOOST_LIB_VERSION));
-            request.set(http::field::origin, make_origin(options.login.base_url));
-            request.set(http::field::sec_websocket_protocol, "binary, base64");
-
-            const std::string cookie_header = session.web.cookies().header();
-            if (!cookie_header.empty()) {
-                request.set(http::field::cookie, cookie_header);
-            }
-        }));
-
-        websocket::response_type response;
-        ws->handshake(response, host, path);
-        const auto websocket_elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - websocket_started_at).count();
-        const std::string subprotocol = selected_subprotocol(response);
+        auto websocket = session.web.open_websocket(BmcWebSocketConnectOptions{
+            .role = "megarac-kvm",
+            .log_name = "kvm websocket",
+            .path = "/kvm",
+            .idle_timeout_seconds = options.idle_timeout_seconds,
+            .extra_headers = {Header{http::field::sec_websocket_protocol, {}, "binary, base64"}},
+        });
+        auto ws = websocket.connection->stream();
+        asio::io_context& io = websocket.connection->io_context();
+        const std::string subprotocol = selected_subprotocol(websocket.response);
         set_subprotocol(state, subprotocol);
         set_megarac_view_status(state, "connected");
-        {
-            LogLine line = log_info();
-            line << "kvm websocket connected"
-                 << " path=" << path
-                 << " url=wss://" << host << path
-                 << " duration-ms=" << websocket_elapsed_ms
-                 << " subprotocol=" << subprotocol;
-            if (options.idle_timeout_seconds > 0) {
-                line << " idle-timeout=" << options.idle_timeout_seconds << "s";
-            } else {
-                line << " idle-timeout=disabled";
-            }
-        }
+        log_info() << "kvm websocket subprotocol=" << subprotocol;
 
         if (stop_requested.load()) {
             force_close_network(state);

@@ -70,6 +70,7 @@ MegaRacSession login_megarac(const LoginOptions& options)
 bool logout_megarac(const LoginOptions& options, BmcWebSession& web)
 {
     (void)options;
+    web.close_all_websockets();
 
     std::vector<Header> headers;
     const std::string_view csrf_token = web.session_token();
