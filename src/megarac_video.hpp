@@ -1,5 +1,7 @@
 #pragma once
 
+#include "aspeed_decoder.hpp"
+
 #include <cstdint>
 #include <optional>
 #include <vector>
@@ -31,5 +33,6 @@ private:
 
 std::uint8_t megarac_video_first_block_header(const std::vector<std::uint8_t>& compressed);
 bool megarac_video_is_supported_first_block(std::uint8_t header);
+AspeedDecodeOptions make_megarac_aspeed_decode_options(const MegaracVideoFrame& frame);
 
 } // namespace hitsc

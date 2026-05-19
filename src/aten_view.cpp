@@ -1,6 +1,7 @@
 #include "aten_view.hpp"
 
 #include "aspeed_decoder.hpp"
+#include "aspeed_presenter.hpp"
 #include "aten_network.hpp"
 #include "aten_protocol.hpp"
 #include "diagnostics.hpp"
@@ -14,15 +15,12 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
-#include <cstring>
 #include <exception>
 #include <iostream>
 #include <memory>
 #include <optional>
-#include <span>
 #include <stdexcept>
 #include <thread>
-#include <vector>
 
 namespace hitsc {
 
@@ -36,31 +34,6 @@ using AtenKeyDownState = std::array<bool, 256>;
 struct AtenRemoteMousePosition {
     int x = 0;
     int y = 0;
-};
-
-struct AtenPresentationSlot {
-    SDL_Texture* texture = nullptr;
-    int width = 0;
-    int height = 0;
-    bool valid = false;
-    std::vector<std::uint8_t> shadow;
-};
-
-struct LockedTexture {
-    SDL_Texture* texture = nullptr;
-
-    ~LockedTexture()
-    {
-        unlock();
-    }
-
-    void unlock()
-    {
-        if (texture != nullptr) {
-            SDL_UnlockTexture(texture);
-            texture = nullptr;
-        }
-    }
 };
 
 void throw_sdl_error(std::string_view context)
@@ -150,162 +123,6 @@ void release_all_aten_keys(AtenViewState& state, AtenKeyDownState& key_down, boo
     }
 }
 
-void destroy_slot(AtenPresentationSlot& slot)
-{
-    if (slot.texture != nullptr) {
-        SDL_DestroyTexture(slot.texture);
-        slot.texture = nullptr;
-    }
-    slot.width = 0;
-    slot.height = 0;
-    slot.valid = false;
-    slot.shadow.clear();
-}
-
-void destroy_slots(std::array<AtenPresentationSlot, 2>& slots)
-{
-    for (AtenPresentationSlot& slot : slots) {
-        destroy_slot(slot);
-    }
-}
-
-void ensure_slot_texture(SDL_Renderer* renderer, AtenPresentationSlot& slot, int width, int height)
-{
-    if (slot.texture != nullptr && slot.width == width && slot.height == height) {
-        return;
-    }
-
-    destroy_slot(slot);
-    slot.texture = SDL_CreateTexture(
-        renderer,
-        SDL_PIXELFORMAT_RGBA32,
-        SDL_TEXTUREACCESS_STREAMING,
-        width,
-        height);
-    if (slot.texture == nullptr) {
-        throw_sdl_error("SDL_CreateTexture");
-    }
-    slot.width = width;
-    slot.height = height;
-}
-
-std::size_t frame_rgba_size(int width, int height)
-{
-    return static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4U;
-}
-
-void seed_framebuffer(
-    std::uint8_t* target,
-    std::size_t size,
-    const AtenPresentationSlot* previous_slot)
-{
-    if (previous_slot != nullptr && previous_slot->valid && previous_slot->shadow.size() == size) {
-        std::memcpy(target, previous_slot->shadow.data(), size);
-        return;
-    }
-    std::fill(target, target + size, 0xff);
-}
-
-bool try_decode_direct_to_texture(
-    AspeedDecoder& decoder,
-    const AtenCompressedFrame& frame,
-    AtenPresentationSlot& target_slot,
-    const AtenPresentationSlot* previous_slot)
-{
-    void* pixels = nullptr;
-    int pitch = 0;
-    if (!SDL_LockTexture(target_slot.texture, nullptr, &pixels, &pitch)) {
-        return false;
-    }
-
-    LockedTexture locked{target_slot.texture};
-    const int expected_pitch = frame.width * 4;
-    if (pitch != expected_pitch) {
-        return false;
-    }
-
-    const std::size_t size = frame_rgba_size(frame.width, frame.height);
-    auto* rgba = static_cast<std::uint8_t*>(pixels);
-    seed_framebuffer(rgba, size, previous_slot);
-    decoder.decode_rgba_into(frame.decode_options, frame.compressed, std::span<std::uint8_t>(rgba, size));
-
-    target_slot.shadow.resize(size);
-    std::memcpy(target_slot.shadow.data(), rgba, size);
-    target_slot.valid = true;
-    locked.unlock();
-    return true;
-}
-
-void decode_to_shadow_and_upload(
-    AspeedDecoder& decoder,
-    const AtenCompressedFrame& frame,
-    AtenPresentationSlot& target_slot,
-    const AtenPresentationSlot* previous_slot)
-{
-    const std::size_t size = frame_rgba_size(frame.width, frame.height);
-    target_slot.shadow.resize(size);
-    seed_framebuffer(target_slot.shadow.data(), size, previous_slot);
-    decoder.decode_rgba_into(
-        frame.decode_options,
-        frame.compressed,
-        std::span<std::uint8_t>(target_slot.shadow.data(), target_slot.shadow.size()));
-
-    if (!SDL_UpdateTexture(target_slot.texture, nullptr, target_slot.shadow.data(), frame.width * 4)) {
-        throw_sdl_error("SDL_UpdateTexture");
-    }
-    target_slot.valid = true;
-}
-
-bool present_aten_frame_to_backbuffer(
-    SDL_Renderer* renderer,
-    AspeedDecoder& decoder,
-    std::array<AtenPresentationSlot, 2>& slots,
-    int& active_slot,
-    const AtenCompressedFrame& frame)
-{
-    if (active_slot >= 0 &&
-        (slots[active_slot].width != frame.width || slots[active_slot].height != frame.height)) {
-        destroy_slots(slots);
-        active_slot = -1;
-    }
-
-    const int next_slot = active_slot == 0 ? 1 : 0;
-    ensure_slot_texture(renderer, slots[next_slot], frame.width, frame.height);
-
-    const AtenPresentationSlot* previous_slot = active_slot >= 0 ? &slots[active_slot] : nullptr;
-    bool direct = false;
-    try {
-        direct = try_decode_direct_to_texture(decoder, frame, slots[next_slot], previous_slot);
-    } catch (...) {
-        slots[next_slot].valid = false;
-        throw;
-    }
-
-    if (!direct) {
-        decode_to_shadow_and_upload(decoder, frame, slots[next_slot], previous_slot);
-    }
-
-    active_slot = next_slot;
-    return direct;
-}
-
-int sampled_average_rgb(const std::vector<std::uint8_t>& rgba)
-{
-    if (rgba.empty()) {
-        return 0;
-    }
-
-    std::uint64_t total = 0;
-    std::uint64_t samples = 0;
-    constexpr std::size_t stride_pixels = 257;
-    for (std::size_t pixel = 0; pixel * 4 + 2 < rgba.size(); pixel += stride_pixels) {
-        const std::size_t offset = pixel * 4;
-        total += rgba[offset] + rgba[offset + 1] + rgba[offset + 2];
-        ++samples;
-    }
-    return samples == 0 ? 0 : static_cast<int>(total / (samples * 3));
-}
-
 } // namespace
 
 void run_aten_view(const AtenViewOptions& options)
@@ -320,11 +137,10 @@ void run_aten_view(const AtenViewOptions& options)
     auto stop_requested = std::make_shared<std::atomic_bool>(false);
     auto network_done = std::make_shared<std::atomic_bool>(false);
     std::thread network_thread;
-    std::array<AtenPresentationSlot, 2> slots;
-    int active_slot = -1;
+    AspeedPresenter presenter;
 
     auto cleanup = [&] {
-        destroy_slots(slots);
+        presenter.destroy();
         if (renderer != nullptr) {
             SDL_DestroyRenderer(renderer);
             renderer = nullptr;
@@ -402,8 +218,7 @@ void run_aten_view(const AtenViewOptions& options)
                     state->frame_event_pending.store(false);
                     state->view_status.minimize();
                     clear_latest_aten_frame(*state);
-                    destroy_slots(slots);
-                    active_slot = -1;
+                    presenter.destroy();
                     last_sequence = 0;
                     last_status_tick = 0;
                     SDL_SetWindowTitle(window, state->view_status.title(options.login.base_url.host).c_str());
@@ -442,7 +257,7 @@ void run_aten_view(const AtenViewOptions& options)
                             }
                         }
                     }
-                } else if (active_slot >= 0 &&
+                } else if (presenter.active_slot() != nullptr &&
                            (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
                             event.type == SDL_EVENT_MOUSE_BUTTON_UP)) {
                     const std::uint8_t mask = button_mask_for_sdl_button(event.button.button);
@@ -454,7 +269,7 @@ void run_aten_view(const AtenViewOptions& options)
                         }
                         SDL_CaptureMouse(mouse_buttons != 0);
 
-                        const AtenPresentationSlot& active = slots[active_slot];
+                        const AspeedPresentationSlot& active = *presenter.active_slot();
                         const SDL_FRect target = current_target_rect(window, active.width, active.height);
                         const std::optional<AtenRemoteMousePosition> position = remote_mouse_position(
                             event.button.x,
@@ -472,13 +287,13 @@ void run_aten_view(const AtenViewOptions& options)
                                 options.login.verbose);
                         }
                     }
-                } else if (active_slot >= 0 && event.type == SDL_EVENT_MOUSE_MOTION) {
+                } else if (presenter.active_slot() != nullptr && event.type == SDL_EVENT_MOUSE_MOTION) {
                     const std::uint64_t ticks = SDL_GetTicks();
                     const bool throttled =
                         mouse_buttons == 0 &&
                         ticks - last_mouse_motion_ticks < kMouseMotionIntervalMilliseconds;
                     if (!throttled) {
-                        const AtenPresentationSlot& active = slots[active_slot];
+                        const AspeedPresentationSlot& active = *presenter.active_slot();
                         const SDL_FRect target = current_target_rect(window, active.width, active.height);
                         const std::optional<AtenRemoteMousePosition> position = remote_mouse_position(
                             event.motion.x,
@@ -497,8 +312,8 @@ void run_aten_view(const AtenViewOptions& options)
                             last_mouse_motion_ticks = ticks;
                         }
                     }
-                } else if (active_slot >= 0 && event.type == SDL_EVENT_MOUSE_WHEEL) {
-                    const AtenPresentationSlot& active = slots[active_slot];
+                } else if (presenter.active_slot() != nullptr && event.type == SDL_EVENT_MOUSE_WHEEL) {
+                    const AspeedPresentationSlot& active = *presenter.active_slot();
                     const SDL_FRect target = current_target_rect(window, active.width, active.height);
                     const std::optional<AtenRemoteMousePosition> position = remote_mouse_position(
                         event.wheel.mouse_x,
@@ -537,19 +352,22 @@ void run_aten_view(const AtenViewOptions& options)
                     take_latest_aten_frame(*state, last_sequence);
                 if (frame) {
                     last_sequence = frame->sequence;
-                    const bool direct = present_aten_frame_to_backbuffer(
+                    const bool direct = presenter.present(
                         renderer,
                         decoder,
-                        slots,
-                        active_slot,
-                        *frame);
+                        frame->width,
+                        frame->height,
+                        frame->decode_options,
+                        frame->compressed);
+                    const AspeedPresentationSlot* active = presenter.active_slot();
                     ++presented_frames;
-                    if (options.login.verbose && (presented_frames <= 20 || presented_frames % 60 == 0)) {
+                    if (active != nullptr &&
+                        options.login.verbose && (presented_frames <= 20 || presented_frames % 60 == 0)) {
                         log_info() << "presented ATEN frame #" << presented_frames
                                    << " sequence=" << frame->sequence
                                    << " size=" << frame->width << 'x' << frame->height
                                    << " direct-texture=" << (direct ? "yes" : "no")
-                                   << " avg-rgb=" << sampled_average_rgb(slots[active_slot].shadow);
+                                   << " avg-rgb=" << aspeed_sampled_average_rgb(active->shadow);
                     }
                     render_needed = true;
                     presented_new_frame = true;
@@ -558,16 +376,19 @@ void run_aten_view(const AtenViewOptions& options)
                 if (render_needed) {
                     SDL_SetRenderDrawColor(renderer, 12, 14, 18, 255);
                     SDL_RenderClear(renderer);
-                    if (active_slot >= 0 && slots[active_slot].texture != nullptr) {
-                        const AtenPresentationSlot& active = slots[active_slot];
-                        const SDL_FRect target = current_target_rect(window, active.width, active.height);
-                        SDL_RenderTexture(renderer, active.texture, nullptr, &target);
+                    if (const AspeedPresentationSlot* active = presenter.active_slot();
+                        active != nullptr && active->texture != nullptr) {
+                        const SDL_FRect target = current_target_rect(window, active->width, active->height);
+                        SDL_RenderTexture(renderer, active->texture, nullptr, &target);
                     }
                     SDL_RenderPresent(renderer);
-                    if (presented_new_frame && active_slot >= 0) {
-                        state->view_status.frame_presented(
-                            slots[active_slot].width,
-                            slots[active_slot].height);
+                    if (presented_new_frame) {
+                        const AspeedPresentationSlot* active = presenter.active_slot();
+                        if (active != nullptr) {
+                            state->view_status.frame_presented(
+                                active->width,
+                                active->height);
+                        }
                     }
                     first_render = false;
                 }

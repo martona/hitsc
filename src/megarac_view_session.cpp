@@ -10,11 +10,14 @@
 #include "megarac_video.hpp"
 #include "text.hpp"
 
+#include <SDL3/SDL.h>
+
 #include <boost/asio/bind_executor.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/asio/post.hpp>
 #include <boost/asio/ssl.hpp>
+#include <boost/asio/steady_timer.hpp>
 #include <boost/asio/strand.hpp>
 #include <boost/beast/core.hpp>
 #include <boost/beast/ssl.hpp>
@@ -25,8 +28,10 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <cstdint>
 #include <deque>
+#include <exception>
 #include <iomanip>
 #include <iostream>
 #include <memory>
@@ -35,6 +40,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -51,6 +57,8 @@ using KvmWebSocket = BmcWebSocketStream;
 constexpr int kInitialFramebufferWidth = 800;
 constexpr int kInitialFramebufferHeight = 600;
 constexpr auto kBlankRecoveryInterval = std::chrono::seconds(3);
+constexpr auto kMegaracStopGrace = std::chrono::milliseconds(250);
+constexpr std::size_t kMaxQueuedInputPackets = 128;
 
 constexpr std::uint16_t kCmdSendHidPacket = command_value(MegaracCommand::SendHidPacket);
 constexpr std::uint16_t kCmdConnectionAllowed = command_value(MegaracCommand::ConnectionAllowed);
@@ -301,46 +309,108 @@ std::string selected_subprotocol(const websocket::response_type& response)
     return protocol.empty() ? "base64" : protocol;
 }
 
-void set_megarac_view_status(MegaracViewSessionState& state, std::string status)
+void publish_frame(MegaracViewSessionState& state, MegaracCompressedFrame frame)
 {
-    std::lock_guard lock(state.control_mutex);
-    state.status = std::move(status);
-}
+    frame.published_at = std::chrono::steady_clock::now();
+    {
+        std::lock_guard lock(state.frame_mutex);
+        frame.sequence = ++state.frame_sequence;
+        state.frame = std::make_shared<MegaracCompressedFrame>(std::move(frame));
+    }
 
-void publish_frame(MegaracViewSessionState& state, int width, int height, std::vector<std::uint8_t> rgba)
-{
-    std::lock_guard lock(state.frame_mutex);
-    state.frame.width = width;
-    state.frame.height = height;
-    state.frame.rgba = std::move(rgba);
-    ++state.frame.sequence;
-    state.has_frame = true;
+    const auto frame_event_type = static_cast<Uint32>(state.frame_event_type.load());
+    if (frame_event_type != 0 && !state.frame_event_pending.exchange(true)) {
+        SDL_Event event{};
+        event.type = frame_event_type;
+        if (!SDL_PushEvent(&event)) {
+            state.frame_event_pending.store(false);
+        }
+    }
 }
 
 void publish_cursor(MegaracViewSessionState& state, SharedCursor cursor)
 {
-    std::lock_guard lock(state.cursor_mutex);
-    cursor.sequence = state.cursor.sequence + 1;
+    std::lock_guard lock(state.frame_mutex);
+    cursor.sequence = ++state.cursor_sequence;
     state.cursor = std::move(cursor);
     state.has_cursor = true;
 }
 
-void set_subprotocol(MegaracViewSessionState& state, std::string subprotocol)
-{
-    std::lock_guard lock(state.control_mutex);
-    state.subprotocol = std::move(subprotocol);
-}
-
 void set_mouse_mode(MegaracViewSessionState& state, int mouse_mode)
 {
+    state.mouse_mode.store(mouse_mode);
+}
+
+void set_megarac_force_close(MegaracViewSessionState& state, std::function<void()> force_close)
+{
     std::lock_guard lock(state.control_mutex);
-    state.mouse_mode = mouse_mode;
+    state.force_close = std::move(force_close);
+}
+
+void clear_megarac_input_sink(MegaracViewSessionState& state)
+{
+    std::lock_guard lock(state.control_mutex);
+    state.input_sink = {};
+    state.pending_input.clear();
+}
+
+void install_megarac_input_sink(
+    MegaracViewSessionState& state,
+    std::function<void(std::uint16_t, std::vector<std::uint8_t>, bool)> input_sink)
+{
+    std::deque<PendingMegaracInputPacket> pending;
+    {
+        std::lock_guard lock(state.control_mutex);
+        state.input_sink = input_sink;
+        pending.swap(state.pending_input);
+    }
+
+    for (PendingMegaracInputPacket& packet : pending) {
+        input_sink(packet.type, std::move(packet.packet), packet.coalesce);
+    }
+}
+
+void clear_megarac_control_callbacks(MegaracViewSessionState& state)
+{
+    std::lock_guard lock(state.control_mutex);
+    state.input_sink = {};
+    state.pending_input.clear();
+    state.force_close = {};
+}
+
+void force_close_network(MegaracViewSessionState& state)
+{
+    std::function<void()> force_close;
+    {
+        std::lock_guard lock(state.control_mutex);
+        force_close = state.force_close;
+        state.input_sink = {};
+        state.pending_input.clear();
+        state.force_close = {};
+    }
+
+    if (force_close) {
+        force_close();
+    }
+}
+
+void set_megarac_exception(MegaracViewSessionState& state, std::exception_ptr exception)
+{
+    std::lock_guard lock(state.control_mutex);
+    if (!state.exception) {
+        state.exception = exception;
+    }
+}
+
+std::exception_ptr take_megarac_exception(MegaracViewSessionState& state)
+{
+    std::lock_guard lock(state.control_mutex);
+    return state.exception;
 }
 
 int megarac_view_mouse_mode_snapshot(MegaracViewSessionState& state)
 {
-    std::lock_guard lock(state.control_mutex);
-    return state.mouse_mode;
+    return state.mouse_mode.load();
 }
 
 bool queue_megarac_view_packet(
@@ -349,31 +419,50 @@ bool queue_megarac_view_packet(
     std::vector<std::uint8_t> packet,
     bool coalesce)
 {
-    std::function<void(std::uint16_t, std::vector<std::uint8_t>, bool)> send_packet;
+    std::function<void(std::uint16_t, std::vector<std::uint8_t>, bool)> input_sink;
     {
         std::lock_guard lock(state.control_mutex);
-        send_packet = state.send_packet;
+        input_sink = state.input_sink;
+        if (!input_sink && coalesce && !state.pending_input.empty() &&
+            state.pending_input.back().type == type) {
+            state.pending_input.back() = PendingMegaracInputPacket{type, std::move(packet), coalesce};
+            return true;
+        }
+        if (!input_sink) {
+            if (state.pending_input.size() >= kMaxQueuedInputPackets) {
+                state.pending_input.pop_front();
+            }
+            state.pending_input.push_back(PendingMegaracInputPacket{type, std::move(packet), coalesce});
+            return true;
+        }
     }
 
-    if (send_packet) {
-        send_packet(type, std::move(packet), coalesce);
-        return true;
-    }
-    return false;
+    input_sink(type, std::move(packet), coalesce);
+    return true;
 }
 
-std::optional<MegaracViewFrame> take_latest_megarac_view_frame(MegaracViewSessionState& state, std::uint64_t last_sequence)
+std::shared_ptr<const MegaracCompressedFrame> take_latest_megarac_view_frame(
+    MegaracViewSessionState& state,
+    std::uint64_t last_sequence)
 {
     std::lock_guard lock(state.frame_mutex);
-    if (!state.has_frame || state.frame.sequence == last_sequence) {
-        return std::nullopt;
+    if (!state.frame || state.frame->sequence == last_sequence) {
+        return {};
     }
     return state.frame;
 }
 
-std::optional<MegaracHardwareCursor> take_latest_megarac_view_cursor(MegaracViewSessionState& state, std::uint64_t last_sequence)
+void clear_latest_megarac_view_frame(MegaracViewSessionState& state)
 {
-    std::lock_guard lock(state.cursor_mutex);
+    std::lock_guard lock(state.frame_mutex);
+    state.frame.reset();
+}
+
+std::optional<MegaracHardwareCursor> take_latest_megarac_view_cursor(
+    MegaracViewSessionState& state,
+    std::uint64_t last_sequence)
+{
+    std::lock_guard lock(state.frame_mutex);
     if (!state.has_cursor || state.cursor.sequence == last_sequence) {
         return std::nullopt;
     }
@@ -418,105 +507,6 @@ void log_sent_packet(std::uint16_t type, std::uint16_t status, std::size_t paylo
                << " payload=" << payload_size;
 }
 
-void store_force_close_callback(MegaracViewSessionState& state, std::function<void()> force_close)
-{
-    std::lock_guard lock(state.control_mutex);
-    state.force_close = std::move(force_close);
-}
-
-void clear_connection_callbacks(MegaracViewSessionState& state)
-{
-    std::lock_guard lock(state.control_mutex);
-    state.subprotocol.clear();
-    state.force_close = {};
-}
-
-void store_network_callbacks(
-    MegaracViewSessionState& state,
-    std::function<void(std::uint16_t, std::vector<std::uint8_t>, bool)> send_packet,
-    std::function<void()> stop_network)
-{
-    std::lock_guard lock(state.control_mutex);
-    state.send_packet = std::move(send_packet);
-    state.stop_network = std::move(stop_network);
-}
-
-void clear_network_callbacks(MegaracViewSessionState& state)
-{
-    std::lock_guard lock(state.control_mutex);
-    state.send_packet = {};
-    state.stop_network = {};
-}
-
-void stop_megarac_view_session(MegaracViewSessionState& state)
-{
-    std::function<void()> stop_network;
-    std::function<void()> force_close;
-    {
-        std::lock_guard lock(state.control_mutex);
-        stop_network = state.stop_network;
-        force_close = state.force_close;
-    }
-
-    if (stop_network) {
-        stop_network();
-        return;
-    }
-
-    if (force_close) {
-        force_close();
-    }
-}
-
-void force_close_network(MegaracViewSessionState& state)
-{
-    std::function<void()> force_close;
-    {
-        std::lock_guard lock(state.control_mutex);
-        force_close = state.force_close;
-        state.subprotocol.clear();
-        state.send_packet = {};
-        state.stop_network = {};
-        state.force_close = {};
-    }
-
-    if (force_close) {
-        force_close();
-    }
-}
-
-MegaracViewStatusSnapshot megarac_view_status_snapshot(MegaracViewSessionState& state)
-{
-    MegaracViewStatusSnapshot snapshot;
-    {
-        std::lock_guard lock(state.control_mutex);
-        snapshot.status = state.status;
-    }
-    {
-        std::lock_guard lock(state.frame_mutex);
-        snapshot.has_frame = state.has_frame;
-    }
-    return snapshot;
-}
-
-int sampled_average_rgb(const std::vector<std::uint8_t>& rgba)
-{
-    if (rgba.empty()) {
-        return 0;
-    }
-
-    std::uint64_t sum = 0;
-    std::uint64_t samples = 0;
-    const std::size_t pixels = rgba.size() / 4;
-    const std::size_t stride = std::max<std::size_t>(1, pixels / 4096);
-    for (std::size_t pixel = 0; pixel < pixels; pixel += stride) {
-        const std::size_t offset = pixel * 4;
-        sum += rgba[offset] + rgba[offset + 1] + rgba[offset + 2];
-        ++samples;
-    }
-    return samples == 0 ? 0 : static_cast<int>(sum / (samples * 3));
-}
-
 class KvmAsyncSession : public std::enable_shared_from_this<KvmAsyncSession> {
 public:
     KvmAsyncSession(
@@ -526,7 +516,9 @@ public:
         KvmConfig config,
         std::string subprotocol,
         MegaracViewSessionState& state)
-        : strand_(asio::make_strand(io))
+        : io_(io)
+        , strand_(asio::make_strand(io))
+        , force_close_timer_(io)
         , ws_(std::move(ws))
         , options_(std::move(options))
         , config_(std::move(config))
@@ -559,7 +551,6 @@ public:
                 return;
             }
             self->stopping_ = true;
-            set_megarac_view_status(self->state_, "stopping");
 
             if (self->writing_ && !self->outgoing_packets_.empty()) {
                 auto keep_current = self->outgoing_packets_.begin();
@@ -582,6 +573,7 @@ public:
                     {}});
             }
             self->start_write();
+            self->arm_force_close_timer();
         });
     }
 
@@ -596,12 +588,12 @@ private:
         auto self = shared_from_this();
         ws_->async_read(
             read_buffer_,
-            asio::bind_executor(strand_, [self](beast::error_code error, std::size_t) {
-                self->on_read(error);
+            asio::bind_executor(strand_, [self](beast::error_code error, std::size_t bytes_transferred) {
+                self->on_read(error, bytes_transferred);
             }));
     }
 
-    void on_read(beast::error_code error)
+    void on_read(beast::error_code error, std::size_t bytes_transferred)
     {
         if (error) {
             handle_read_error(error);
@@ -609,6 +601,8 @@ private:
         }
 
         try {
+            state_.view_status.data_received(bytes_transferred);
+            last_websocket_message_bytes_ = bytes_transferred;
             packet_buffer_.append(message_bytes_from_buffer(read_buffer_, subprotocol_));
             while (std::optional<KvmPacket> packet = packet_buffer_.next()) {
                 handle_packet(*packet);
@@ -616,8 +610,10 @@ private:
                     return;
                 }
             }
-        } catch (const std::exception& ex) {
-            fail_with_exception(ex);
+        } catch (...) {
+            set_megarac_exception(state_, std::current_exception());
+            print_current_exception_with_stack(std::cerr, "kvm websocket handler");
+            close_socket();
             return;
         }
 
@@ -634,7 +630,6 @@ private:
         }
 
         if (error == beast::error::timeout) {
-            set_megarac_view_status(state_, "idle timeout");
             log_warning() << "megarac view idle timeout after "
                           << options_.idle_timeout_seconds << "s";
             close_socket();
@@ -643,13 +638,13 @@ private:
 
         if (error == websocket::error::closed ||
             error == ssl::error::stream_truncated) {
-            set_megarac_view_status(state_, "remote closed");
             log_warning() << "kvm websocket closed";
             close_socket();
             return;
         }
 
-        set_megarac_view_status(state_, std::string("error: ") + error.message());
+        set_megarac_exception(state_, std::make_exception_ptr(
+            beast::system_error(error, "MegaRAC websocket read failed")));
         log_error() << "megarac view error: " << error.message()
                     << " [" << error.category().name() << ':' << error.value() << ']';
         close_socket();
@@ -700,7 +695,8 @@ private:
             query_power_status("next-master");
         } else if (packet.type == kCmdMaxSessionClose) {
             const std::string reason = max_session_close_reason(packet.status);
-            set_megarac_view_status(state_, "session closed: " + reason);
+            set_megarac_exception(state_, std::make_exception_ptr(
+                std::runtime_error("MegaRAC KVM session closed: " + reason)));
             log_warning() << "kvm session closed: " << reason
                           << " status=" << packet.status;
             close_socket();
@@ -721,7 +717,8 @@ private:
     {
         if (packet.payload.empty()) {
             validation_failed_ = true;
-            set_megarac_view_status(state_, "validation failed: empty response");
+            set_megarac_exception(state_, std::make_exception_ptr(
+                std::runtime_error("MegaRAC KVM validation failed: empty response")));
             log_error() << "KVM validation failed: empty response";
             close_socket();
             return;
@@ -731,7 +728,8 @@ private:
         if (response != kValidateSessionValid) {
             validation_failed_ = true;
             const std::string reason = validation_response_name(response);
-            set_megarac_view_status(state_, "validation failed: " + reason);
+            set_megarac_exception(state_, std::make_exception_ptr(
+                std::runtime_error("MegaRAC KVM validation failed: " + reason)));
             log_error() << "KVM validation failed: " << reason
                         << " response=" << static_cast<int>(response);
             close_socket();
@@ -739,7 +737,7 @@ private:
         }
 
         session_validated_ = true;
-        set_megarac_view_status(state_, "validated");
+        state_.view_status.kvm_display_status(true);
         send_initial_wake_hid_if_ready();
     }
 
@@ -831,7 +829,7 @@ private:
     void handle_blank_screen_packet(const KvmPacket& packet)
     {
         ++blank_screen_packets_;
-        set_megarac_view_status(state_, "blank screen");
+        state_.view_status.kvm_display_status(false);
         if (blank_screen_packets_ == 1) {
             log_warning() << "remote requested blank screen"
                           << " status=" << packet.status;
@@ -891,7 +889,7 @@ private:
     void handle_video_packet(const KvmPacket& packet)
     {
         ++video_packets_seen_;
-        const std::optional<MegaracVideoFrame> frame = video_assembler_.ingest(packet.payload);
+        std::optional<MegaracVideoFrame> frame = video_assembler_.ingest(packet.payload);
         if (!frame) {
             if (options_.login.verbose && video_packets_seen_ <= 20) {
                 log_info() << "video packet #" << video_packets_seen_
@@ -915,15 +913,9 @@ private:
         ++frames_received_since_report_;
         fps_reporting_started_ = true;
         blank_screen_packets_ = 0;
-        AspeedDecodeOptions decode_options;
-        decode_options.width = frame->width;
-        decode_options.height = frame->height;
-        decode_options.mode420 = frame->mode420;
-        decode_options.jpeg_table_selector = frame->jpeg_table_selector;
-        decode_options.advance_table_selector = frame->advance_table_selector;
         const int next_frame_number = frames_seen_ + 1;
         if (options_.login.verbose && (next_frame_number <= 20 || next_frame_number % 60 == 0)) {
-            log_info() << "decoding frame #" << next_frame_number
+            log_info() << "queued MegaRAC ASPEED frame #" << next_frame_number
                        << " packets=" << packets_seen_
                        << " video-packets=" << video_packets_seen_
                        << " size=" << frame->width << "x" << frame->height
@@ -932,30 +924,23 @@ private:
                        << " mode420=" << static_cast<int>(frame->mode420)
                        << " first-block=0x" << std::hex << static_cast<int>(block_header) << std::dec;
         }
-        const bool can_use_previous =
-            framebuffer_width_ == frame->width
-            && framebuffer_height_ == frame->height
-            && framebuffer_.size()
-                == static_cast<std::size_t>(frame->width) * static_cast<std::size_t>(frame->height) * 4;
 
-        std::vector<std::uint8_t> rgba =
-            decoder_.decode_rgba(decode_options, frame->compressed, can_use_previous ? &framebuffer_ : nullptr);
-        const int average_rgb = sampled_average_rgb(rgba);
-        framebuffer_ = rgba;
+        MegaracCompressedFrame compressed_frame;
+        compressed_frame.width = frame->width;
+        compressed_frame.height = frame->height;
+        compressed_frame.frame_number = next_frame_number;
+        compressed_frame.compression_mode = frame->compression_mode;
+        compressed_frame.first_block_header = block_header;
+        compressed_frame.decode_options = make_megarac_aspeed_decode_options(*frame);
+        compressed_frame.compressed = std::move(frame->compressed);
+        compressed_frame.received_at = std::chrono::steady_clock::now();
+        compressed_frame.websocket_bytes = last_websocket_message_bytes_;
+
         framebuffer_width_ = frame->width;
         framebuffer_height_ = frame->height;
-        publish_frame(state_, frame->width, frame->height, std::move(rgba));
-        ++frames_processed_since_report_;
-
+        state_.view_status.kvm_display_status(true);
+        publish_frame(state_, std::move(compressed_frame));
         ++frames_seen_;
-        if (options_.login.verbose && (frames_seen_ <= 20 || frames_seen_ % 60 == 0)) {
-            log_info() << "rendered frame #" << frames_seen_
-                       << " packets=" << packets_seen_
-                       << " video-packets=" << video_packets_seen_
-                       << " size=" << frame->width << "x" << frame->height
-                       << " compressed=" << frame->compressed.size()
-                       << " avg-rgb=" << average_rgb;
-        }
     }
 
     void send_fps_report_if_due()
@@ -965,10 +950,13 @@ private:
             return;
         }
 
-        const int diff = std::abs(frames_received_since_report_ - frames_processed_since_report_);
+        const std::uint64_t frames_presented = state_.frames_presented.load();
+        const int frames_presented_since_report =
+            static_cast<int>(frames_presented - last_frames_presented_for_report_);
+        const int diff = std::abs(frames_received_since_report_ - frames_presented_since_report);
         queue_packet_from_strand(kCmdFpsDiff, make_simple_packet(kCmdFpsDiff, static_cast<std::uint16_t>(diff)), false);
         frames_received_since_report_ = 0;
-        frames_processed_since_report_ = 0;
+        last_frames_presented_for_report_ = frames_presented;
         last_fps_report_ = now;
     }
 
@@ -1079,7 +1067,8 @@ private:
                 return;
             }
 
-            set_megarac_view_status(state_, std::string("error: ") + error.message());
+            set_megarac_exception(state_, std::make_exception_ptr(
+                beast::system_error(error, "MegaRAC websocket write failed")));
             log_error() << "kvm write error: " << error.message()
                         << " [" << error.category().name() << ':' << error.value() << ']';
             close_socket();
@@ -1109,11 +1098,25 @@ private:
         start_write();
     }
 
-    void fail_with_exception(const std::exception& ex)
+    void arm_force_close_timer()
     {
-        set_megarac_view_status(state_, std::string("error: ") + ex.what());
-        print_exception_with_stack(std::cerr, ex, "kvm websocket handler");
-        close_socket();
+        auto self = shared_from_this();
+        force_close_timer_.expires_after(kMegaracStopGrace);
+        force_close_timer_.async_wait(
+            asio::bind_executor(strand_, [self](beast::error_code error) {
+                if (error == boost::asio::error::operation_aborted || self->closed_) {
+                    return;
+                }
+                if (error) {
+                    log_warning() << "megarac stop timer error=" << error.message();
+                    self->close_socket();
+                    return;
+                }
+                if (self->stopping_) {
+                    log_warning() << "forcing MegaRAC websocket closed after stop grace";
+                    self->close_socket();
+                }
+            }));
     }
 
     void close_socket()
@@ -1123,18 +1126,20 @@ private:
         }
 
         closed_ = true;
-        clear_network_callbacks(state_);
+        force_close_timer_.cancel();
+        clear_megarac_input_sink(state_);
+        set_megarac_force_close(state_, {});
         discard_queued_packets_preserving_active_write();
         beast::error_code error;
         beast::get_lowest_layer(*ws_).socket().shutdown(tcp::socket::shutdown_both, error);
         error.clear();
         beast::get_lowest_layer(*ws_).socket().close(error);
-        if (stopping_) {
-            set_megarac_view_status(state_, "stopped");
-        }
+        io_.stop();
     }
 
+    asio::io_context& io_;
     asio::strand<asio::io_context::executor_type> strand_;
+    asio::steady_timer force_close_timer_;
     std::shared_ptr<KvmWebSocket> ws_;
     MegaracViewOptions options_;
     KvmConfig config_;
@@ -1142,9 +1147,7 @@ private:
     MegaracViewSessionState& state_;
     beast::flat_buffer read_buffer_;
     PacketBuffer packet_buffer_;
-    AspeedDecoder decoder_;
     MegaracVideoAssembler video_assembler_;
-    std::vector<std::uint8_t> framebuffer_;
     std::vector<std::uint16_t> cursor_pattern_;
     std::deque<OutgoingPacket> outgoing_packets_;
     std::optional<OutgoingPacket> deferred_hid_packet_;
@@ -1168,21 +1171,65 @@ private:
     bool stopping_ = false;
     bool closed_ = false;
     int frames_received_since_report_ = 0;
-    int frames_processed_since_report_ = 0;
+    std::uint64_t last_frames_presented_for_report_ = 0;
+    std::size_t last_websocket_message_bytes_ = 0;
     std::chrono::steady_clock::time_point last_fps_report_ = std::chrono::steady_clock::now();
     std::chrono::steady_clock::time_point last_blank_recovery_;
 };
 
+void stop_megarac_network(
+    MegaracViewSessionState& state,
+    std::atomic_bool& stop_requested,
+    std::thread& network_thread,
+    bool verbose)
+{
+    const auto started_at = std::chrono::steady_clock::now();
+    if (verbose) {
+        log_debug() << "megarac network stop begin";
+    }
+    stop_requested.store(true);
+
+    std::function<void()> force_close;
+    {
+        std::lock_guard lock(state.control_mutex);
+        force_close = state.force_close;
+    }
+    if (force_close) {
+        force_close();
+    } else if (verbose) {
+        log_debug() << "megarac network force-close missing";
+    }
+
+    if (network_thread.joinable()) {
+        network_thread.join();
+    }
+
+    const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - started_at).count();
+    if (elapsed_ms > 250) {
+        log_warning() << "megarac network stop waited"
+                      << " total-ms=" << elapsed_ms;
+    } else if (verbose) {
+        log_debug() << "megarac network stop end";
+    }
+}
+
 void run_megarac_view_session(const MegaracViewOptions& options, MegaracViewSessionState& state, const std::atomic_bool& stop_requested)
 {
+    struct ConnectionStatusGuard {
+        MegaracViewSessionState& state;
+        ~ConnectionStatusGuard()
+        {
+            state.view_status.kvm_connection(false);
+        }
+    } connection_status_guard{state};
+
     try {
-        set_megarac_view_status(state, "logging in");
         MegaRacSession session = login_megarac(options.login);
         MegaRacLogoutGuard logout_guard(options.login);
         logout_guard.arm(session);
         log_info() << "megarac login succeeded";
 
-        set_megarac_view_status(state, "fetching KVM config");
         KvmConfig config = fetch_kvm_config(session.web);
         session.web.set_cookie("__Host-isActiveKVM", "true");
         log_info() << "kvm config fetched"
@@ -1191,11 +1238,10 @@ void run_megarac_view_session(const MegaracViewOptions& options, MegaracViewSess
                    << " token=present"
                    << " reconnect=" << (config.reconnect_enabled ? "yes" : "no");
 
-        store_force_close_callback(state, [&web = session.web] {
+        set_megarac_force_close(state, [&web = session.web] {
             web.force_close_websocket("megarac-kvm");
         });
 
-        set_megarac_view_status(state, "connecting");
         auto websocket = session.web.open_websocket(BmcWebSocketConnectOptions{
             .role = "megarac-kvm",
             .log_name = "kvm websocket",
@@ -1206,8 +1252,7 @@ void run_megarac_view_session(const MegaracViewOptions& options, MegaracViewSess
         auto ws = websocket.connection->stream();
         asio::io_context& io = websocket.connection->io_context();
         const std::string subprotocol = selected_subprotocol(websocket.response);
-        set_subprotocol(state, subprotocol);
-        set_megarac_view_status(state, "connected");
+        state.view_status.kvm_connection(true);
         log_info() << "kvm websocket subprotocol=" << subprotocol;
 
         if (stop_requested.load()) {
@@ -1217,27 +1262,28 @@ void run_megarac_view_session(const MegaracViewOptions& options, MegaracViewSess
 
         auto async_session = std::make_shared<KvmAsyncSession>(io, ws, options, config, subprotocol, state);
         std::weak_ptr<KvmAsyncSession> weak_session = async_session;
-        store_network_callbacks(
+        install_megarac_input_sink(
             state,
             [weak_session](std::uint16_t type, std::vector<std::uint8_t> packet, bool coalesce) mutable {
                 if (auto session = weak_session.lock()) {
                     session->send_packet(type, std::move(packet), coalesce);
                 }
-            },
-            [weak_session] {
-                if (auto session = weak_session.lock()) {
-                    session->request_stop();
-                }
             });
+        set_megarac_force_close(state, [weak_session] {
+            if (auto session = weak_session.lock()) {
+                session->request_stop();
+            }
+        });
         async_session->start();
         io.run();
-    } catch (const std::exception& ex) {
-        set_megarac_view_status(state, std::string("error: ") + ex.what());
-        print_exception_with_stack(std::cerr, ex, "kvm network thread");
+    } catch (...) {
+        if (!stop_requested.load()) {
+            set_megarac_exception(state, std::current_exception());
+            print_current_exception_with_stack(std::cerr, "kvm network thread");
+        }
     }
 
-    clear_network_callbacks(state);
-    clear_connection_callbacks(state);
+    clear_megarac_control_callbacks(state);
 }
 
 } // namespace hitsc

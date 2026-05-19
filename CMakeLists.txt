@@ -50,6 +50,7 @@ add_executable(
   src/aten_session.cpp
   src/aten_view.cpp
   src/aspeed_decoder.cpp
+  src/aspeed_presenter.cpp
   src/bmc_session.cpp
   src/cli.cpp
   src/console.cpp

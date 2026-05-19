@@ -100,4 +100,15 @@ bool megarac_video_is_supported_first_block(std::uint8_t header)
     }
 }
 
+AspeedDecodeOptions make_megarac_aspeed_decode_options(const MegaracVideoFrame& frame)
+{
+    AspeedDecodeOptions options;
+    options.width = frame.width;
+    options.height = frame.height;
+    options.mode420 = frame.mode420;
+    options.jpeg_table_selector = frame.jpeg_table_selector;
+    options.advance_table_selector = frame.advance_table_selector;
+    return options;
+}
+
 } // namespace hitsc
