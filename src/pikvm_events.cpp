@@ -14,6 +14,7 @@
 #include <boost/asio/steady_timer.hpp>
 #include <boost/beast/http.hpp>
 #include <boost/json.hpp>
+#include <boost/system/system_error.hpp>
 #include <boost/version.hpp>
 
 #include <algorithm>
@@ -74,6 +75,28 @@ std::string printable_preview(std::string_view value, std::size_t limit = 120)
         preview += "...";
     }
     return preview;
+}
+
+std::string websocket_handshake_error_message(
+    std::string_view path,
+    const boost::system::system_error& error,
+    const websocket::response_type& response)
+{
+    std::ostringstream message;
+    message << "PiKVM websocket handshake failed"
+            << " path=" << path
+            << ": " << error.code().message();
+    if (error.code() == websocket::error::upgrade_declined) {
+        message << " HTTP " << response.result_int();
+        if (!response.reason().empty()) {
+            message << " " << response.reason();
+        }
+        const std::string& body = response.body();
+        if (!body.empty()) {
+            message << ": " << body_snippet(body);
+        }
+    }
+    return message.str();
 }
 
 std::string json_event_type(std::string_view text)
@@ -481,7 +504,18 @@ std::shared_ptr<PikvmWebSocket> connect_pikvm_websocket(
     }));
 
     websocket::response_type response;
-    ws->handshake(response, host, std::string(path));
+    if (options.verbose) {
+        log_info() << "pikvm websocket connecting"
+                   << " path=" << path
+                   << " idle-timeout=" << (idle_timeout_seconds > 0 ? std::to_string(idle_timeout_seconds) + "s" : "disabled");
+    }
+    try {
+        ws->handshake(response, host, std::string(path));
+    } catch (const boost::system::system_error& ex) {
+        const std::string message = websocket_handshake_error_message(path, ex, response);
+        log_error() << message;
+        throw std::runtime_error(message);
+    }
     log_info() << "pikvm websocket connected"
                << " path=" << path
                << " idle-timeout=" << (idle_timeout_seconds > 0 ? std::to_string(idle_timeout_seconds) + "s" : "disabled");
