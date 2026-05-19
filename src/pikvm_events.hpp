@@ -53,9 +53,8 @@ std::shared_ptr<PikvmEventSession> start_pikvm_event_session(
     const std::atomic_bool& stop_requested,
     std::function<void(std::exception_ptr)> on_error);
 
-void queue_pikvm_event_input(
-    const std::shared_ptr<PikvmEventSession>& session,
-    PikvmInputWork work);
+std::function<void(PikvmInputWork)> make_pikvm_event_input_sink(
+    const std::shared_ptr<PikvmEventSession>& session);
 
 void stop_pikvm_event_session(
     const std::shared_ptr<PikvmEventSession>& session,

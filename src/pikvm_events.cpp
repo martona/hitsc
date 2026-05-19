@@ -513,13 +513,15 @@ std::shared_ptr<PikvmEventSession> start_pikvm_event_session(
     return session;
 }
 
-void queue_pikvm_event_input(
-    const std::shared_ptr<PikvmEventSession>& session,
-    PikvmInputWork work)
+std::function<void(PikvmInputWork)> make_pikvm_event_input_sink(
+    const std::shared_ptr<PikvmEventSession>& session)
 {
-    if (session) {
-        session->enqueue_input(std::move(work));
-    }
+    std::weak_ptr<PikvmEventSession> weak_session = session;
+    return [weak_session](PikvmInputWork work) {
+        if (std::shared_ptr<PikvmEventSession> session = weak_session.lock()) {
+            session->enqueue_input(std::move(work));
+        }
+    };
 }
 
 void stop_pikvm_event_session(

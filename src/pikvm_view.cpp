@@ -995,15 +995,8 @@ void run_pikvm_control_worker(
         std::shared_ptr<PikvmEventSession> event_session =
             start_pikvm_event_session(event_ws, options, stop_requested, on_error);
         stop_state->session = event_session;
-        std::weak_ptr<PikvmEventSession> weak_event_session = event_session;
         PikvmInputSinkToken input_sink_token(state);
-        install_pikvm_input_sink(
-            state,
-            [weak_event_session](PikvmInputWork work) {
-                if (std::shared_ptr<PikvmEventSession> session = weak_event_session.lock()) {
-                    queue_pikvm_event_input(session, std::move(work));
-                }
-            });
+        install_pikvm_input_sink(state, make_pikvm_event_input_sink(event_session));
         set_pikvm_status(state, "control websocket connected");
         io.run();
     } catch (...) {
