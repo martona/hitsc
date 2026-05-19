@@ -1,6 +1,7 @@
 #include "http_client.hpp"
 
 #include "app_info.hpp"
+#include "log.hpp"
 #include "text.hpp"
 #include "tls.hpp"
 #include "trace.hpp"
@@ -130,6 +131,21 @@ void set_request_headers(
     }
 }
 
+std::string make_request_url(const Url& url, std::string_view target)
+{
+    std::string request_url = make_origin(url);
+    if (target.empty()) {
+        return request_url;
+    }
+    if (target.front() != '/' && target.front() != '?') {
+        request_url += '/';
+    } else if (target.front() == '?') {
+        request_url += '/';
+    }
+    request_url += target;
+    return request_url;
+}
+
 } // namespace
 
 StringResponse https_request(
@@ -151,6 +167,15 @@ StringResponse https_request(
 
     configure_tls(tls_context, stream, url.host, insecure);
     set_server_name_indication(stream, url.host);
+
+    const std::string request_url = make_request_url(url, target);
+    const auto request_started_at = std::chrono::steady_clock::now();
+    if (verbose) {
+        log_info() << "https request starting"
+                   << " base-url=" << make_origin(url)
+                   << " target=" << target
+                   << " url=" << request_url;
+    }
 
     const auto endpoints = resolver.resolve(url.host, url.port);
     beast::get_lowest_layer(stream).expires_after(std::chrono::seconds(timeout_seconds));
@@ -184,6 +209,14 @@ StringResponse https_request(
     }
     if (shutdown_error) {
         throw beast::system_error(shutdown_error, "TLS shutdown failed");
+    }
+
+    if (verbose) {
+        const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - request_started_at).count();
+        log_info() << "https request finished"
+                   << " duration-ms=" << elapsed_ms
+                   << " url=" << request_url;
     }
 
     log_http_response(response, decode_response_body(response), verbose);
