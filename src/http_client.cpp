@@ -15,12 +15,14 @@
 #include <zlib.h>
 
 #include <chrono>
+#include <memory>
 #include <stdexcept>
 #include <utility>
 
 namespace hitsc {
 namespace asio = boost::asio;
 namespace beast = boost::beast;
+namespace boost_system = boost::system;
 namespace ssl = asio::ssl;
 using tcp = asio::ip::tcp;
 
@@ -146,72 +148,176 @@ std::string make_request_url(const Url& url, std::string_view target)
     return request_url;
 }
 
+bool can_retry_reused_request(http::verb method)
+{
+    switch (method) {
+    case http::verb::get:
+    case http::verb::head:
+    case http::verb::options:
+    case http::verb::trace:
+        return true;
+    default:
+        return false;
+    }
+}
+
 } // namespace
 
-StringResponse https_request(
-    const Url& url,
-    bool insecure,
-    http::verb method,
-    std::string_view target,
-    std::string body,
-    std::string_view content_type,
-    CookieJar* cookies,
-    const std::vector<Header>& extra_headers,
-    bool verbose,
-    int timeout_seconds)
-{
-    asio::io_context io;
-    ssl::context tls_context(ssl::context::tls_client);
-    tcp::resolver resolver(io);
-    beast::ssl_stream<beast::tcp_stream> stream(io, tls_context);
+struct HttpsClient::Impl {
+    using Stream = beast::ssl_stream<beast::tcp_stream>;
 
-    configure_tls(tls_context, stream, url.host, insecure);
-    set_server_name_indication(stream, url.host);
-
-    const std::string request_url = make_request_url(url, target);
-    const auto request_started_at = std::chrono::steady_clock::now();
-    if (verbose) {
-        log_info() << "https request starting"
-                   << " base-url=" << make_origin(url)
-                   << " target=" << target
-                   << " url=" << request_url;
+    Impl(const Url& url, bool insecure, bool verbose, int timeout_seconds)
+        : url_(url)
+        , insecure_(insecure)
+        , verbose_(verbose)
+        , timeout_seconds_(timeout_seconds)
+        , tls_context_(ssl::context::tls_client)
+        , resolver_(io_)
+    {
     }
 
-    const auto endpoints = resolver.resolve(url.host, url.port);
-    beast::get_lowest_layer(stream).expires_after(std::chrono::seconds(timeout_seconds));
-    beast::get_lowest_layer(stream).connect(endpoints);
-    stream.handshake(ssl::stream_base::client);
-
-    http::request<http::string_body> request{method, target, 11};
-    request.body() = std::move(body);
-    set_request_headers(request, url, cookies, extra_headers);
-    if (!content_type.empty()) {
-        request.set(http::field::content_type, content_type);
-    }
-    request.prepare_payload();
-
-    log_http_request(request, verbose);
-    http::write(stream, request);
-
-    beast::flat_buffer buffer;
-    StringResponse response;
-    http::read(stream, buffer, response);
-
-    if (cookies != nullptr) {
-        collect_cookies(response, *cookies);
+    ~Impl()
+    {
+        shutdown_connection();
     }
 
-    beast::error_code shutdown_error;
-    stream.shutdown(shutdown_error);
-    if (shutdown_error == asio::error::eof ||
-        shutdown_error == ssl::error::stream_truncated) {
-        shutdown_error = {};
-    }
-    if (shutdown_error) {
-        throw beast::system_error(shutdown_error, "TLS shutdown failed");
+    StringResponse request(
+        http::verb method,
+        std::string_view target,
+        const std::string& body,
+        std::string_view content_type,
+        CookieJar* cookies,
+        const std::vector<Header>& extra_headers)
+    {
+        const std::string request_url = make_request_url(url_, target);
+        const auto request_started_at = std::chrono::steady_clock::now();
+        if (verbose_) {
+            log_info() << "https request starting"
+                       << " base-url=" << make_origin(url_)
+                       << " target=" << target
+                       << " url=" << request_url;
+        }
+
+        bool retried = false;
+        while (true) {
+            const bool reused_connection = stream_ != nullptr;
+
+            try {
+                StringResponse response = send_request(method, target, body, content_type, cookies, extra_headers);
+                const bool reusable = response.keep_alive();
+
+                log_request_finished(request_started_at, request_url);
+                try {
+                    log_http_response(response, decode_response_body(response), verbose_);
+                } catch (...) {
+                    if (!reusable) {
+                        shutdown_connection();
+                    }
+                    throw;
+                }
+
+                if (!reusable) {
+                    if (verbose_) {
+                        log_debug() << "https connection not reusable"
+                                    << " url=" << request_url;
+                    }
+                    shutdown_connection();
+                }
+
+                return response;
+            } catch (const boost_system::system_error& ex) {
+                close_connection();
+                if (reused_connection && !retried && can_retry_reused_request(method)) {
+                    retried = true;
+                    if (verbose_) {
+                        log_debug() << "https reused connection failed; reconnecting once"
+                                    << " url=" << request_url
+                                    << " error=" << ex.what();
+                    }
+                    continue;
+                }
+                throw;
+            } catch (...) {
+                close_connection();
+                throw;
+            }
+        }
     }
 
-    if (verbose) {
+private:
+    void connect()
+    {
+        io_.restart();
+
+        auto next_stream = std::make_unique<Stream>(io_, tls_context_);
+        configure_tls(tls_context_, *next_stream, url_.host, insecure_);
+        set_server_name_indication(*next_stream, url_.host);
+
+        const auto endpoints = resolver_.resolve(url_.host, url_.port);
+        beast::get_lowest_layer(*next_stream).expires_after(std::chrono::seconds(timeout_seconds_));
+        beast::get_lowest_layer(*next_stream).connect(endpoints);
+        next_stream->handshake(ssl::stream_base::client);
+
+        stream_ = std::move(next_stream);
+    }
+
+    http::request<http::string_body> make_http_request(
+        http::verb method,
+        std::string_view target,
+        const std::string& body,
+        std::string_view content_type,
+        CookieJar* cookies,
+        const std::vector<Header>& extra_headers) const
+    {
+        http::request<http::string_body> request{method, target, 11};
+        request.body() = body;
+        set_request_headers(request, url_, cookies, extra_headers);
+        request.keep_alive(true);
+        if (!content_type.empty()) {
+            request.set(http::field::content_type, content_type);
+        }
+        request.prepare_payload();
+        return request;
+    }
+
+    StringResponse send_request(
+        http::verb method,
+        std::string_view target,
+        const std::string& body,
+        std::string_view content_type,
+        CookieJar* cookies,
+        const std::vector<Header>& extra_headers)
+    {
+        if (stream_ == nullptr) {
+            connect();
+        }
+
+        auto request = make_http_request(method, target, body, content_type, cookies, extra_headers);
+
+        log_http_request(request, verbose_);
+        beast::get_lowest_layer(*stream_).expires_after(std::chrono::seconds(timeout_seconds_));
+        http::write(*stream_, request);
+
+        beast::flat_buffer buffer;
+        StringResponse response;
+        beast::get_lowest_layer(*stream_).expires_after(std::chrono::seconds(timeout_seconds_));
+        http::read(*stream_, buffer, response);
+
+        if (cookies != nullptr) {
+            collect_cookies(response, *cookies);
+        }
+
+        return response;
+    }
+
+    void log_request_finished(
+        std::chrono::steady_clock::time_point request_started_at,
+        const std::string& request_url) const
+    {
+        if (!verbose_) {
+            return;
+        }
+
         const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - request_started_at).count();
         log_info() << "https request finished"
@@ -219,8 +325,64 @@ StringResponse https_request(
                    << " url=" << request_url;
     }
 
-    log_http_response(response, decode_response_body(response), verbose);
-    return response;
+    void shutdown_connection() noexcept
+    {
+        if (stream_ == nullptr) {
+            return;
+        }
+
+        try {
+            beast::get_lowest_layer(*stream_).expires_after(std::chrono::seconds(timeout_seconds_));
+            beast::error_code shutdown_error;
+            stream_->shutdown(shutdown_error);
+        } catch (...) {
+        }
+
+        close_connection();
+    }
+
+    void close_connection() noexcept
+    {
+        if (stream_ == nullptr) {
+            return;
+        }
+
+        beast::error_code ignored;
+        beast::get_lowest_layer(*stream_).socket().shutdown(tcp::socket::shutdown_both, ignored);
+        beast::get_lowest_layer(*stream_).socket().close(ignored);
+        stream_.reset();
+    }
+
+    Url url_;
+    bool insecure_ = false;
+    bool verbose_ = false;
+    int timeout_seconds_ = 30;
+    asio::io_context io_;
+    ssl::context tls_context_;
+    tcp::resolver resolver_;
+    std::unique_ptr<Stream> stream_;
+};
+
+HttpsClient::HttpsClient(const Url& url, bool insecure, bool verbose, int timeout_seconds)
+    : impl_(std::make_unique<Impl>(url, insecure, verbose, timeout_seconds))
+{
+}
+
+HttpsClient::~HttpsClient() = default;
+
+HttpsClient::HttpsClient(HttpsClient&&) noexcept = default;
+
+HttpsClient& HttpsClient::operator=(HttpsClient&&) noexcept = default;
+
+StringResponse HttpsClient::request(
+    http::verb method,
+    std::string_view target,
+    std::string body,
+    std::string_view content_type,
+    CookieJar* cookies,
+    const std::vector<Header>& extra_headers)
+{
+    return impl_->request(method, target, body, content_type, cookies, extra_headers);
 }
 
 std::string decode_response_body(const StringResponse& response)

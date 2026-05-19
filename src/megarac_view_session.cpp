@@ -169,7 +169,11 @@ bool parse_reconnect_feature(std::string_view body)
     return false;
 }
 
-bool fetch_reconnect_feature(const LoginOptions& options, CookieJar& cookies, std::string_view csrf_token)
+bool fetch_reconnect_feature(
+    HttpsClient& client,
+    const LoginOptions& options,
+    CookieJar& cookies,
+    std::string_view csrf_token)
 {
     std::vector<Header> headers{
         Header{http::field::origin, {}, make_origin(options.base_url)},
@@ -179,16 +183,13 @@ bool fetch_reconnect_feature(const LoginOptions& options, CookieJar& cookies, st
         headers.push_back(Header{http::field::unknown, "X-CSRFTOKEN", std::string(csrf_token)});
     }
 
-    auto response = https_request(
-        options.base_url,
-        options.insecure,
+    auto response = client.request(
         http::verb::get,
         "/api/configuration/project",
         {},
         {},
         &cookies,
-        headers,
-        options.verbose);
+        headers);
 
     require_success_status(response, "/api/configuration/project");
     return parse_reconnect_feature(decode_response_body(response));
@@ -204,20 +205,18 @@ MegaracViewConfig fetch_kvm_config(const LoginOptions& options, CookieJar& cooki
         headers.push_back(Header{http::field::unknown, "X-CSRFTOKEN", std::string(csrf_token)});
     }
 
-    auto response = https_request(
-        options.base_url,
-        options.insecure,
+    HttpsClient client(options.base_url, options.insecure, options.verbose);
+    auto response = client.request(
         http::verb::get,
         "/api/settings/media/h5viewercfg",
         {},
         {},
         &cookies,
-        headers,
-        options.verbose);
+        headers);
 
     require_success_status(response, "/api/settings/media/h5viewercfg");
     MegaracViewConfig config = parse_kvm_config(decode_response_body(response));
-    config.reconnect_enabled = fetch_reconnect_feature(options, cookies, csrf_token);
+    config.reconnect_enabled = fetch_reconnect_feature(client, options, cookies, csrf_token);
     return config;
 }
 

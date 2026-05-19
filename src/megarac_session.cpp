@@ -82,17 +82,14 @@ bool logout_megarac(const LoginOptions& options, CookieJar& cookies, std::string
     }
 
     try {
-        auto response = https_request(
-            options.base_url,
-            options.insecure,
+        HttpsClient client(options.base_url, options.insecure, options.verbose, 5);
+        auto response = client.request(
             http::verb::delete_,
             "/api/session",
             {},
             {},
             &cookies,
-            headers,
-            options.verbose,
-            5);
+            headers);
 
         if (response.result_int() >= 200 && response.result_int() < 300) {
             log_info() << "megarac logout succeeded";

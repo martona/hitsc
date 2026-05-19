@@ -96,16 +96,14 @@ BmcWebSession login_bmc_web_session(const LoginOptions& options, const BmcLoginP
         Header{http::field::referer, {}, make_origin(options.base_url) + "/"},
     };
 
-    auto response = https_request(
-        options.base_url,
-        options.insecure,
+    HttpsClient client(options.base_url, options.insecure, options.verbose);
+    auto response = client.request(
         http::verb::post,
         profile.login_target,
         build_form_body(options, profile),
         profile.content_type,
         &cookies,
-        headers,
-        options.verbose);
+        headers);
 
     const int status = static_cast<int>(response.result_int());
     if (status < 200 || status > profile.max_success_status) {

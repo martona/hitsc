@@ -60,17 +60,14 @@ bool logout_pikvm(const LoginOptions& options, CookieJar& cookies)
     };
 
     try {
-        auto response = https_request(
-            options.base_url,
-            options.insecure,
+        HttpsClient client(options.base_url, options.insecure, options.verbose, 5);
+        auto response = client.request(
             http::verb::post,
             "/api/auth/logout",
             {},
             {},
             &cookies,
-            headers,
-            options.verbose,
-            5);
+            headers);
 
         if (response.result_int() >= 200 && response.result_int() < 300) {
             if (options.verbose) {
