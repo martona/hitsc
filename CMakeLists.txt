@@ -72,6 +72,7 @@ add_executable(
   src/tls.cpp
   src/trace.cpp
   src/url.cpp
+  src/view_status.cpp
 )
 
 target_compile_features(hitsc PRIVATE cxx_std_20)

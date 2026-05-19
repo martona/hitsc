@@ -673,11 +673,13 @@ public:
         PikvmViewOptions options,
         std::shared_ptr<PikvmD3D11Context> d3d11_context,
         const std::atomic_bool& stop_requested,
+        std::function<void(std::size_t)> on_data,
         std::function<void(PikvmVideoFrame)> on_frame,
         std::function<void(std::exception_ptr)> on_error)
         : ws_(std::move(ws))
         , options_(std::move(options))
         , stop_requested_(stop_requested)
+        , on_data_(std::move(on_data))
         , on_frame_(std::move(on_frame))
         , on_error_(std::move(on_error))
         , decoder_(options_.video_decode, std::move(d3d11_context))
@@ -817,6 +819,10 @@ private:
             return;
         }
 
+        if (on_data_) {
+            on_data_(bytes_transferred);
+        }
+
         const std::uint8_t op = bytes[0];
         if (op == 255) {
             missed_heartbeats_ = 0;
@@ -861,6 +867,7 @@ private:
     std::shared_ptr<PikvmWebSocket> ws_;
     PikvmViewOptions options_;
     const std::atomic_bool& stop_requested_;
+    std::function<void(std::size_t)> on_data_;
     std::function<void(PikvmVideoFrame)> on_frame_;
     std::function<void(std::exception_ptr)> on_error_;
     beast::flat_buffer read_buffer_;
@@ -881,6 +888,7 @@ void start_pikvm_video_stream(
     PikvmViewOptions options,
     std::shared_ptr<PikvmD3D11Context> d3d11_context,
     const std::atomic_bool& stop_requested,
+    std::function<void(std::size_t)> on_data,
     std::function<void(PikvmVideoFrame)> on_frame,
     std::function<void(std::exception_ptr)> on_error)
 {
@@ -889,6 +897,7 @@ void start_pikvm_video_stream(
         std::move(options),
         std::move(d3d11_context),
         stop_requested,
+        std::move(on_data),
         std::move(on_frame),
         std::move(on_error))
         ->start();

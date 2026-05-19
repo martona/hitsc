@@ -120,7 +120,9 @@ So it works, but it's not great, and it likely won't ever be.
 
 ### PiKVM
 
-The current PiKVM support authenticates with the documented `/api/auth/login` form endpoint, keeps `/api/ws?stream=1` open for KVMD state and HID input, opens `/api/media/ws`, requests direct H.264 over the PiKVM media websocket, decodes it with FFmpeg, and displays it in SDL. On Windows it can use D3D11 hardware decode plus GPU-side texture upload when available, with software decode as the fallback. Keyboard and absolute mouse input are sent over the KVMD event WebSocket; power control and other side channels are not implemented yet.
+PiKVM is a modern proprietary protocol in that it's only in use by the PiKVM project, but it's fully open source. It can be taxing on the CPU if no hardware-acceleration is available for H.264 decoding, but otherwise it's capable of 1080p 25-30 FPS and low CPU use with zero-copy GPU playback. KVMD 4.29 or newer only; older PiKVM releases do not implement H.264 streaming over websockets. 
+
+WebRTC is attractive due to its lower latency and audio support, but not implemented yet.
 
 ## License and Third-party Code
 
@@ -138,8 +140,7 @@ This is a work in progress, the current stage not being much more than a sign of
 
 - Add Linux and macOS support.
 - Add TLS certificate pinning.
-- Expand PiKVM support beyond video and basic input
-- Extend hardware H.264 decode beyond Windows D3D11 and reduce remaining GPU copy paths where possible
+- Expand PiKVM support beyond video and basic input (WebRTC, etc.)
 - Add Apple RDP support (yeah it's not IPMI but it's a pain point for me)
 - Add UI for connection establishment, making CLI optional
 - Add secure credential store (win32 CryptoAPI, macOS keychain, ...)
@@ -149,6 +150,3 @@ This is a work in progress, the current stage not being much more than a sign of
 - Scale to fit, 1:1, etc display options.
 - Keep the UI tight and minimal
 
-## AI
-
-By rough estimate about 90% of the code was written by AI. Handmade, it'd probably be cleaner and 50% of the size. It'd also have taken 50x longer. I got a basic supermicro and megarac implementation off the ground in about 8 hours. That blows me away. Yes, I did review every commit, and yes, I pushed back when it was doing something stupid, but most of the time it just one-shot the prompts. Code is just wet clay now.

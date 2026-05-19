@@ -51,6 +51,7 @@ std::shared_ptr<PikvmEventSession> start_pikvm_event_session(
     std::shared_ptr<PikvmWebSocket> ws,
     PikvmViewOptions options,
     const std::atomic_bool& stop_requested,
+    std::function<void(bool)> on_display_status,
     std::function<void(std::exception_ptr)> on_error);
 
 std::function<void(PikvmInputWork)> make_pikvm_event_input_sink(

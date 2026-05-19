@@ -24,6 +24,7 @@
 #include <cstdint>
 #include <deque>
 #include <iomanip>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -100,30 +101,33 @@ std::string websocket_handshake_error_message(
     return message.str();
 }
 
-std::string json_event_type(std::string_view text)
+struct PikvmJsonEventSummary {
+    std::string event_type;
+    std::optional<bool> streamer_source_online;
+};
+
+PikvmJsonEventSummary parse_json_event(std::string_view text)
 {
+    PikvmJsonEventSummary result;
     boost::system::error_code error;
     json::value value = json::parse(text, error);
     if (error) {
-        return {};
+        return result;
     }
 
-    const json::object* object = value.if_object();
-    if (object == nullptr) {
-        return {};
+    try {
+        const json::object& object = value.as_object();
+        result.event_type = std::string(object.at("event_type").as_string());
+        if (result.event_type == "streamer") {
+            result.streamer_source_online = object.at("event").as_object()
+                .at("streamer").as_object()
+                .at("source").as_object()
+                .at("online").as_bool();
+        }
+    } catch (const std::exception&) {
     }
 
-    const json::value* event_type = object->if_contains("event_type");
-    if (event_type == nullptr) {
-        return {};
-    }
-
-    const json::string* event_type_string = event_type->if_string();
-    if (event_type_string == nullptr) {
-        return {};
-    }
-
-    return std::string(*event_type_string);
+    return result;
 }
 
 struct DurationStats {
@@ -190,10 +194,12 @@ public:
         std::shared_ptr<PikvmWebSocket> ws,
         PikvmViewOptions options,
         const std::atomic_bool& stop_requested,
+        std::function<void(bool)> on_display_status,
         std::function<void(std::exception_ptr)> on_error)
         : ws_(std::move(ws))
         , options_(std::move(options))
         , stop_requested_(stop_requested)
+        , on_display_status_(std::move(on_display_status))
         , on_error_(std::move(on_error))
         , force_close_timer_(ws_->get_executor())
     {
@@ -273,15 +279,23 @@ private:
         }
 
         ++messages_seen_;
+        std::optional<PikvmJsonEventSummary> json_summary;
+        if (ws_->got_text()) {
+            const std::string text = buffer_text(read_buffer_);
+            json_summary = parse_json_event(text);
+            if (json_summary->streamer_source_online && on_display_status_) {
+                on_display_status_(*json_summary->streamer_source_online);
+            }
+        }
+
         if (options_.login.verbose && (messages_seen_ <= 8 || messages_seen_ % 120 == 0)) {
             LogLine line = log_info();
             line << "pikvm event websocket message"
                  << " bytes=" << bytes_transferred;
             if (ws_->got_text()) {
                 const std::string text = buffer_text(read_buffer_);
-                const std::string event_type = json_event_type(text);
-                if (!event_type.empty()) {
-                    line << " event_type=" << event_type;
+                if (json_summary && !json_summary->event_type.empty()) {
+                    line << " event_type=" << json_summary->event_type;
                 }
                 line << " preview=\"" << printable_preview(text) << "\"";
             } else {
@@ -447,6 +461,7 @@ private:
     std::shared_ptr<PikvmWebSocket> ws_;
     PikvmViewOptions options_;
     const std::atomic_bool& stop_requested_;
+    std::function<void(bool)> on_display_status_;
     std::function<void(std::exception_ptr)> on_error_;
     asio::steady_timer force_close_timer_;
     beast::flat_buffer read_buffer_;
@@ -534,12 +549,14 @@ std::shared_ptr<PikvmEventSession> start_pikvm_event_session(
     std::shared_ptr<PikvmWebSocket> ws,
     PikvmViewOptions options,
     const std::atomic_bool& stop_requested,
+    std::function<void(bool)> on_display_status,
     std::function<void(std::exception_ptr)> on_error)
 {
     auto session = std::make_shared<PikvmEventSession>(
         std::move(ws),
         std::move(options),
         stop_requested,
+        std::move(on_display_status),
         std::move(on_error));
     session->start();
     return session;

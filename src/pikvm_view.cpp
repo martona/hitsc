@@ -7,6 +7,7 @@
 #include "pikvm_input.hpp"
 #include "pikvm_session.hpp"
 #include "pikvm_video.hpp"
+#include "view_status.hpp"
 
 #include <SDL3/SDL.h>
 
@@ -62,6 +63,7 @@ struct PikvmViewState {
     std::atomic_bool frame_event_pending{false};
     std::uint64_t frame_sequence = 0;
     std::string status = "starting";
+    ViewStatus view_status;
     std::exception_ptr exception;
     std::function<void()> force_close;
     std::function<void(PikvmInputWork)> input_sink;
@@ -575,12 +577,6 @@ void set_pikvm_status(PikvmViewState& state, std::string status)
     state.status = std::move(status);
 }
 
-std::string pikvm_status_snapshot(PikvmViewState& state)
-{
-    std::lock_guard lock(state.control_mutex);
-    return state.status;
-}
-
 void set_pikvm_exception(PikvmViewState& state, std::exception_ptr exception)
 {
     std::lock_guard lock(state.control_mutex);
@@ -952,8 +948,16 @@ void run_pikvm_control_worker(
             return;
         }
 
+        state.view_status.kvm_connection(true);
         std::shared_ptr<PikvmEventSession> event_session =
-            start_pikvm_event_session(event_ws, options, stop_requested, on_error);
+            start_pikvm_event_session(
+                event_ws,
+                options,
+                stop_requested,
+                [&](bool online) {
+                    state.view_status.kvm_display_status(online);
+                },
+                on_error);
         stop_state->session = event_session;
         install_pikvm_input_sink(state, make_pikvm_event_input_sink(event_session));
         set_pikvm_status(state, "control websocket connected");
@@ -965,6 +969,7 @@ void run_pikvm_control_worker(
     }
 
     stop_handles->set_control({});
+    state.view_status.kvm_connection(false);
 }
 
 void run_pikvm_video_worker(
@@ -1008,6 +1013,9 @@ void run_pikvm_video_worker(
             options,
             std::move(d3d11_context),
             stop_requested,
+            [&](std::size_t bytes) {
+                state.view_status.data_received(bytes);
+            },
             [&](PikvmVideoFrame frame) {
                 store_pikvm_frame(state, std::move(frame));
             },
@@ -1170,6 +1178,7 @@ void run_pikvm_view(const PikvmViewOptions& options)
         if (window == nullptr) {
             throw_sdl_error("SDL_CreateWindow");
         }
+        SDL_SetWindowTitle(window, state->view_status.title(options.login.base_url.host).c_str());
 
         PikvmRendererSetup renderer_setup = create_pikvm_renderer(window, options);
         renderer = renderer_setup.renderer;
@@ -1197,8 +1206,6 @@ void run_pikvm_view(const PikvmViewOptions& options)
         std::uint64_t last_status_tick = 0;
         int texture_width = 0;
         int texture_height = 0;
-        int title_width = 0;
-        int title_height = 0;
         PikvmVideoPixelFormat texture_format = PikvmVideoPixelFormat::rgba32;
         bool texture_wraps_d3d11_source = false;
         bool d3d11_direct_wrap_disabled = false;
@@ -1456,16 +1463,6 @@ void run_pikvm_view(const PikvmViewOptions& options)
                     update_pikvm_texture(texture, *frame);
                 }
 
-                if (title_width != frame->width || title_height != frame->height) {
-                    title_width = frame->width;
-                    title_height = frame->height;
-                    SDL_SetWindowTitle(
-                        window,
-                        ("hitsc - PiKVM - " + options.login.base_url.host + " - "
-                         + std::to_string(frame->width) + "x" + std::to_string(frame->height))
-                            .c_str());
-                }
-
                 pending_present_latency_frame = frame;
                 render_needed = true;
             }
@@ -1483,21 +1480,27 @@ void run_pikvm_view(const PikvmViewOptions& options)
                     SDL_RenderTexture(renderer, texture, nullptr, &target);
                 }
                 SDL_RenderPresent(renderer);
-                if (options.login.verbose && pending_present_latency_frame) {
-                    add_pikvm_frame_latency(
-                        frame_latency,
-                        *pending_present_latency_frame,
-                        PikvmClock::now());
+                if (pending_present_latency_frame) {
+                    const auto presented_at = PikvmClock::now();
+                    state->view_status.frame_presented(
+                        pending_present_latency_frame->width,
+                        pending_present_latency_frame->height);
+                    if (options.login.verbose) {
+                        add_pikvm_frame_latency(
+                            frame_latency,
+                            *pending_present_latency_frame,
+                            presented_at);
+                        maybe_log_pikvm_frame_latency(frame_latency, last_frame_latency_log, false);
+                    }
                     pending_present_latency_frame.reset();
-                    maybe_log_pikvm_frame_latency(frame_latency, last_frame_latency_log, false);
                 }
                 first_render = false;
             }
 
             const std::uint64_t ticks = SDL_GetTicks();
-            if (texture == nullptr && ticks - last_status_tick > 1000) {
+            if (ticks - last_status_tick >= 1000) {
                 last_status_tick = ticks;
-                SDL_SetWindowTitle(window, ("hitsc - PiKVM - " + pikvm_status_snapshot(*state)).c_str());
+                SDL_SetWindowTitle(window, state->view_status.title(options.login.base_url.host).c_str());
             }
 
             if (network_done->load()) {
