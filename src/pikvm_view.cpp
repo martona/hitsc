@@ -632,6 +632,32 @@ bool queue_pikvm_input_packet(
     return true;
 }
 
+void clear_pikvm_input_sink(PikvmViewState& state)
+{
+    std::lock_guard lock(state.control_mutex);
+    state.input_sink = {};
+    state.pending_input.clear();
+}
+
+class PikvmInputSinkToken {
+public:
+    explicit PikvmInputSinkToken(PikvmViewState& state)
+        : state_(&state)
+    {
+    }
+
+    ~PikvmInputSinkToken()
+    {
+        clear_pikvm_input_sink(*state_);
+    }
+
+    PikvmInputSinkToken(const PikvmInputSinkToken&) = delete;
+    PikvmInputSinkToken& operator=(const PikvmInputSinkToken&) = delete;
+
+private:
+    PikvmViewState* state_ = nullptr;
+};
+
 void install_pikvm_input_sink(
     PikvmViewState& state,
     std::function<void(PikvmInputWork)> input_sink)
@@ -646,13 +672,6 @@ void install_pikvm_input_sink(
     for (PikvmInputWork& work : pending) {
         input_sink(std::move(work));
     }
-}
-
-void clear_pikvm_input_sink(PikvmViewState& state)
-{
-    std::lock_guard lock(state.control_mutex);
-    state.input_sink = {};
-    state.pending_input.clear();
 }
 
 void queue_pikvm_key_event(
@@ -955,33 +974,37 @@ void run_pikvm_control_worker(
         ssl::context tls_context(ssl::context::tls_client);
 
         set_pikvm_status(state, "connecting control websocket");
-        std::shared_ptr<PikvmWebSocket> event_ws =
-            connect_pikvm_websocket(
-                io,
-                tls_context,
-                options.login,
-                cookies,
-                options.idle_timeout_seconds,
-                "/api/ws?stream=1");
+        std::shared_ptr<PikvmWebSocket> event_ws = connect_pikvm_websocket(
+            io,
+            tls_context,
+            options.login,
+            cookies,
+            options.idle_timeout_seconds,
+            "/api/ws?stream=1");
         stop_state->ws = event_ws;
         stop_handles->set_control([stop_state] {
             request_pikvm_control_stop(stop_state);
         });
 
         if (stop_requested.load()) {
-            request_pikvm_control_stop(stop_state);
-        } else {
-            std::shared_ptr<PikvmEventSession> event_session =
-                start_pikvm_event_session(event_ws, options, stop_requested, on_error);
-            stop_state->session = event_session;
-            install_pikvm_input_sink(
-                state,
-                [event_session](PikvmInputWork work) {
-                    queue_pikvm_event_input(event_session, std::move(work));
-                });
-            set_pikvm_status(state, "control websocket connected");
+            force_close_pikvm_websocket(*event_ws);
+            stop_handles->set_control({});
+            return;
         }
 
+        std::shared_ptr<PikvmEventSession> event_session =
+            start_pikvm_event_session(event_ws, options, stop_requested, on_error);
+        stop_state->session = event_session;
+        std::weak_ptr<PikvmEventSession> weak_event_session = event_session;
+        PikvmInputSinkToken input_sink_token(state);
+        install_pikvm_input_sink(
+            state,
+            [weak_event_session](PikvmInputWork work) {
+                if (std::shared_ptr<PikvmEventSession> session = weak_event_session.lock()) {
+                    queue_pikvm_event_input(session, std::move(work));
+                }
+            });
+        set_pikvm_status(state, "control websocket connected");
         io.run();
     } catch (...) {
         if (!stop_requested.load()) {
@@ -989,7 +1012,6 @@ void run_pikvm_control_worker(
         }
     }
 
-    clear_pikvm_input_sink(state);
     stop_handles->set_control({});
 }
 
@@ -1024,20 +1046,21 @@ void run_pikvm_video_worker(
         });
 
         if (stop_requested.load()) {
-            request_pikvm_video_stop(stop_state);
-        } else {
-            start_pikvm_video_stream(
-                video_ws,
-                options,
-                std::move(d3d11_context),
-                stop_requested,
-                [&](PikvmVideoFrame frame) {
-                    store_pikvm_frame(state, std::move(frame));
-                },
-                on_error);
-            set_pikvm_status(state, "connected");
+            force_close_pikvm_websocket(*video_ws);
+            stop_handles->set_video({});
+            return;
         }
 
+        start_pikvm_video_stream(
+            video_ws,
+            options,
+            std::move(d3d11_context),
+            stop_requested,
+            [&](PikvmVideoFrame frame) {
+                store_pikvm_frame(state, std::move(frame));
+            },
+            on_error);
+        set_pikvm_status(state, "connected");
         io.run();
     } catch (...) {
         if (!stop_requested.load()) {
