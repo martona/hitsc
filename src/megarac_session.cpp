@@ -64,31 +64,25 @@ MegaRacSession login_megarac(const LoginOptions& options)
         299,
     };
 
-    BmcWebSession web_session = login_bmc_web_session(options, profile);
-    MegaRacSession session;
-    session.cookies = std::move(web_session.cookies);
-    session.csrf_token = std::move(web_session.session_token);
-    return session;
+    return MegaRacSession{login_bmc_web_session(options, profile)};
 }
 
-bool logout_megarac(const LoginOptions& options, CookieJar& cookies, std::string_view csrf_token)
+bool logout_megarac(const LoginOptions& options, BmcWebSession& web)
 {
-    std::vector<Header> headers{
-        Header{http::field::origin, {}, make_origin(options.base_url)},
-        Header{http::field::referer, {}, make_origin(options.base_url) + "/"},
-    };
+    (void)options;
+
+    std::vector<Header> headers;
+    const std::string_view csrf_token = web.session_token();
     if (!csrf_token.empty()) {
         headers.push_back(Header{http::field::unknown, "X-CSRFTOKEN", std::string(csrf_token)});
     }
 
     try {
-        HttpsClient client(options.base_url, options.insecure, options.verbose, 5);
-        auto response = client.request(
+        auto response = web.request(
             http::verb::delete_,
             "/api/session",
             {},
             {},
-            &cookies,
             headers);
 
         if (response.result_int() >= 200 && response.result_int() < 300) {
@@ -114,7 +108,7 @@ MegaRacLogoutGuard::MegaRacLogoutGuard(const LoginOptions& options)
 MegaRacLogoutGuard::~MegaRacLogoutGuard()
 {
     if (active_ && session_ != nullptr) {
-        logout_megarac(options_, session_->cookies, session_->csrf_token);
+        logout_megarac(options_, session_->web);
     }
 }
 

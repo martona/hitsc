@@ -1,7 +1,6 @@
 #include "bmc_session.hpp"
 
 #include "errors.hpp"
-#include "http_client.hpp"
 #include "text.hpp"
 #include "url.hpp"
 
@@ -88,22 +87,72 @@ std::string build_form_body(const LoginOptions& options, const BmcLoginProfile& 
 
 } // namespace
 
+BmcWebSession::BmcWebSession(const LoginOptions& options)
+    : base_url_(options.base_url)
+    , client_(options.base_url, options.insecure, options.verbose)
+{
+}
+
+StringResponse BmcWebSession::request(
+    http::verb method,
+    std::string_view target,
+    std::string body,
+    std::string_view content_type,
+    const std::vector<Header>& extra_headers)
+{
+    std::vector<Header> headers;
+    headers.reserve(2 + extra_headers.size());
+
+    const std::string origin = make_origin(base_url_);
+    headers.push_back(Header{http::field::origin, {}, origin});
+    headers.push_back(Header{http::field::referer, {}, origin + "/"});
+    headers.insert(headers.end(), extra_headers.begin(), extra_headers.end());
+
+    return client_.request(
+        method,
+        target,
+        std::move(body),
+        content_type,
+        &cookies_,
+        headers);
+}
+
+CookieJar& BmcWebSession::cookies()
+{
+    return cookies_;
+}
+
+const CookieJar& BmcWebSession::cookies() const
+{
+    return cookies_;
+}
+
+std::string_view BmcWebSession::session_token() const
+{
+    return session_token_;
+}
+
+void BmcWebSession::set_cookie(std::string name, std::string value)
+{
+    cookies_.set(std::move(name), std::move(value));
+}
+
+void BmcWebSession::set_session_token(std::string token, std::string_view token_cookie_name)
+{
+    session_token_ = std::move(token);
+    if (!session_token_.empty() && !token_cookie_name.empty()) {
+        cookies_.set(std::string(token_cookie_name), session_token_);
+    }
+}
+
 BmcWebSession login_bmc_web_session(const LoginOptions& options, const BmcLoginProfile& profile)
 {
-    CookieJar cookies;
-    const std::vector<Header> headers{
-        Header{http::field::origin, {}, make_origin(options.base_url)},
-        Header{http::field::referer, {}, make_origin(options.base_url) + "/"},
-    };
-
-    HttpsClient client(options.base_url, options.insecure, options.verbose);
-    auto response = client.request(
+    BmcWebSession session(options);
+    auto response = session.request(
         http::verb::post,
         profile.login_target,
         build_form_body(options, profile),
-        profile.content_type,
-        &cookies,
-        headers);
+        profile.content_type);
 
     const int status = static_cast<int>(response.result_int());
     if (status < 200 || status > profile.max_success_status) {
@@ -114,13 +163,8 @@ BmcWebSession login_bmc_web_session(const LoginOptions& options, const BmcLoginP
     }
 
     const std::string decoded_body = decode_response_body(response);
-    BmcWebSession session;
-    session.cookies = std::move(cookies);
     if (profile.token_parser != nullptr) {
-        session.session_token = profile.token_parser(decoded_body);
-        if (!session.session_token.empty() && !profile.token_cookie_name.empty()) {
-            session.cookies.set(profile.token_cookie_name, session.session_token);
-        }
+        session.set_session_token(profile.token_parser(decoded_body), profile.token_cookie_name);
     }
 
     return session;

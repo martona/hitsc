@@ -41,10 +41,7 @@ const BmcLoginProfile& pikvm_login_profile()
 PikvmSession login_pikvm(const LoginOptions& options)
 {
     try {
-        BmcWebSession web_session = login_bmc_web_session(options, pikvm_login_profile());
-        PikvmSession session;
-        session.cookies = std::move(web_session.cookies);
-        return session;
+        return PikvmSession{login_bmc_web_session(options, pikvm_login_profile())};
     } catch (const UserError&) {
         throw;
     } catch (const std::exception& ex) {
@@ -52,22 +49,14 @@ PikvmSession login_pikvm(const LoginOptions& options)
     }
 }
 
-bool logout_pikvm(const LoginOptions& options, CookieJar& cookies)
+bool logout_pikvm(const LoginOptions& options, BmcWebSession& web)
 {
-    const std::vector<Header> headers{
-        Header{http::field::origin, {}, make_origin(options.base_url)},
-        Header{http::field::referer, {}, make_origin(options.base_url) + "/"},
-    };
-
     try {
-        HttpsClient client(options.base_url, options.insecure, options.verbose, 5);
-        auto response = client.request(
+        auto response = web.request(
             http::verb::post,
             "/api/auth/logout",
             {},
-            {},
-            &cookies,
-            headers);
+            {});
 
         if (response.result_int() >= 200 && response.result_int() < 300) {
             if (options.verbose) {
@@ -94,7 +83,7 @@ PikvmLogoutGuard::PikvmLogoutGuard(const LoginOptions& options)
 PikvmLogoutGuard::~PikvmLogoutGuard()
 {
     if (active_ && session_ != nullptr) {
-        logout_pikvm(options_, session_->cookies);
+        logout_pikvm(options_, session_->web);
     }
 }
 

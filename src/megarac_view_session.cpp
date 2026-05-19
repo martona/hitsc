@@ -170,53 +170,43 @@ bool parse_reconnect_feature(std::string_view body)
 }
 
 bool fetch_reconnect_feature(
-    HttpsClient& client,
-    const LoginOptions& options,
-    CookieJar& cookies,
-    std::string_view csrf_token)
+    BmcWebSession& web)
 {
-    std::vector<Header> headers{
-        Header{http::field::origin, {}, make_origin(options.base_url)},
-        Header{http::field::referer, {}, make_origin(options.base_url) + "/"},
-    };
+    std::vector<Header> headers;
+    const std::string_view csrf_token = web.session_token();
     if (!csrf_token.empty()) {
         headers.push_back(Header{http::field::unknown, "X-CSRFTOKEN", std::string(csrf_token)});
     }
 
-    auto response = client.request(
+    auto response = web.request(
         http::verb::get,
         "/api/configuration/project",
         {},
         {},
-        &cookies,
         headers);
 
     require_success_status(response, "/api/configuration/project");
     return parse_reconnect_feature(decode_response_body(response));
 }
 
-MegaracViewConfig fetch_kvm_config(const LoginOptions& options, CookieJar& cookies, std::string_view csrf_token)
+MegaracViewConfig fetch_kvm_config(BmcWebSession& web)
 {
-    std::vector<Header> headers{
-        Header{http::field::origin, {}, make_origin(options.base_url)},
-        Header{http::field::referer, {}, make_origin(options.base_url) + "/"},
-    };
+    std::vector<Header> headers;
+    const std::string_view csrf_token = web.session_token();
     if (!csrf_token.empty()) {
         headers.push_back(Header{http::field::unknown, "X-CSRFTOKEN", std::string(csrf_token)});
     }
 
-    HttpsClient client(options.base_url, options.insecure, options.verbose);
-    auto response = client.request(
+    auto response = web.request(
         http::verb::get,
         "/api/settings/media/h5viewercfg",
         {},
         {},
-        &cookies,
         headers);
 
     require_success_status(response, "/api/settings/media/h5viewercfg");
     MegaracViewConfig config = parse_kvm_config(decode_response_body(response));
-    config.reconnect_enabled = fetch_reconnect_feature(client, options, cookies, csrf_token);
+    config.reconnect_enabled = fetch_reconnect_feature(web);
     return config;
 }
 
@@ -1197,8 +1187,8 @@ void run_megarac_view_session(const MegaracViewOptions& options, MegaracViewSess
         log_info() << "megarac login succeeded";
 
         set_megarac_view_status(state, "fetching KVM config");
-        KvmConfig config = fetch_kvm_config(options.login, session.cookies, session.csrf_token);
-        session.cookies.set("__Host-isActiveKVM", "true");
+        KvmConfig config = fetch_kvm_config(session.web);
+        session.web.set_cookie("__Host-isActiveKVM", "true");
         log_info() << "kvm config fetched"
                    << " client_ip=" << config.client_ip
                    << " server_ip=" << config.server_ip
@@ -1251,7 +1241,7 @@ void run_megarac_view_session(const MegaracViewOptions& options, MegaracViewSess
             request.set(http::field::origin, make_origin(options.login.base_url));
             request.set(http::field::sec_websocket_protocol, "binary, base64");
 
-            const std::string cookie_header = session.cookies.header();
+            const std::string cookie_header = session.web.cookies().header();
             if (!cookie_header.empty()) {
                 request.set(http::field::cookie, cookie_header);
             }

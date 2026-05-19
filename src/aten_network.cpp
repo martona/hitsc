@@ -1053,12 +1053,12 @@ void run_aten_network_session(
     logout_guard.arm(session);
     log_info() << "aten login succeeded";
     if (options.login.verbose) {
-        log_info() << "cookies stored: " << session.cookies.size();
+        log_info() << "cookies stored: " << session.web.cookies().size();
     }
 
     std::string rfb_credential = options.login.username;
     const std::string bootstrap_credential =
-        fetch_aten_ikvm_bootstrap(options.login, session.cookies);
+        fetch_aten_ikvm_bootstrap(options.login, session.web);
     if (!bootstrap_credential.empty()) {
         rfb_credential = bootstrap_credential;
     } else {
@@ -1097,7 +1097,7 @@ void run_aten_network_session(
         request.set(http::field::user_agent, std::string(kName) + "/" + std::string(BOOST_LIB_VERSION));
         request.set(http::field::origin, make_origin(options.login.base_url));
 
-        const std::string cookie_header = session.cookies.header();
+        const std::string cookie_header = session.web.cookies().header();
         if (!cookie_header.empty()) {
             request.set(http::field::cookie, cookie_header);
         }

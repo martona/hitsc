@@ -1,16 +1,16 @@
 #pragma once
 
-#include "cookie_jar.hpp"
+#include "bmc_session.hpp"
 #include "options.hpp"
 
 namespace hitsc {
 
 struct PikvmSession {
-    CookieJar cookies;
+    BmcWebSession web;
 };
 
 PikvmSession login_pikvm(const LoginOptions& options);
-bool logout_pikvm(const LoginOptions& options, CookieJar& cookies);
+bool logout_pikvm(const LoginOptions& options, BmcWebSession& web);
 
 class PikvmLogoutGuard {
 public:

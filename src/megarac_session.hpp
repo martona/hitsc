@@ -1,20 +1,23 @@
 #pragma once
 
-#include "cookie_jar.hpp"
+#include "bmc_session.hpp"
 #include "options.hpp"
 
-#include <string>
 #include <string_view>
 
 namespace hitsc {
 
 struct MegaRacSession {
-    CookieJar cookies;
-    std::string csrf_token;
+    BmcWebSession web;
+
+    std::string_view csrf_token() const
+    {
+        return web.session_token();
+    }
 };
 
 MegaRacSession login_megarac(const LoginOptions& options);
-bool logout_megarac(const LoginOptions& options, CookieJar& cookies, std::string_view csrf_token);
+bool logout_megarac(const LoginOptions& options, BmcWebSession& web);
 
 class MegaRacLogoutGuard {
 public:

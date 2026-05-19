@@ -201,13 +201,10 @@ const BmcLoginProfile& aten_login_profile()
 
 AtenSession login_aten(const LoginOptions& options)
 {
-    BmcWebSession web_session = login_bmc_web_session(options, aten_login_profile());
-    AtenSession session;
-    session.cookies = std::move(web_session.cookies);
-    return session;
+    return AtenSession{login_bmc_web_session(options, aten_login_profile())};
 }
 
-bool logout_aten(const LoginOptions& options, CookieJar& cookies)
+bool logout_aten(const LoginOptions& options, BmcWebSession& web)
 {
     const auto started_at = std::chrono::steady_clock::now();
     const auto log_duration = [&] {
@@ -219,20 +216,12 @@ bool logout_aten(const LoginOptions& options, CookieJar& cookies)
         log_info() << "aten logout duration-ms=" << elapsed_ms;
     };
 
-    const std::vector<Header> headers{
-        Header{http::field::origin, {}, make_origin(options.base_url)},
-        Header{http::field::referer, {}, make_origin(options.base_url) + "/"},
-    };
-
     try {
-        HttpsClient client(options.base_url, options.insecure, options.verbose, 5);
-        auto response = client.request(
+        auto response = web.request(
             http::verb::get,
             "/cgi/logout.cgi",
             {},
-            {},
-            &cookies,
-            headers);
+            {});
 
         if (response.result_int() >= 200 && response.result_int() < 300) {
             if (options.verbose) {
@@ -261,7 +250,7 @@ AtenLogoutGuard::AtenLogoutGuard(const LoginOptions& options)
 AtenLogoutGuard::~AtenLogoutGuard()
 {
     if (active_ && session_ != nullptr) {
-        logout_aten(options_, session_->cookies);
+        logout_aten(options_, session_->web);
     }
 }
 
@@ -275,24 +264,16 @@ void AtenLogoutGuard::dismiss()
     active_ = false;
 }
 
-std::string fetch_aten_ikvm_bootstrap(const LoginOptions& options, CookieJar& cookies)
+std::string fetch_aten_ikvm_bootstrap(const LoginOptions& options, BmcWebSession& web)
 {
-    const std::vector<Header> headers{
-        Header{http::field::origin, {}, make_origin(options.base_url)},
-        Header{http::field::referer, {}, make_origin(options.base_url) + "/"},
-    };
-
     std::string target = "/cgi/url_redirect.cgi?url_name=man_ikvm_html5_bootstrap";
     int last_status = 0;
-    HttpsClient client(options.base_url, options.insecure, options.verbose);
     for (int redirects = 0; redirects < 4; ++redirects) {
-        auto response = client.request(
+        auto response = web.request(
             http::verb::get,
             target,
             {},
-            {},
-            &cookies,
-            headers);
+            {});
 
         last_status = response.result_int();
         if (last_status >= 200 && last_status < 300) {

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "cookie_jar.hpp"
+#include "http_client.hpp"
 #include "options.hpp"
 
 #include <string>
@@ -40,9 +40,37 @@ struct BmcLoginProfile {
     int max_success_status = 299;
 };
 
-struct BmcWebSession {
-    CookieJar cookies;
-    std::string session_token;
+class BmcWebSession {
+public:
+    explicit BmcWebSession(const LoginOptions& options);
+    ~BmcWebSession() = default;
+
+    BmcWebSession(BmcWebSession&&) noexcept = default;
+    BmcWebSession& operator=(BmcWebSession&&) noexcept = default;
+    BmcWebSession(const BmcWebSession&) = delete;
+    BmcWebSession& operator=(const BmcWebSession&) = delete;
+
+    StringResponse request(
+        http::verb method,
+        std::string_view target,
+        std::string body,
+        std::string_view content_type,
+        const std::vector<Header>& extra_headers = {});
+
+    CookieJar& cookies();
+    const CookieJar& cookies() const;
+    std::string_view session_token() const;
+    void set_cookie(std::string name, std::string value);
+
+private:
+    friend BmcWebSession login_bmc_web_session(const LoginOptions& options, const BmcLoginProfile& profile);
+
+    void set_session_token(std::string token, std::string_view token_cookie_name);
+
+    Url base_url_;
+    CookieJar cookies_;
+    std::string session_token_;
+    HttpsClient client_;
 };
 
 BmcWebSession login_bmc_web_session(const LoginOptions& options, const BmcLoginProfile& profile);

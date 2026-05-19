@@ -1064,7 +1064,7 @@ void run_pikvm_network_session(
     logout_guard.arm(session);
     log_info() << "pikvm login succeeded";
     if (options.login.verbose) {
-        log_info() << "cookies stored: " << session.cookies.size();
+        log_info() << "cookies stored: " << session.web.cookies().size();
     }
 
     if (stop_requested.load()) {
@@ -1089,7 +1089,7 @@ void run_pikvm_network_session(
         control_thread = std::thread(
             run_pikvm_control_worker,
             options,
-            session.cookies,
+            session.web.cookies(),
             std::ref(state),
             std::ref(stop_requested),
             stop_handles,
@@ -1097,7 +1097,7 @@ void run_pikvm_network_session(
         video_thread = std::thread(
             run_pikvm_video_worker,
             options,
-            session.cookies,
+            session.web.cookies(),
             std::move(d3d11_context),
             std::ref(state),
             std::ref(stop_requested),
