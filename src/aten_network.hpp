@@ -71,11 +71,13 @@ void queue_aten_input_packet(
     AtenViewState& state,
     std::vector<std::uint8_t> packet,
     bool coalesce_mouse_motion);
+
 void queue_aten_key_event(
     AtenViewState& state,
     std::uint32_t usage,
     bool down,
     bool verbose);
+    
 void queue_aten_pointer_event(
     AtenViewState& state,
     int x,

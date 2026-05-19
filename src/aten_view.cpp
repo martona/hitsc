@@ -25,6 +25,9 @@
 #include <vector>
 
 namespace hitsc {
+
+extern std::atomic_bool g_aten_full_framebuffer_refresh_requested;
+
 namespace {
 
 constexpr std::uint64_t kMouseMotionIntervalMilliseconds = 10;
@@ -407,6 +410,7 @@ void run_aten_view(const AtenViewOptions& options)
                 } else if (event.type == SDL_EVENT_WINDOW_RESTORED ||
                            event.type == SDL_EVENT_WINDOW_SHOWN) {
                     visible = true;
+                    g_aten_full_framebuffer_refresh_requested.store(true);
                     render_needed = true;
                     last_status_tick = 0;
                     SDL_SetWindowTitle(window, state->view_status.title(options.login.base_url.host).c_str());

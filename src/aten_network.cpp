@@ -41,11 +41,13 @@ namespace ssl = asio::ssl;
 namespace websocket = boost::beast::websocket;
 using tcp = asio::ip::tcp;
 
+std::atomic_bool g_aten_full_framebuffer_refresh_requested{true};
+
 namespace {
 
 using AtenWebSocket = websocket::stream<beast::ssl_stream<beast::tcp_stream>>;
 
-constexpr std::chrono::milliseconds kAtenFramebufferRequestBackoff{66};
+constexpr std::chrono::milliseconds kAtenFramebufferRequestBackoff{33};
 constexpr std::size_t kMaxQueuedInputPackets = 512;
 constexpr std::size_t kMaxAtenMessagesPerReceiveDrain = 8;
 
@@ -395,7 +397,7 @@ public:
             if (!initial_bytes.empty()) {
                 self->parser_.append(std::move(initial_bytes));
             }
-            self->queue_framebuffer_update_request(false);
+            self->queue_framebuffer_update_request();
             if (self->options_.login.verbose) {
                 log_info() << "requested ATEN framebuffer update";
             }
@@ -746,11 +748,11 @@ private:
                     return;
                 }
 
-                self->queue_framebuffer_update_request(true);
+                self->queue_framebuffer_update_request();
             }));
     }
 
-    void queue_framebuffer_update_request(bool incremental)
+    void queue_framebuffer_update_request()
     {
         if (closed_ || stop_requested_.load() || framebuffer_request_pending_) {
             return;
@@ -761,7 +763,10 @@ private:
         const auto request_height = static_cast<std::uint16_t>(
             previous_height_ > 0 ? previous_height_ : init_.height);
         framebuffer_request_pending_ = true;
-        queue_write(make_framebuffer_update_request(request_width, request_height, incremental), false);
+        queue_write(make_framebuffer_update_request(request_width,
+                        request_height, 
+                        !g_aten_full_framebuffer_refresh_requested.exchange(false)),
+                    false);
     }
 
     void queue_write(std::vector<std::uint8_t> packet, bool coalesce_mouse_motion)
