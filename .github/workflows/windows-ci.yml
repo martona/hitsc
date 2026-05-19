@@ -26,6 +26,7 @@ jobs:
         shell: pwsh
 
     env:
+      HITSC_RELEASE_TRIPLET: x64-windows-static
       VCPKG_ROOT: ${{ github.workspace }}\vcpkg
       VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}\vcpkg-cache,readwrite
 
@@ -35,10 +36,21 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Read vcpkg baseline
+        id: vcpkg-baseline
+        run: |
+          $manifest = Get-Content -Raw vcpkg.json | ConvertFrom-Json
+          $baseline = $manifest.'builtin-baseline'
+          if (-not $baseline) {
+            throw "vcpkg.json must define builtin-baseline for CI."
+          }
+          "ref=$baseline" >> $env:GITHUB_OUTPUT
+
       - name: Checkout vcpkg
         uses: actions/checkout@v6
         with:
           repository: Microsoft/vcpkg
+          ref: ${{ steps.vcpkg-baseline.outputs.ref }}
           path: vcpkg
           persist-credentials: false
 
@@ -52,12 +64,12 @@ jobs:
         uses: actions/cache@v5
         with:
           path: vcpkg-cache
-          key: ${{ runner.os }}-vcpkg-x64-windows-static-${{ hashFiles('vcpkg.json') }}
+          key: ${{ runner.os }}-vcpkg-${{ env.HITSC_RELEASE_TRIPLET }}-${{ hashFiles('vcpkg.json') }}
           restore-keys: |
-            ${{ runner.os }}-vcpkg-x64-windows-static-
+            ${{ runner.os }}-vcpkg-${{ env.HITSC_RELEASE_TRIPLET }}-
 
       - name: Build Release
-        run: .\scripts\build_windows.ps1 -BuildType Release
+        run: .\scripts\build_windows.ps1 -BuildType Release -Triplet $env:HITSC_RELEASE_TRIPLET
 
       - name: Verify static dependency closure
         run: |
