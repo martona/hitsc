@@ -3,6 +3,7 @@
 #include "app_info.hpp"
 #include "aten_view.hpp"
 #include "console.hpp"
+#include "errors.hpp"
 #include "megarac_view.hpp"
 #include "options.hpp"
 #include "pikvm_view.hpp"
@@ -13,7 +14,6 @@
 
 #include <cstdlib>
 #include <iostream>
-#include <stdexcept>
 #include <string>
 
 namespace hitsc {
@@ -28,7 +28,7 @@ void fill_default_credentials(LoginOptions& options, const std::string& password
     if (options.password.empty() && !password_env_name.empty()) {
         options.password = read_env(password_env_name);
         if (options.password.empty()) {
-            throw std::invalid_argument(
+            throw UserError(
                 "password environment variable is empty or not set: " + password_env_name);
         }
     }
@@ -38,13 +38,13 @@ void fill_default_credentials(LoginOptions& options, const std::string& password
     }
 
     if (options.username.empty()) {
-        throw std::invalid_argument("missing username; pass --username or set HITSC_USERNAME");
+        throw UserError("missing username; pass --username or set HITSC_USERNAME");
     }
     if (options.password.empty()) {
         options.password = read_password_from_console("Password for " + options.username + ": ");
     }
     if (options.password.empty()) {
-        throw std::invalid_argument("empty password entered");
+        throw UserError("empty password entered");
     }
 }
 
@@ -83,7 +83,7 @@ PikvmVideoDecodeMode parse_pikvm_video_decode_mode(const std::string& value)
     if (value == "d3d11") {
         return PikvmVideoDecodeMode::d3d11;
     }
-    throw std::invalid_argument("unknown PiKVM video decode mode: " + value);
+    throw UserError("unknown PiKVM video decode mode: " + value);
 }
 
 } // namespace

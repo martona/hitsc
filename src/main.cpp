@@ -1,5 +1,6 @@
 #include "cli.hpp"
 #include "diagnostics.hpp"
+#include "errors.hpp"
 #include "log.hpp"
 
 #include <cstdlib>
@@ -12,6 +13,9 @@ int main(int argc, char* argv[])
 
     try {
         return hitsc::run_cli(argc, argv);
+    } catch (const hitsc::UserError& ex) {
+        std::cerr << "hitsc: " << ex.what() << "\n";
+        return EXIT_FAILURE;
     } catch (const std::exception& ex) {
         hitsc::print_exception_with_stack(std::cerr, ex, "main");
         std::cerr << "Try 'hitsc --help'.\n";

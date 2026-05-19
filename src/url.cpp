@@ -1,6 +1,6 @@
 #include "url.hpp"
 
-#include <stdexcept>
+#include "errors.hpp"
 
 namespace hitsc {
 namespace {
@@ -25,7 +25,7 @@ Url parse_https_url(std::string_view raw_url)
 {
     constexpr std::string_view scheme = "https://";
     if (!starts_with(raw_url, scheme)) {
-        throw std::invalid_argument("expected an https:// URL");
+        throw UserError("expected an https:// URL");
     }
 
     std::string_view rest = raw_url.substr(scheme.size());
@@ -40,11 +40,11 @@ Url parse_https_url(std::string_view raw_url)
         target_start == std::string_view::npos ? std::string_view{} : rest.substr(target_start);
 
     if (authority.empty()) {
-        throw std::invalid_argument("URL host is empty");
+        throw UserError("URL host is empty");
     }
 
     if (authority.find('@') != std::string_view::npos) {
-        throw std::invalid_argument("URL userinfo is not supported");
+        throw UserError("URL userinfo is not supported");
     }
 
     std::string_view host = authority;
@@ -53,14 +53,14 @@ Url parse_https_url(std::string_view raw_url)
     if (authority.front() == '[') {
         const auto close = authority.find(']');
         if (close == std::string_view::npos) {
-            throw std::invalid_argument("IPv6 address is missing ']'");
+            throw UserError("IPv6 address is missing ']'");
         }
 
         host = authority.substr(0, close + 1);
         const auto suffix = authority.substr(close + 1);
         if (!suffix.empty()) {
             if (suffix.front() != ':' || suffix.size() == 1) {
-                throw std::invalid_argument("invalid port after IPv6 address");
+                throw UserError("invalid port after IPv6 address");
             }
             port = suffix.substr(1);
         }
@@ -68,12 +68,12 @@ Url parse_https_url(std::string_view raw_url)
         const auto first_colon = authority.find(':');
         const auto last_colon = authority.rfind(':');
         if (first_colon != last_colon) {
-            throw std::invalid_argument("IPv6 addresses must be wrapped in []");
+            throw UserError("IPv6 addresses must be wrapped in []");
         }
 
         if (last_colon != std::string_view::npos) {
             if (last_colon == authority.size() - 1) {
-                throw std::invalid_argument("URL port is empty");
+                throw UserError("URL port is empty");
             }
             host = authority.substr(0, last_colon);
             port = authority.substr(last_colon + 1);
@@ -81,7 +81,7 @@ Url parse_https_url(std::string_view raw_url)
     }
 
     if (host.empty()) {
-        throw std::invalid_argument("URL host is empty");
+        throw UserError("URL host is empty");
     }
 
     std::string target = target_part.empty() ? "/" : std::string(target_part);

@@ -1,6 +1,7 @@
 #include "pikvm_view.hpp"
 
 #include "diagnostics.hpp"
+#include "errors.hpp"
 #include "log.hpp"
 #include "pikvm_events.hpp"
 #include "pikvm_input.hpp"
@@ -305,11 +306,11 @@ PikvmRendererSetup create_pikvm_renderer(SDL_Window* window, const PikvmViewOpti
             if (options.video_decode == PikvmVideoDecodeMode::d3d11) {
                 SDL_DestroyRenderer(renderer);
                 if (software_adapter) {
-                    throw std::runtime_error(
+                    throw UserError(
                         "SDL direct3d11 renderer is using a software adapter"
                         + (adapter_description.empty() ? std::string{} : ": " + adapter_description));
                 }
-                throw std::runtime_error("SDL direct3d11 renderer did not expose a D3D11 device");
+                throw UserError("SDL direct3d11 renderer did not expose a D3D11 device");
             }
 
             if (options.login.verbose) {
@@ -325,7 +326,7 @@ PikvmRendererSetup create_pikvm_renderer(SDL_Window* window, const PikvmViewOpti
         }
 
         if (options.video_decode == PikvmVideoDecodeMode::d3d11) {
-            throw std::runtime_error("failed to create SDL direct3d11 renderer: " + d3d11_error);
+            throw UserError("failed to create SDL direct3d11 renderer: " + d3d11_error);
         }
         if (options.login.verbose) {
             log_warning() << "failed to create SDL direct3d11 renderer; using default renderer: "
@@ -1144,6 +1145,20 @@ void run_pikvm_view(const PikvmViewOptions& options)
     PikvmKeyDownState key_down{};
     PikvmMouseButtonDownState mouse_down{};
 
+    auto cleanup_after_exception = [&] {
+        clear_pikvm_local_mouse_capture(mouse_down);
+        stop_pikvm_network(*state, *stop_requested, network_thread, options.login.verbose);
+        clear_pikvm_frame(*state);
+        destroy_pikvm_texture(texture, d3d11_context);
+        destroy_pikvm_renderer(renderer, d3d11_context);
+        if (window != nullptr) {
+            SDL_DestroyWindow(window);
+            window = nullptr;
+        }
+        d3d11_context.reset();
+        SDL_Quit();
+    };
+
     try {
         const Uint32 frame_event_type = SDL_RegisterEvents(1);
         if (frame_event_type == 0) {
@@ -1495,19 +1510,12 @@ void run_pikvm_view(const PikvmViewOptions& options)
         if (options.login.verbose) {
             maybe_log_pikvm_frame_latency(frame_latency, last_frame_latency_log, true);
         }
+    } catch (const UserError&) {
+        cleanup_after_exception();
+        throw;
     } catch (...) {
         print_current_exception_with_stack(std::cerr, "pikvm view ui thread");
-        clear_pikvm_local_mouse_capture(mouse_down);
-        stop_pikvm_network(*state, *stop_requested, network_thread, options.login.verbose);
-        clear_pikvm_frame(*state);
-        destroy_pikvm_texture(texture, d3d11_context);
-        destroy_pikvm_renderer(renderer, d3d11_context);
-        if (window != nullptr) {
-            SDL_DestroyWindow(window);
-            window = nullptr;
-        }
-        d3d11_context.reset();
-        SDL_Quit();
+        cleanup_after_exception();
         throw;
     }
 

@@ -1,6 +1,7 @@
 #include "pikvm_session.hpp"
 
 #include "bmc_session.hpp"
+#include "errors.hpp"
 #include "http_client.hpp"
 #include "log.hpp"
 #include "text.hpp"
@@ -39,10 +40,16 @@ const BmcLoginProfile& pikvm_login_profile()
 
 PikvmSession login_pikvm(const LoginOptions& options)
 {
-    BmcWebSession web_session = login_bmc_web_session(options, pikvm_login_profile());
-    PikvmSession session;
-    session.cookies = std::move(web_session.cookies);
-    return session;
+    try {
+        BmcWebSession web_session = login_bmc_web_session(options, pikvm_login_profile());
+        PikvmSession session;
+        session.cookies = std::move(web_session.cookies);
+        return session;
+    } catch (const UserError&) {
+        throw;
+    } catch (const std::exception& ex) {
+        throw UserError(std::string("pikvm login failed: ") + ex.what());
+    }
 }
 
 bool logout_pikvm(const LoginOptions& options, CookieJar& cookies)

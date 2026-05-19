@@ -1,5 +1,6 @@
 #include "pikvm_video.hpp"
 
+#include "errors.hpp"
 #include "log.hpp"
 
 #include <boost/asio/buffer.hpp>
@@ -260,12 +261,12 @@ struct PikvmH264Decoder::Impl {
     {
         codec = avcodec_find_decoder(AV_CODEC_ID_H264);
         if (codec == nullptr) {
-            throw std::runtime_error("FFmpeg H.264 decoder is not available");
+            throw UserError("FFmpeg H.264 decoder is not available");
         }
 
         parser = av_parser_init(AV_CODEC_ID_H264);
         if (parser == nullptr) {
-            throw std::runtime_error("FFmpeg H.264 parser is not available");
+            throw UserError("FFmpeg H.264 parser is not available");
         }
 
         packet = av_packet_alloc();
@@ -311,7 +312,7 @@ struct PikvmH264Decoder::Impl {
             } catch (const std::exception& error) {
                 close_decoder_context();
                 if (requested_decode_mode == PikvmVideoDecodeMode::d3d11) {
-                    throw;
+                    throw UserError("D3D11 H.264 decode unavailable: " + std::string(error.what()));
                 }
                 log_warning() << "D3D11 H.264 decode unavailable; using software decode: "
                               << error.what();
@@ -720,9 +721,8 @@ private:
                 || error == asio::error::operation_aborted
                 || error == asio::error::bad_descriptor;
             if (!expected_stop) {
-                log_error() << "pikvm video websocket read error: " << error.message();
                 on_error_(std::make_exception_ptr(
-                    beast::system_error(error, "PiKVM video websocket read failed")));
+                    UserError("PiKVM video websocket read failed: " + error.message())));
             }
             closed_ = true;
             return;
@@ -765,7 +765,7 @@ private:
 
         const std::string profile_level_id = media_h264_profile_level_id(text);
         if (profile_level_id.empty()) {
-            throw std::runtime_error("PiKVM media websocket did not advertise H.264");
+            throw UserError("PiKVM media websocket did not advertise H.264");
         }
 
         log_info() << "pikvm media H.264 available"
@@ -797,7 +797,7 @@ private:
         }
         if (error) {
             on_error_(std::make_exception_ptr(
-                beast::system_error(error, "PiKVM media start write failed")));
+                UserError("PiKVM media start write failed: " + error.message())));
             closed_ = true;
             return;
         }

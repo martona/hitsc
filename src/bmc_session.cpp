@@ -1,5 +1,6 @@
 #include "bmc_session.hpp"
 
+#include "errors.hpp"
 #include "http_client.hpp"
 #include "text.hpp"
 #include "url.hpp"
@@ -7,7 +8,6 @@
 #include <boost/beast/http.hpp>
 
 #include <cstdint>
-#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -110,7 +110,7 @@ BmcWebSession login_bmc_web_session(const LoginOptions& options, const BmcLoginP
     const int status = static_cast<int>(response.result_int());
     if (status < 200 || status > profile.max_success_status) {
         const std::string body = decode_response_body(response);
-        throw std::runtime_error(
+        throw UserError(
             profile.vendor_name + " login failed with HTTP "
             + std::to_string(status) + ": " + body_snippet(body));
     }
