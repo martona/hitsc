@@ -377,6 +377,8 @@ void run_megarac_view(const MegaracViewOptions& options)
                 } else if (event.type == SDL_EVENT_WINDOW_RESTORED ||
                            event.type == SDL_EVENT_WINDOW_SHOWN) {
                     visible = true;
+                    clear_latest_megarac_view_frame(*state);
+                    last_sequence = 0;
                     queue_megarac_view_packet(
                         *state,
                         kCmdGetFullScreen,
