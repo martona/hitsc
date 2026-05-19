@@ -62,6 +62,18 @@ std::vector<std::uint8_t> buffer_bytes(const beast::flat_buffer& buffer)
     return bytes;
 }
 
+void append_buffer_bytes(std::vector<std::uint8_t>& destination, const beast::flat_buffer& source)
+{
+    const std::size_t size = boost::asio::buffer_size(source.data());
+    if (size == 0) {
+        return;
+    }
+
+    const std::size_t offset = destination.size();
+    destination.resize(offset + size);
+    boost::asio::buffer_copy(boost::asio::buffer(destination.data() + offset, size), source.data());
+}
+
 std::string ascii_from_bytes(const std::vector<std::uint8_t>& bytes)
 {
     return std::string(bytes.begin(), bytes.end());
@@ -142,8 +154,7 @@ private:
     {
         beast::flat_buffer buffer;
         ws_.read(buffer);
-        std::vector<std::uint8_t> bytes = buffer_bytes(buffer);
-        buffer_.insert(buffer_.end(), bytes.begin(), bytes.end());
+        append_buffer_bytes(buffer_, buffer);
     }
 
     void compact_if_needed()
