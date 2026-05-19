@@ -32,6 +32,7 @@ namespace hitsc {
 namespace {
 
 std::once_flag g_aspeed_init_once;
+std::mutex g_aspeed_decode_mutex;
 
 void append_le_word(std::vector<unsigned long>& words, std::size_t word_index, std::uint8_t byte, int byte_index)
 {
@@ -63,11 +64,6 @@ std::vector<std::uint8_t> AspeedDecoder::decode_rgba(
         throw std::invalid_argument("ASPEED compressed frame is too large");
     }
 
-    std::vector<unsigned long> input_words((compressed.size() + 3) / 4 + 2);
-    for (std::size_t i = 0; i < compressed.size(); ++i) {
-        append_le_word(input_words, i / 4, compressed[i], static_cast<int>(i % 4));
-    }
-
     const std::size_t output_size =
         static_cast<std::size_t>(options.width) * static_cast<std::size_t>(options.height) * 4;
     std::vector<std::uint8_t> output(output_size, 0xff);
@@ -78,16 +74,51 @@ std::vector<std::uint8_t> AspeedDecoder::decode_rgba(
         output = *previous_rgba;
     }
 
+    decode_rgba_into(options, compressed, output);
+
+    return output;
+}
+
+void AspeedDecoder::decode_rgba_into(
+    const AspeedDecodeOptions& options,
+    const std::vector<std::uint8_t>& compressed,
+    std::span<std::uint8_t> output_rgba)
+{
+    if (options.width <= 0 || options.height <= 0) {
+        throw std::invalid_argument("ASPEED frame has invalid dimensions");
+    }
+    if (options.width > 8192 || options.height > 8192) {
+        throw std::invalid_argument("ASPEED frame dimensions are implausibly large");
+    }
+    if (compressed.empty()) {
+        throw std::invalid_argument("ASPEED compressed frame is empty");
+    }
+    if (compressed.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        throw std::invalid_argument("ASPEED compressed frame is too large");
+    }
+
+    const std::size_t output_size =
+        static_cast<std::size_t>(options.width) * static_cast<std::size_t>(options.height) * 4;
+    if (output_rgba.size() != output_size) {
+        throw std::invalid_argument("ASPEED output buffer size does not match dimensions");
+    }
+
+    std::vector<unsigned long> input_words((compressed.size() + 3) / 4 + 2);
+    for (std::size_t i = 0; i < compressed.size(); ++i) {
+        append_le_word(input_words, i / 4, compressed[i], static_cast<int>(i % 4));
+    }
+
     const unsigned chroma_selector =
         options.use_separate_chroma_selectors ? options.chroma_table_selector : options.jpeg_table_selector;
     const unsigned advance_chroma_selector = options.use_separate_chroma_selectors
         ? options.advance_chroma_table_selector
         : options.advance_table_selector;
 
+    std::lock_guard lock(g_aspeed_decode_mutex);
     decode_ext(
         input_words.data(),
         static_cast<int>(compressed.size()),
-        output.data(),
+        output_rgba.data(),
         options.width,
         options.height,
         options.mode420,
@@ -95,8 +126,6 @@ std::vector<std::uint8_t> AspeedDecoder::decode_rgba(
         chroma_selector,
         options.advance_table_selector,
         advance_chroma_selector);
-
-    return output;
 }
 
 } // namespace hitsc

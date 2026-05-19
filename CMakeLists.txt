@@ -45,6 +45,8 @@ endif()
 
 add_executable(
   hitsc
+  src/aten_network.cpp
+  src/aten_protocol.cpp
   src/aten_session.cpp
   src/aten_view.cpp
   src/aspeed_decoder.cpp

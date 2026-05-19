@@ -112,15 +112,11 @@ It's an efficient and well-structured protocol, that has its quirks from impleme
 
 ### Supermicro / ATEN
 
-This is a VNC-based protocol. It talks on a secure WebSocket, so at least that part is good. It uses proprietary vendor-specific packets for screen deltas (the same [aspeed_codec](https://github.com/AspeedTech-BMC/aspeed_codec) as MegaRAC), USB-encoded HID input for mouse & keyboard events, and HW cursor packets with position and image data that's been observed to be empty in the test environment.
-
-The reason I'm salty about this protocol is that screen updates are based on a request-response pattern as per the VNC standard, but the requests aren't held on the host until they can be responded to with meaningful data - rather, the server diffs its screen into a new frame and sends it to the client immediately, more often than not in what is effectively a NOP packet. Given the BMC's compute constraints, this limits updates to about 15 fps: the client implements a 66ms delay from when the last screen update is processed, then requests a new update. This is the value used by the HTML client, and unfortunately we can't do anything better; dropping this delay to a "borderline not unpleasant" value of 33ms/30fps causes the BMC to be overworked, resulting in stuck keys, delayed response, and an overall unusable product.
-
-So it works, but it's not great, and it likely won't ever be.
+This is a VNC-based protocol. It talks on a secure WebSocket, and it uses proprietary vendor-specific packets for screen deltas (the same [aspeed_codec](https://github.com/AspeedTech-BMC/aspeed_codec) as MegaRAC), USB-encoded HID input for mouse & keyboard events, and HW cursor packets with position and image data that's been observed to be empty in the test environment.
 
 ### PiKVM
 
-PiKVM is a modern proprietary protocol in that it's only in use by the PiKVM project, but it's fully open source. It can be taxing on the CPU if no hardware-acceleration is available for H.264 decoding, but otherwise it's capable of 1080p 25-30 FPS and low CPU use with zero-copy GPU playback. KVMD 4.29 or newer only; older PiKVM releases do not implement H.264 streaming over websockets. 
+PiKVM is a modern proprietary protocol in that it's only in use by the PiKVM project, but it's fully open source. It can be taxing on the client's CPU if no hardware-acceleration is available for H.264 decoding, but otherwise it's capable of 1080p 25-30 FPS and low CPU use with zero-copy GPU playback. KVMD 4.29 or newer only; older PiKVM releases do not implement H.264 streaming over websockets. 
 
 WebRTC is attractive due to its lower latency and audio support, but not implemented yet.
 
