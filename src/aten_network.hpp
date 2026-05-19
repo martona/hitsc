@@ -1,6 +1,7 @@
 #pragma once
 
 #include "aten_protocol.hpp"
+#include "hardware_cursor.hpp"
 #include "options.hpp"
 #include "view_status.hpp"
 
@@ -12,6 +13,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <thread>
 #include <vector>
 
@@ -38,6 +40,7 @@ struct AtenViewState {
     std::mutex frame_mutex;
     std::mutex control_mutex;
     std::shared_ptr<const AtenCompressedFrame> frame;
+    HardwareCursor cursor;
     std::atomic_uint32_t frame_event_type{0};
     std::atomic_bool frame_event_pending{false};
     ViewStatus view_status;
@@ -46,6 +49,8 @@ struct AtenViewState {
     std::function<void(std::vector<std::uint8_t>, bool)> input_sink;
     std::deque<PendingAtenInputPacket> pending_input;
     std::uint64_t frame_sequence = 0;
+    std::uint64_t cursor_sequence = 0;
+    bool has_cursor = false;
 };
 
 void run_aten_network_session(
@@ -66,6 +71,10 @@ std::shared_ptr<const AtenCompressedFrame> take_latest_aten_frame(
     AtenViewState& state,
     std::uint64_t last_sequence);
 void clear_latest_aten_frame(AtenViewState& state);
+
+std::optional<HardwareCursor> take_latest_aten_cursor(
+    AtenViewState& state,
+    std::uint64_t last_sequence);
 
 void queue_aten_input_packet(
     AtenViewState& state,

@@ -1361,7 +1361,7 @@ void run_pikvm_view(const PikvmViewOptions& options)
                             queue_pikvm_mouse_move_event(
                                 *state,
                                 *position,
-                                !drag_active,
+                                !options.login.debug_disable_input_coalescing && !drag_active,
                                 ui_event_at);
                             last_mouse_motion_ticks = ticks;
                         }

@@ -1,7 +1,7 @@
 #pragma once
 
 #include "aspeed_decoder.hpp"
-#include "megarac_cursor.hpp"
+#include "hardware_cursor.hpp"
 #include "megarac_hid.hpp"
 #include "options.hpp"
 #include "view_status.hpp"

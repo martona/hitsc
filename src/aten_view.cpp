@@ -6,6 +6,8 @@
 #include "aten_protocol.hpp"
 #include "diagnostics.hpp"
 #include "log.hpp"
+#include "hardware_cursor.hpp"
+#include "hardware_cursor_presenter.hpp"
 
 #include <SDL3/SDL.h>
 
@@ -21,6 +23,7 @@
 #include <optional>
 #include <stdexcept>
 #include <thread>
+#include <utility>
 
 namespace hitsc {
 
@@ -138,9 +141,11 @@ void run_aten_view(const AtenViewOptions& options)
     auto network_done = std::make_shared<std::atomic_bool>(false);
     std::thread network_thread;
     AspeedPresenter presenter;
+    HardwareCursorPresenter cursor_presenter;
 
     auto cleanup = [&] {
         presenter.destroy();
+        cursor_presenter.destroy();
         if (renderer != nullptr) {
             SDL_DestroyRenderer(renderer);
             renderer = nullptr;
@@ -192,8 +197,11 @@ void run_aten_view(const AtenViewOptions& options)
         bool visible = true;
         bool close_event_logged = false;
         std::uint64_t last_sequence = 0;
+        std::uint64_t last_cursor_sequence = 0;
         std::uint64_t last_status_tick = 0;
         int presented_frames = 0;
+        HardwareCursor hardware_cursor;
+        bool has_hardware_cursor = false;
         std::uint8_t mouse_buttons = 0;
         std::uint64_t last_mouse_motion_ticks = 0;
         AtenKeyDownState key_down{};
@@ -219,7 +227,9 @@ void run_aten_view(const AtenViewOptions& options)
                     state->view_status.minimize();
                     clear_latest_aten_frame(*state);
                     presenter.destroy();
+                    cursor_presenter.destroy();
                     last_sequence = 0;
+                    last_cursor_sequence = 0;
                     last_status_tick = 0;
                     SDL_SetWindowTitle(window, state->view_status.title(options.login.base_url.host).c_str());
                 } else if (event.type == SDL_EVENT_WINDOW_RESTORED ||
@@ -307,7 +317,7 @@ void run_aten_view(const AtenViewOptions& options)
                                 position->x,
                                 position->y,
                                 mouse_buttons,
-                                mouse_buttons == 0,
+                                !options.login.debug_disable_input_coalescing && mouse_buttons == 0,
                                 options.login.verbose);
                             last_mouse_motion_ticks = ticks;
                         }
@@ -348,6 +358,15 @@ void run_aten_view(const AtenViewOptions& options)
             }
 
             if (visible) {
+                bool cursor_texture_dirty = false;
+                if (std::optional<HardwareCursor> cursor =
+                        take_latest_aten_cursor(*state, last_cursor_sequence)) {
+                    hardware_cursor = std::move(*cursor);
+                    last_cursor_sequence = hardware_cursor.sequence;
+                    has_hardware_cursor = true;
+                    cursor_texture_dirty = true;
+                }
+
                 const std::shared_ptr<const AtenCompressedFrame> frame =
                     take_latest_aten_frame(*state, last_sequence);
                 if (frame) {
@@ -371,6 +390,20 @@ void run_aten_view(const AtenViewOptions& options)
                     }
                     render_needed = true;
                     presented_new_frame = true;
+                    cursor_texture_dirty = has_hardware_cursor;
+                }
+
+                if (cursor_texture_dirty && has_hardware_cursor) {
+                    const AspeedPresentationSlot* active = presenter.active_slot();
+                    if (active != nullptr) {
+                        const CursorImage cursor_image = make_cursor_image(
+                            hardware_cursor,
+                            active->shadow,
+                            active->width,
+                            active->height);
+                        cursor_presenter.update(renderer, cursor_image);
+                        render_needed = true;
+                    }
                 }
 
                 if (render_needed) {
@@ -380,6 +413,14 @@ void run_aten_view(const AtenViewOptions& options)
                         active != nullptr && active->texture != nullptr) {
                         const SDL_FRect target = current_target_rect(window, active->width, active->height);
                         SDL_RenderTexture(renderer, active->texture, nullptr, &target);
+                        if (has_hardware_cursor) {
+                            cursor_presenter.render(
+                                renderer,
+                                hardware_cursor,
+                                target,
+                                active->width,
+                                active->height);
+                        }
                     }
                     SDL_RenderPresent(renderer);
                     if (presented_new_frame) {

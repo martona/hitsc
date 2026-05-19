@@ -1,4 +1,4 @@
-#include "megarac_cursor.hpp"
+#include "hardware_cursor.hpp"
 
 #include "megarac_protocol.hpp"
 
@@ -47,7 +47,7 @@ void set_cursor_pixel(
     image.rgba[offset + 3] = alpha;
 }
 
-CursorImage make_fallback_cursor_image(const MegaracHardwareCursor& cursor, int frame_width, int frame_height)
+CursorImage make_fallback_cursor_image(const HardwareCursor& cursor, int frame_width, int frame_height)
 {
     CursorImage image;
     image.width = std::min(kHardwareCursorFallbackWidth, std::max(0, frame_width - cursor.x));
@@ -96,6 +96,8 @@ std::optional<MegaracHardwareCursor> parse_hardware_cursor_packet(
     cursor.y = load_le16(payload, 7);
     cursor.x_offset = std::min<int>(load_le16(payload, 9), static_cast<int>(kHardwareCursorPatternSize - 1));
     cursor.y_offset = std::min<int>(load_le16(payload, 11), static_cast<int>(kHardwareCursorPatternSize - 1));
+    cursor.pattern_width = kHardwareCursorPatternSize;
+    cursor.pattern_height = kHardwareCursorPatternSize;
 
     if (payload.size() > kHardwareCursorHeaderSize) {
         cursor.pattern = parse_hardware_cursor_pattern(payload);
@@ -112,19 +114,19 @@ std::optional<MegaracHardwareCursor> parse_hardware_cursor_packet(
 
     cursor.width = std::min(
         source_width - cursor.x,
-        static_cast<int>(kHardwareCursorPatternSize) - cursor.x_offset);
+        std::max(0, cursor.pattern_width - cursor.x_offset));
     if (cursor.type != 1) {
         cursor.width = std::min(cursor.width, 32);
     }
     cursor.height = std::min(
         source_height - cursor.y,
-        static_cast<int>(kHardwareCursorPatternSize) - cursor.y_offset);
+        std::max(0, cursor.pattern_height - cursor.y_offset));
     cursor.visible = cursor.width > 0 && cursor.height > 0;
     return cursor;
 }
 
 CursorImage make_cursor_image(
-    const MegaracHardwareCursor& cursor,
+    const HardwareCursor& cursor,
     const std::vector<std::uint8_t>& framebuffer,
     int frame_width,
     int frame_height)
@@ -132,7 +134,11 @@ CursorImage make_cursor_image(
     if (!cursor.visible || frame_width <= 0 || frame_height <= 0) {
         return {};
     }
-    if (!cursor.has_pattern || cursor.pattern.size() < kHardwareCursorPatternPixels) {
+    const int pattern_width = cursor.pattern_width > 0 ? cursor.pattern_width : kHardwareCursorPatternSize;
+    const int pattern_height = cursor.pattern_height > 0 ? cursor.pattern_height : kHardwareCursorPatternSize;
+    const std::size_t pattern_pixels =
+        static_cast<std::size_t>(pattern_width) * static_cast<std::size_t>(pattern_height);
+    if (!cursor.has_pattern || cursor.pattern.size() < pattern_pixels) {
         return make_fallback_cursor_image(cursor, frame_width, frame_height);
     }
 
@@ -150,7 +156,7 @@ CursorImage make_cursor_image(
     for (int row = 0; row < image.height; ++row) {
         for (int column = 0; column < image.width; ++column) {
             const std::size_t pattern_index =
-                static_cast<std::size_t>(row + cursor.y_offset) * kHardwareCursorPatternSize
+                static_cast<std::size_t>(row + cursor.y_offset) * static_cast<std::size_t>(pattern_width)
                 + static_cast<std::size_t>(column + cursor.x_offset);
             const std::uint16_t cursor_data = cursor.pattern[pattern_index];
             const std::uint8_t red = static_cast<std::uint8_t>((cursor_data & 0x0f00) >> 4);

@@ -63,6 +63,7 @@ struct AtenCursorPositionMessage {
     std::uint32_t valid = 0;
     std::uint32_t pattern_type = 0;
     std::uint64_t pattern_size = 0;
+    std::vector<std::uint8_t> pattern;
 };
 
 enum class AtenRfbMessageKind {

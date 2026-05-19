@@ -20,13 +20,16 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <deque>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace hitsc {
 namespace asio = boost::asio;
@@ -48,6 +51,90 @@ constexpr std::size_t kMaxAtenMessagesPerReceiveDrain = 8;
 struct AtenQueuedWrite {
     std::vector<std::uint8_t> packet;
 };
+
+std::uint16_t load_cursor_pattern_word(
+    const std::vector<std::uint8_t>& bytes,
+    std::size_t offset,
+    bool big_endian)
+{
+    if (big_endian) {
+        return load_be16(bytes, offset);
+    }
+    if (offset + 2 > bytes.size()) {
+        throw std::runtime_error("truncated little-endian cursor pattern word");
+    }
+    return static_cast<std::uint16_t>(bytes[offset]) |
+           static_cast<std::uint16_t>(bytes[offset + 1] << 8);
+}
+
+int clamped_cursor_coordinate(std::uint32_t value)
+{
+    return static_cast<int>(std::min<std::uint32_t>(
+        value,
+        static_cast<std::uint32_t>(std::numeric_limits<int>::max())));
+}
+
+std::vector<std::uint16_t> decode_aten_cursor_pattern(
+    const std::vector<std::uint8_t>& bytes,
+    bool big_endian)
+{
+    std::vector<std::uint16_t> pattern(bytes.size() / 2U);
+    for (std::size_t index = 0; index < pattern.size(); ++index) {
+        pattern[index] = load_cursor_pattern_word(bytes, index * 2U, big_endian);
+    }
+    return pattern;
+}
+
+HardwareCursor make_aten_hardware_cursor(
+    const AtenCursorPositionMessage& message,
+    const std::vector<std::uint16_t>& cached_pattern,
+    int cached_pattern_width,
+    int cached_pattern_height,
+    int source_width,
+    int source_height,
+    bool big_endian)
+{
+    HardwareCursor cursor;
+    cursor.type = clamped_cursor_coordinate(message.pattern_type);
+    cursor.x = clamped_cursor_coordinate(message.x);
+    cursor.y = clamped_cursor_coordinate(message.y);
+    cursor.x_offset = 0;
+    cursor.y_offset = 0;
+
+    if (!message.pattern.empty()) {
+        cursor.pattern = decode_aten_cursor_pattern(message.pattern, big_endian);
+        cursor.pattern_width = clamped_cursor_coordinate(message.width);
+        cursor.pattern_height = clamped_cursor_coordinate(message.height);
+        cursor.pattern_from_packet = true;
+    } else if (!cached_pattern.empty()) {
+        cursor.pattern = cached_pattern;
+        cursor.pattern_width = cached_pattern_width;
+        cursor.pattern_height = cached_pattern_height;
+    } else {
+        cursor.pattern_width = clamped_cursor_coordinate(message.width);
+        cursor.pattern_height = clamped_cursor_coordinate(message.height);
+    }
+
+    cursor.has_pattern = !cursor.pattern.empty();
+    if (source_width <= 0) {
+        source_width = cursor.pattern_width;
+    }
+    if (source_height <= 0) {
+        source_height = cursor.pattern_height;
+    }
+    if (source_width <= 0 || source_height <= 0 ||
+        cursor.x >= source_width || cursor.y >= source_height) {
+        cursor.visible = false;
+        return cursor;
+    }
+
+    const int pattern_width = cursor.pattern_width > 0 ? cursor.pattern_width : 15;
+    const int pattern_height = cursor.pattern_height > 0 ? cursor.pattern_height : 15;
+    cursor.width = std::min(source_width - cursor.x, pattern_width);
+    cursor.height = std::min(source_height - cursor.y, pattern_height);
+    cursor.visible = cursor.width > 0 && cursor.height > 0;
+    return cursor;
+}
 
 std::vector<std::uint8_t> buffer_bytes(const beast::flat_buffer& buffer)
 {
@@ -321,6 +408,18 @@ void set_aten_force_close(AtenViewState& state, std::function<void()> force_clos
     state.force_close = std::move(force_close);
 }
 
+void push_aten_render_event(AtenViewState& state)
+{
+    const auto frame_event_type = static_cast<Uint32>(state.frame_event_type.load());
+    if (frame_event_type != 0 && !state.frame_event_pending.exchange(true)) {
+        SDL_Event event{};
+        event.type = frame_event_type;
+        if (!SDL_PushEvent(&event)) {
+            state.frame_event_pending.store(false);
+        }
+    }
+}
+
 void publish_aten_frame(AtenViewState& state, AtenCompressedFrame frame)
 {
     frame.published_at = std::chrono::steady_clock::now();
@@ -330,14 +429,19 @@ void publish_aten_frame(AtenViewState& state, AtenCompressedFrame frame)
         state.frame = std::make_shared<AtenCompressedFrame>(std::move(frame));
     }
 
-    const auto frame_event_type = static_cast<Uint32>(state.frame_event_type.load());
-    if (frame_event_type != 0 && !state.frame_event_pending.exchange(true)) {
-        SDL_Event event{};
-        event.type = frame_event_type;
-        if (!SDL_PushEvent(&event)) {
-            state.frame_event_pending.store(false);
-        }
+    push_aten_render_event(state);
+}
+
+void publish_aten_cursor(AtenViewState& state, HardwareCursor cursor)
+{
+    {
+        std::lock_guard lock(state.frame_mutex);
+        cursor.sequence = ++state.cursor_sequence;
+        state.cursor = std::move(cursor);
+        state.has_cursor = true;
     }
+
+    push_aten_render_event(state);
 }
 
 void install_aten_input_sink(
@@ -690,12 +794,30 @@ private:
     void handle_cursor_position(const AtenCursorPositionMessage& cursor)
     {
         cursor_position_request_pending_ = false;
+        HardwareCursor hardware_cursor = make_aten_hardware_cursor(
+            cursor,
+            cursor_pattern_,
+            cursor_pattern_width_,
+            cursor_pattern_height_,
+            previous_width_ > 0 ? previous_width_ : init_.width,
+            previous_height_ > 0 ? previous_height_ : init_.height,
+            init_.big_endian);
+        if (hardware_cursor.pattern_from_packet) {
+            cursor_pattern_ = hardware_cursor.pattern;
+            cursor_pattern_width_ = hardware_cursor.pattern_width;
+            cursor_pattern_height_ = hardware_cursor.pattern_height;
+        }
+        const HardwareCursor cursor_for_log = hardware_cursor;
+        publish_aten_cursor(state_, std::move(hardware_cursor));
+
         if (options_.login.verbose) {
             LogLine line = log_info();
-            line << "ignored ATEN cursor"
+            line << "ATEN cursor"
                  << " xy=" << cursor.x << ',' << cursor.y
                  << " size=" << cursor.width << 'x' << cursor.height
-                 << " valid=" << cursor.valid;
+                 << " valid=" << cursor.valid
+                 << " render-visible=" << cursor_for_log.visible
+                 << " render-size=" << cursor_for_log.width << 'x' << cursor_for_log.height;
             if (cursor.valid == 1) {
                 line << " pattern-type=" << cursor.pattern_type
                      << " pattern-bytes=" << cursor.pattern_size;
@@ -878,6 +1000,7 @@ private:
     AtenRfbMessageBuffer parser_;
     std::deque<AtenQueuedWrite> write_queue_;
     AtenQueuedWrite active_write_;
+    std::vector<std::uint16_t> cursor_pattern_;
     std::chrono::steady_clock::time_point stats_started_at_ = std::chrono::steady_clock::now();
     std::uint64_t total_websocket_messages_ = 0;
     std::uint64_t total_messages_ = 0;
@@ -887,6 +1010,8 @@ private:
     std::size_t last_websocket_message_bytes_ = 0;
     int previous_width_ = 0;
     int previous_height_ = 0;
+    int cursor_pattern_width_ = 0;
+    int cursor_pattern_height_ = 0;
     int updates_ = 0;
     bool write_in_progress_ = false;
     bool framebuffer_request_pending_ = false;
@@ -927,6 +1052,17 @@ void clear_latest_aten_frame(AtenViewState& state)
 {
     std::lock_guard lock(state.frame_mutex);
     state.frame.reset();
+}
+
+std::optional<HardwareCursor> take_latest_aten_cursor(
+    AtenViewState& state,
+    std::uint64_t last_sequence)
+{
+    std::lock_guard lock(state.frame_mutex);
+    if (!state.has_cursor || state.cursor.sequence == last_sequence) {
+        return std::nullopt;
+    }
+    return state.cursor;
 }
 
 void queue_aten_input_packet(

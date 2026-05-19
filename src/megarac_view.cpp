@@ -4,7 +4,8 @@
 #include "aspeed_presenter.hpp"
 #include "diagnostics.hpp"
 #include "log.hpp"
-#include "megarac_cursor.hpp"
+#include "hardware_cursor.hpp"
+#include "hardware_cursor_presenter.hpp"
 #include "megarac_hid.hpp"
 #include "megarac_protocol.hpp"
 #include "megarac_view_session.hpp"
@@ -82,46 +83,6 @@ SDL_FRect current_target_rect(SDL_Window* window, int frame_width, int frame_hei
         SDL_GetWindowSize(window, &window_width, &window_height);
     }
     return centered_target_rect(window_width, window_height, frame_width, frame_height);
-}
-
-void update_cursor_texture(
-    SDL_Renderer* renderer,
-    SDL_Texture*& texture,
-    int& texture_width,
-    int& texture_height,
-    const CursorImage& image)
-{
-    if (image.rgba.empty() || image.width <= 0 || image.height <= 0) {
-        if (texture != nullptr) {
-            SDL_DestroyTexture(texture);
-            texture = nullptr;
-        }
-        texture_width = 0;
-        texture_height = 0;
-        return;
-    }
-
-    if (texture == nullptr || texture_width != image.width || texture_height != image.height) {
-        if (texture != nullptr) {
-            SDL_DestroyTexture(texture);
-        }
-        texture = SDL_CreateTexture(
-            renderer,
-            SDL_PIXELFORMAT_RGBA32,
-            SDL_TEXTUREACCESS_STREAMING,
-            image.width,
-            image.height);
-        if (texture == nullptr) {
-            throw_sdl_error("SDL_CreateTexture(cursor)");
-        }
-        SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_BLEND);
-        texture_width = image.width;
-        texture_height = image.height;
-    }
-
-    if (!SDL_UpdateTexture(texture, nullptr, image.rgba.data(), image.width * 4)) {
-        throw_sdl_error("SDL_UpdateTexture(cursor)");
-    }
 }
 
 std::optional<RemoteMousePosition> remote_mouse_position(
@@ -273,6 +234,7 @@ void send_mouse_report(
     int wheel,
     std::optional<RemoteMousePosition>& last_relative_position,
     std::uint32_t& sequence,
+    bool disable_input_coalescing,
     bool verbose)
 {
     const int mouse_mode = megarac_view_mouse_mode_snapshot(state);
@@ -290,7 +252,7 @@ void send_mouse_report(
     }
 
     last_relative_position = position;
-    const bool coalesce = buttons == 0 && wheel == 0;
+    const bool coalesce = !disable_input_coalescing && buttons == 0 && wheel == 0;
     const bool accepted = queue_megarac_view_packet(state, kCmdSendHidPacket, std::move(packet), coalesce);
     if (verbose && accepted) {
         log_info() << "queued mouse"
@@ -312,22 +274,17 @@ void run_megarac_view(const MegaracViewOptions& options)
 
     SDL_Window* window = nullptr;
     SDL_Renderer* renderer = nullptr;
-    SDL_Texture* cursor_texture = nullptr;
 
     auto stop_requested = std::make_shared<std::atomic_bool>(false);
     auto network_done = std::make_shared<std::atomic_bool>(false);
     auto state = std::make_shared<MegaracViewSessionState>();
     std::thread network_thread;
     AspeedPresenter presenter;
-    int cursor_texture_width = 0;
-    int cursor_texture_height = 0;
+    HardwareCursorPresenter cursor_presenter;
 
     auto cleanup = [&] {
         presenter.destroy();
-        if (cursor_texture != nullptr) {
-            SDL_DestroyTexture(cursor_texture);
-            cursor_texture = nullptr;
-        }
+        cursor_presenter.destroy();
         if (renderer != nullptr) {
             SDL_DestroyRenderer(renderer);
             renderer = nullptr;
@@ -413,12 +370,7 @@ void run_megarac_view(const MegaracViewOptions& options)
                     state->view_status.minimize();
                     clear_latest_megarac_view_frame(*state);
                     presenter.destroy();
-                    if (cursor_texture != nullptr) {
-                        SDL_DestroyTexture(cursor_texture);
-                        cursor_texture = nullptr;
-                    }
-                    cursor_texture_width = 0;
-                    cursor_texture_height = 0;
+                    cursor_presenter.destroy();
                     last_sequence = 0;
                     last_status_tick = 0;
                     SDL_SetWindowTitle(window, state->view_status.title(options.login.base_url.host).c_str());
@@ -516,6 +468,7 @@ void run_megarac_view(const MegaracViewOptions& options)
                                 0,
                                 last_relative_mouse_position,
                                 mouse_sequence,
+                                options.login.debug_disable_input_coalescing,
                                 options.login.verbose);
                         }
                     }
@@ -543,6 +496,7 @@ void run_megarac_view(const MegaracViewOptions& options)
                                 0,
                                 last_relative_mouse_position,
                                 mouse_sequence,
+                                options.login.debug_disable_input_coalescing,
                                 options.login.verbose);
                             last_mouse_motion_ticks = ticks;
                         }
@@ -569,6 +523,7 @@ void run_megarac_view(const MegaracViewOptions& options)
                             wheel,
                             last_relative_mouse_position,
                             mouse_sequence,
+                            options.login.debug_disable_input_coalescing,
                             options.login.verbose);
                     }
                 }
@@ -619,12 +574,8 @@ void run_megarac_view(const MegaracViewOptions& options)
                             active->shadow,
                             active->width,
                             active->height);
-                        update_cursor_texture(
-                            renderer,
-                            cursor_texture,
-                            cursor_texture_width,
-                            cursor_texture_height,
-                            cursor_image);
+                        cursor_presenter.update(renderer, cursor_image);
+                        render_needed = true;
                     }
                 }
 
@@ -635,15 +586,13 @@ void run_megarac_view(const MegaracViewOptions& options)
                         active != nullptr && active->texture != nullptr) {
                         const SDL_FRect target = current_target_rect(window, active->width, active->height);
                         SDL_RenderTexture(renderer, active->texture, nullptr, &target);
-                        if (cursor_texture != nullptr && has_hardware_cursor && hardware_cursor.visible) {
-                            const float scale_x = target.w / static_cast<float>(active->width);
-                            const float scale_y = target.h / static_cast<float>(active->height);
-                            SDL_FRect cursor_target{};
-                            cursor_target.x = target.x + static_cast<float>(hardware_cursor.x) * scale_x;
-                            cursor_target.y = target.y + static_cast<float>(hardware_cursor.y) * scale_y;
-                            cursor_target.w = static_cast<float>(cursor_texture_width) * scale_x;
-                            cursor_target.h = static_cast<float>(cursor_texture_height) * scale_y;
-                            SDL_RenderTexture(renderer, cursor_texture, nullptr, &cursor_target);
+                        if (has_hardware_cursor) {
+                            cursor_presenter.render(
+                                renderer,
+                                hardware_cursor,
+                                target,
+                                active->width,
+                                active->height);
                         }
                     }
                     SDL_RenderPresent(renderer);

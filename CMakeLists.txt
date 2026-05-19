@@ -60,7 +60,8 @@ add_executable(
   src/log.cpp
   src/megarac_view.cpp
   src/main.cpp
-  src/megarac_cursor.cpp
+  src/hardware_cursor.cpp
+  src/hardware_cursor_presenter.cpp
   src/megarac_hid.cpp
   src/megarac_view_session.cpp
   src/megarac_protocol.cpp

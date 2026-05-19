@@ -137,6 +137,7 @@ std::optional<AtenRfbMessage> AtenRfbMessageBuffer::next()
         message.cursor.pattern_size = pattern_size;
         if (valid == 1) {
             message.cursor.pattern_type = peek_be32(21);
+            message.cursor.pattern = slice(25, static_cast<std::size_t>(pattern_size));
         }
         consume(total_size);
         return message;

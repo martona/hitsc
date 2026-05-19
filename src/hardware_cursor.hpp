@@ -6,7 +6,7 @@
 
 namespace hitsc {
 
-struct MegaracHardwareCursor {
+struct HardwareCursor {
     bool visible = false;
     bool has_pattern = false;
     bool pattern_from_packet = false;
@@ -18,9 +18,13 @@ struct MegaracHardwareCursor {
     int y_offset = 0;
     int width = 0;
     int height = 0;
+    int pattern_width = 0;
+    int pattern_height = 0;
     std::uint64_t sequence = 0;
     std::vector<std::uint16_t> pattern;
 };
+
+using MegaracHardwareCursor = HardwareCursor;
 
 struct CursorImage {
     int width = 0;
@@ -35,7 +39,7 @@ std::optional<MegaracHardwareCursor> parse_hardware_cursor_packet(
     int source_height);
 
 CursorImage make_cursor_image(
-    const MegaracHardwareCursor& cursor,
+    const HardwareCursor& cursor,
     const std::vector<std::uint8_t>& framebuffer,
     int frame_width,
     int frame_height);
