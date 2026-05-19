@@ -4,6 +4,7 @@
 #include "log.hpp"
 #include "text.hpp"
 #include "tls.hpp"
+#include "tls_session_cache.hpp"
 #include "trace.hpp"
 
 #include <boost/asio/io_context.hpp>
@@ -12,6 +13,8 @@
 #include <boost/beast/core.hpp>
 #include <boost/beast/ssl.hpp>
 #include <boost/version.hpp>
+#include <openssl/err.h>
+#include <openssl/ssl.h>
 #include <zlib.h>
 
 #include <chrono>
@@ -161,19 +164,59 @@ bool can_retry_reused_request(http::verb method)
     }
 }
 
+int tls_session_cache_ex_data_index()
+{
+    static const int index = SSL_get_ex_new_index(0, nullptr, nullptr, nullptr, nullptr);
+    return index;
+}
+
+int cache_new_tls_session(SSL* ssl_handle, SSL_SESSION* session)
+{
+    const int index = tls_session_cache_ex_data_index();
+    if (index < 0) {
+        return 0;
+    }
+
+    auto* cache = static_cast<TlsSessionCache*>(SSL_get_ex_data(ssl_handle, index));
+    if (cache == nullptr) {
+        return 0;
+    }
+
+    return cache->push(session) ? 1 : 0;
+}
+
 } // namespace
 
 struct HttpsClient::Impl {
     using Stream = beast::ssl_stream<beast::tcp_stream>;
 
-    Impl(const Url& url, bool insecure, bool verbose, int timeout_seconds)
+    Impl(
+        const Url& url,
+        bool insecure,
+        bool verbose,
+        int timeout_seconds,
+        TlsSessionCache* tls_session_cache,
+        bool keep_alive)
         : url_(url)
         , insecure_(insecure)
         , verbose_(verbose)
         , timeout_seconds_(timeout_seconds)
+        , tls_session_cache_(tls_session_cache)
+        , keep_alive_(keep_alive)
         , tls_context_(ssl::context::tls_client)
         , resolver_(io_)
     {
+        if (tls_session_cache_ != nullptr) {
+            const int index = tls_session_cache_ex_data_index();
+            if (index < 0) {
+                throw std::runtime_error("failed to allocate TLS session cache context index");
+            }
+
+            SSL_CTX_set_session_cache_mode(
+                tls_context_.native_handle(),
+                SSL_SESS_CACHE_CLIENT | SSL_SESS_CACHE_NO_INTERNAL_STORE);
+            SSL_CTX_sess_set_new_cb(tls_context_.native_handle(), &cache_new_tls_session);
+        }
     }
 
     ~Impl()
@@ -204,9 +247,9 @@ struct HttpsClient::Impl {
 
             try {
                 StringResponse response = send_request(method, target, body, content_type, cookies, extra_headers);
-                const bool reusable = response.keep_alive();
+                const bool reusable = keep_alive_ && response.keep_alive();
 
-                log_request_finished(request_started_at, request_url);
+                log_request_finished(request_started_at, request_url, reused_connection);
                 try {
                     log_http_response(response, decode_response_body(response), verbose_);
                 } catch (...) {
@@ -218,7 +261,9 @@ struct HttpsClient::Impl {
 
                 if (!reusable) {
                     if (verbose_) {
-                        log_debug() << "https connection not reusable"
+                        log_debug() << "https connection closing"
+                                    << " reason=" << (!keep_alive_ ? "client-keepalive-disabled" : "server-not-keepalive")
+                                    << " response-keepalive=" << (response.keep_alive() ? "yes" : "no")
                                     << " url=" << request_url;
                     }
                     shutdown_connection();
@@ -230,7 +275,7 @@ struct HttpsClient::Impl {
                 if (reused_connection && !retried && can_retry_reused_request(method)) {
                     retried = true;
                     if (verbose_) {
-                        log_debug() << "https reused connection failed; reconnecting once"
+                        log_debug() << "https existing connection failed; reconnecting once"
                                     << " url=" << request_url
                                     << " error=" << ex.what();
                     }
@@ -252,13 +297,49 @@ private:
         auto next_stream = std::make_unique<Stream>(io_, tls_context_);
         configure_tls(tls_context_, *next_stream, url_.host, insecure_);
         set_server_name_indication(*next_stream, url_.host);
+        configure_tls_session_resumption(*next_stream);
 
         const auto endpoints = resolver_.resolve(url_.host, url_.port);
         beast::get_lowest_layer(*next_stream).expires_after(std::chrono::seconds(timeout_seconds_));
         beast::get_lowest_layer(*next_stream).connect(endpoints);
         next_stream->handshake(ssl::stream_base::client);
 
+        if (verbose_ && tls_session_cache_ != nullptr) {
+            log_debug() << "tls session handshake"
+                        << " reused=" << (SSL_session_reused(next_stream->native_handle()) == 1 ? "yes" : "no")
+                        << " cached-sessions=" << tls_session_cache_->size();
+        }
+
         stream_ = std::move(next_stream);
+    }
+
+    void configure_tls_session_resumption(Stream& stream)
+    {
+        if (tls_session_cache_ == nullptr) {
+            return;
+        }
+
+        SSL* ssl_handle = stream.native_handle();
+        if (SSL_set_ex_data(ssl_handle, tls_session_cache_ex_data_index(), tls_session_cache_) != 1) {
+            throw std::runtime_error("failed to attach TLS session cache to connection");
+        }
+
+        SslSessionPtr session = tls_session_cache_->pop();
+        if (session == nullptr) {
+            return;
+        }
+
+        if (SSL_set_session(ssl_handle, session.get()) != 1) {
+            ERR_clear_error();
+            if (verbose_) {
+                log_debug() << "tls session resumption ticket rejected before handshake";
+            }
+            return;
+        }
+
+        if (verbose_) {
+            log_debug() << "tls session resumption ticket offered";
+        }
     }
 
     http::request<http::string_body> make_http_request(
@@ -272,7 +353,7 @@ private:
         http::request<http::string_body> request{method, target, 11};
         request.body() = body;
         set_request_headers(request, url_, cookies, extra_headers);
-        request.keep_alive(true);
+        request.keep_alive(keep_alive_);
         if (!content_type.empty()) {
             request.set(http::field::content_type, content_type);
         }
@@ -312,7 +393,8 @@ private:
 
     void log_request_finished(
         std::chrono::steady_clock::time_point request_started_at,
-        const std::string& request_url) const
+        const std::string& request_url,
+        bool reused_connection) const
     {
         if (!verbose_) {
             return;
@@ -322,6 +404,7 @@ private:
             std::chrono::steady_clock::now() - request_started_at).count();
         log_info() << "https request finished"
                    << " duration-ms=" << elapsed_ms
+                   << " connection-reused=" << (reused_connection ? "yes" : "no")
                    << " url=" << request_url;
     }
 
@@ -357,14 +440,22 @@ private:
     bool insecure_ = false;
     bool verbose_ = false;
     int timeout_seconds_ = 30;
+    TlsSessionCache* tls_session_cache_ = nullptr;
+    bool keep_alive_ = true;
     asio::io_context io_;
     ssl::context tls_context_;
     tcp::resolver resolver_;
     std::unique_ptr<Stream> stream_;
 };
 
-HttpsClient::HttpsClient(const Url& url, bool insecure, bool verbose, int timeout_seconds)
-    : impl_(std::make_unique<Impl>(url, insecure, verbose, timeout_seconds))
+HttpsClient::HttpsClient(
+    const Url& url,
+    bool insecure,
+    bool verbose,
+    int timeout_seconds,
+    TlsSessionCache* tls_session_cache,
+    bool keep_alive)
+    : impl_(std::make_unique<Impl>(url, insecure, verbose, timeout_seconds, tls_session_cache, keep_alive))
 {
 }
 

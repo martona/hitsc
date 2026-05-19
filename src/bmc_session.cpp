@@ -89,7 +89,14 @@ std::string build_form_body(const LoginOptions& options, const BmcLoginProfile& 
 
 BmcWebSession::BmcWebSession(const LoginOptions& options)
     : base_url_(options.base_url)
-    , client_(options.base_url, options.insecure, options.verbose)
+    , tls_session_cache_(std::make_unique<TlsSessionCache>(16))
+    , client_(
+          options.base_url,
+          options.insecure,
+          options.verbose,
+          30,
+          tls_session_cache_.get(),
+          !options.debug_disable_http_keepalive)
 {
 }
 

@@ -72,6 +72,7 @@ add_executable(
   src/pikvm_view.cpp
   src/text.cpp
   src/tls.cpp
+  src/tls_session_cache.cpp
   src/trace.cpp
   src/url.cpp
   src/view_status.cpp

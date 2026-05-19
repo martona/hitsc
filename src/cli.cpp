@@ -52,6 +52,10 @@ void configure_login_options(CLI::App& command, LoginOptions& options, std::stri
 {
     command.add_flag("-k,--insecure", options.insecure, "Disable certificate and hostname verification.");
     command.add_flag("-v,--verbose", options.verbose, "Log HTTP request/response and protocol details to stderr.");
+    command.add_flag(
+        "--debug-disable-http-keepalive",
+        options.debug_disable_http_keepalive,
+        "Close BMC HTTP TLS connections after each response to exercise TLS session resumption.");
     command.add_option("-u,--username", options.username, "Username for the BMC web login.");
     command.add_option("-p,--password", options.password, "Password for the BMC web login.");
     command.add_option("--password-env", password_env_name, "Read the password from an environment variable.");

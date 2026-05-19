@@ -14,6 +14,8 @@ namespace hitsc {
 
 namespace http = boost::beast::http;
 
+class TlsSessionCache;
+
 struct Header {
     http::field field = http::field::unknown;
     std::string name;
@@ -24,7 +26,13 @@ using StringResponse = http::response<http::string_body>;
 
 class HttpsClient {
 public:
-    HttpsClient(const Url& url, bool insecure, bool verbose = false, int timeout_seconds = 30);
+    HttpsClient(
+        const Url& url,
+        bool insecure,
+        bool verbose = false,
+        int timeout_seconds = 30,
+        TlsSessionCache* tls_session_cache = nullptr,
+        bool keep_alive = true);
     ~HttpsClient();
 
     HttpsClient(HttpsClient&&) noexcept;

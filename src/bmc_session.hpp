@@ -2,7 +2,9 @@
 
 #include "http_client.hpp"
 #include "options.hpp"
+#include "tls_session_cache.hpp"
 
+#include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -70,6 +72,7 @@ private:
     Url base_url_;
     CookieJar cookies_;
     std::string session_token_;
+    std::unique_ptr<TlsSessionCache> tls_session_cache_;
     HttpsClient client_;
 };
 

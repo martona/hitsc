@@ -12,6 +12,7 @@ struct LoginOptions {
     std::string password;
     bool verbose = false;
     bool insecure = false;
+    bool debug_disable_http_keepalive = false;
 };
 
 struct MegaracViewOptions {
