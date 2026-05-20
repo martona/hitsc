@@ -29,6 +29,7 @@ public:
     };
 
     explicit LauncherHostModel(QObject* parent = nullptr);
+    ~LauncherHostModel() override;
 
     int rowCount(const QModelIndex& parent = QModelIndex()) const override;
     QVariant data(const QModelIndex& index, int role = Qt::DisplayRole) const override;
@@ -54,6 +55,8 @@ public:
         const QString& repeat_password);
     Q_INVOKABLE QVariantMap deleteHost(const QString& host_id);
     Q_INVOKABLE QString defaultUrlForName(const QString& name) const;
+
+    void shutdown();
 
 signals:
     void countChanged();

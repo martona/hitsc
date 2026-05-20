@@ -4,6 +4,7 @@
 #include "launcher_theme.hpp"
 
 #include <QColor>
+#include <QCoreApplication>
 #include <QGuiApplication>
 #include <QPalette>
 #include <QQmlApplicationEngine>
@@ -14,8 +15,11 @@
 #include <QWindow>
 
 #include <cstdlib>
+#include <memory>
 
 #ifdef _WIN32
+#include <QAbstractNativeEventFilter>
+
 #include <dwmapi.h>
 #include <windows.h>
 #endif
@@ -73,6 +77,58 @@ void apply_application_theme(QGuiApplication& app, const QPalette& light_palette
 }
 
 #ifdef _WIN32
+COLORREF to_color_ref(const QColor& color)
+{
+    return RGB(color.red(), color.green(), color.blue());
+}
+
+class LauncherBackgroundEraseFilter : public QAbstractNativeEventFilter {
+public:
+    void set_window(QWindow* window)
+    {
+        hwnd_ = window == nullptr ? nullptr : reinterpret_cast<HWND>(window->winId());
+    }
+
+    void set_color(const QColor& color)
+    {
+        color_ = to_color_ref(color);
+    }
+
+    bool nativeEventFilter(
+        const QByteArray& event_type,
+        void* message,
+        qintptr* result) override
+    {
+        if (hwnd_ == nullptr
+            || (event_type != "windows_generic_MSG" && event_type != "windows_dispatcher_MSG")) {
+            return false;
+        }
+
+        const auto* msg = static_cast<MSG*>(message);
+        if (msg == nullptr || msg->hwnd != hwnd_ || msg->message != WM_ERASEBKGND) {
+            return false;
+        }
+
+        const HDC hdc = reinterpret_cast<HDC>(msg->wParam);
+        if (hdc != nullptr) {
+            RECT client_rect{};
+            GetClientRect(hwnd_, &client_rect);
+            const HBRUSH brush = CreateSolidBrush(color_);
+            FillRect(hdc, &client_rect, brush);
+            DeleteObject(brush);
+        }
+
+        if (result != nullptr) {
+            *result = 1;
+        }
+        return true;
+    }
+
+private:
+    HWND hwnd_ = nullptr;
+    COLORREF color_ = RGB(31, 32, 36);
+};
+
 void ensure_resizable_window_frame(QWindow* window)
 {
     if (window == nullptr) {
@@ -125,26 +181,42 @@ int run_launcher_gui(int argc, char* argv[])
     LauncherHostModel host_model;
     LauncherTheme launcher_theme(app.styleHints()->colorScheme());
 
-    QQmlApplicationEngine engine;
-    engine.rootContext()->setContextProperty(QStringLiteral("hostModel"), &host_model);
-    engine.rootContext()->setContextProperty(QStringLiteral("launcherTheme"), &launcher_theme);
-    engine.loadFromModule(QStringLiteral("Hitsc.Launcher"), QStringLiteral("LauncherWindow"));
-    if (engine.rootObjects().isEmpty()) {
+    auto engine = std::make_unique<QQmlApplicationEngine>();
+    engine->rootContext()->setContextProperty(QStringLiteral("hostModel"), &host_model);
+    engine->rootContext()->setContextProperty(QStringLiteral("launcherTheme"), &launcher_theme);
+    engine->loadFromModule(QStringLiteral("Hitsc.Launcher"), QStringLiteral("LauncherWindow"));
+    if (engine->rootObjects().isEmpty()) {
         return EXIT_FAILURE;
     }
 
 #ifdef _WIN32
-    auto* root_window = qobject_cast<QWindow*>(engine.rootObjects().first());
+    auto* root_window = qobject_cast<QWindow*>(engine->rootObjects().first());
+    LauncherBackgroundEraseFilter background_erase_filter;
+    background_erase_filter.set_window(root_window);
+    background_erase_filter.set_color(app.palette().color(QPalette::Window));
+    app.installNativeEventFilter(&background_erase_filter);
     ensure_resizable_window_frame(root_window);
     apply_title_bar_theme(root_window, app.styleHints()->colorScheme());
     QObject::connect(
         app.styleHints(),
         &QStyleHints::colorSchemeChanged,
         &app,
-        [&app, light_palette, root_window, &launcher_theme](Qt::ColorScheme color_scheme) {
+        [&app, light_palette, root_window, &launcher_theme, &background_erase_filter](
+            Qt::ColorScheme color_scheme) {
             apply_application_theme(app, light_palette, color_scheme);
             launcher_theme.setColorScheme(color_scheme);
+            background_erase_filter.set_color(app.palette().color(QPalette::Window));
             apply_title_bar_theme(root_window, color_scheme);
+        });
+    QObject::connect(
+        &app,
+        &QCoreApplication::aboutToQuit,
+        &app,
+        [&app, &host_model, &engine, &background_erase_filter] {
+            app.removeNativeEventFilter(&background_erase_filter);
+            background_erase_filter.set_window(nullptr);
+            host_model.shutdown();
+            engine.reset();
         });
 #else
     QObject::connect(
@@ -155,9 +227,15 @@ int run_launcher_gui(int argc, char* argv[])
             apply_application_theme(app, light_palette, color_scheme);
             launcher_theme.setColorScheme(color_scheme);
         });
+    QObject::connect(&app, &QCoreApplication::aboutToQuit, &app, [&host_model, &engine] {
+        host_model.shutdown();
+        engine.reset();
+    });
 #endif
 
-    return app.exec();
+    const int result = app.exec();
+    host_model.shutdown();
+    return result;
 }
 
 } // namespace hitsc

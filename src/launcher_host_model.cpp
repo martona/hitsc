@@ -1,6 +1,8 @@
 #include "launcher_host_model.hpp"
 
+#include <QMetaObject>
 #include <QModelIndex>
+#include <QThread>
 #include <QTimer>
 #include <QUuid>
 
@@ -30,6 +32,23 @@ LauncherHostModel::LauncherHostModel(QObject* parent)
     connect(&probe_timer_, &QTimer::timeout, this, &LauncherHostModel::start_probes);
     probe_timer_.start();
     QTimer::singleShot(0, this, &LauncherHostModel::start_probes);
+}
+
+LauncherHostModel::~LauncherHostModel()
+{
+    shutdown();
+}
+
+void LauncherHostModel::shutdown()
+{
+    if (thread() != QThread::currentThread()) {
+        QMetaObject::invokeMethod(this, [this] { shutdown(); }, Qt::BlockingQueuedConnection);
+        return;
+    }
+
+    probe_timer_.stop();
+    probes_in_flight_.clear();
+    reachability_probe_.shutdown();
 }
 
 int LauncherHostModel::rowCount(const QModelIndex& parent) const

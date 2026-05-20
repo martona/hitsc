@@ -2,8 +2,6 @@
 
 #include <QMetaObject>
 #include <QPointer>
-#include <QThreadPool>
-
 #include <algorithm>
 #include <array>
 #include <mutex>
@@ -119,8 +117,18 @@ bool ping_host(const QString& host)
 ReachabilityProbe::ReachabilityProbe(QObject* parent)
     : QObject(parent)
 {
-    QThreadPool::globalInstance()->setMaxThreadCount(
-        std::max(QThreadPool::globalInstance()->maxThreadCount(), 64));
+    thread_pool_.setMaxThreadCount(std::max(thread_pool_.maxThreadCount(), 64));
+}
+
+ReachabilityProbe::~ReachabilityProbe()
+{
+    shutdown();
+}
+
+void ReachabilityProbe::shutdown()
+{
+    thread_pool_.clear();
+    thread_pool_.waitForDone();
 }
 
 void ReachabilityProbe::probe(
@@ -130,10 +138,10 @@ void ReachabilityProbe::probe(
     Callback callback)
 {
     QPointer<QObject> target(receiver);
-    QThreadPool::globalInstance()->start([host_id = std::move(host_id),
-                                          host = std::move(host),
-                                          target,
-                                          callback = std::move(callback)]() mutable {
+    thread_pool_.start([host_id = std::move(host_id),
+                        host = std::move(host),
+                        target,
+                        callback = std::move(callback)]() mutable {
         const bool online = ping_host(host);
         if (!target) {
             return;

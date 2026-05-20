@@ -21,6 +21,7 @@ find_package(Boost REQUIRED CONFIG COMPONENTS json log log_setup system)
 find_package(CLI11 CONFIG REQUIRED)
 find_package(FFMPEG REQUIRED)
 find_package(OpenSSL REQUIRED)
+set(QT_SKIP_SETUP_DEPLOYMENT ON)
 find_package(Qt6 REQUIRED COMPONENTS Core Gui Qml Quick QuickControls2 QuickLayouts)
 find_package(SDL3 CONFIG REQUIRED)
 find_package(ZLIB REQUIRED)
@@ -123,6 +124,8 @@ if(MSVC)
     PRIVATE
       "$<$<CONFIG:Release>:/DEBUG>"
       "$<$<CONFIG:Release>:/MAP>"
+      "$<$<CONFIG:Release>:/OPT:REF>"
+      "$<$<CONFIG:Release>:/OPT:ICF>"
   )
 else()
   target_compile_options(hitsc PRIVATE -Wall -Wextra -Wpedantic)

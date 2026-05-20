@@ -233,39 +233,69 @@ ApplicationWindow {
                     color: theme.window
                     opacity: addHostMouse.containsMouse ? 1.0 : 0.86
 
-                    Canvas {
+                    Item {
+                        id: dashedOutline
+
                         anchors.fill: parent
+                        anchors.margins: 4
 
-                        property color strokeColor: addHostTile.ghostColor
+                        property real dashLength: 14
+                        property real dashGap: 9
+                        property real thickness: 3.5
+                        property real corner: 13
+                        property int horizontalDashCount: Math.max(1, Math.floor((width - corner * 2 + dashGap) / (dashLength + dashGap)))
+                        property int verticalDashCount: Math.max(1, Math.floor((height - corner * 2 + dashGap) / (dashLength + dashGap)))
 
-                        antialiasing: true
-                        onWidthChanged: requestPaint()
-                        onHeightChanged: requestPaint()
-                        onStrokeColorChanged: requestPaint()
+                        Repeater {
+                            model: dashedOutline.horizontalDashCount
 
-                        function roundedRectPath(ctx, x, y, w, h, r) {
-                            ctx.beginPath()
-                            ctx.moveTo(x + r, y)
-                            ctx.lineTo(x + w - r, y)
-                            ctx.quadraticCurveTo(x + w, y, x + w, y + r)
-                            ctx.lineTo(x + w, y + h - r)
-                            ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h)
-                            ctx.lineTo(x + r, y + h)
-                            ctx.quadraticCurveTo(x, y + h, x, y + h - r)
-                            ctx.lineTo(x, y + r)
-                            ctx.quadraticCurveTo(x, y, x + r, y)
-                            ctx.closePath()
+                            Rectangle {
+                                x: dashedOutline.corner + index * (dashedOutline.dashLength + dashedOutline.dashGap)
+                                y: 0
+                                width: Math.min(dashedOutline.dashLength, dashedOutline.width - x - dashedOutline.corner)
+                                height: dashedOutline.thickness
+                                radius: dashedOutline.thickness / 2
+                                color: addHostTile.ghostColor
+                            }
                         }
 
-                        onPaint: {
-                            const ctx = getContext("2d")
-                            const inset = 4
-                            ctx.clearRect(0, 0, width, height)
-                            ctx.lineWidth = 3.5
-                            ctx.strokeStyle = strokeColor
-                            ctx.setLineDash([13, 9])
-                            roundedRectPath(ctx, inset, inset, width - inset * 2, height - inset * 2, 13)
-                            ctx.stroke()
+                        Repeater {
+                            model: dashedOutline.horizontalDashCount
+
+                            Rectangle {
+                                x: dashedOutline.corner + index * (dashedOutline.dashLength + dashedOutline.dashGap)
+                                y: dashedOutline.height - dashedOutline.thickness
+                                width: Math.min(dashedOutline.dashLength, dashedOutline.width - x - dashedOutline.corner)
+                                height: dashedOutline.thickness
+                                radius: dashedOutline.thickness / 2
+                                color: addHostTile.ghostColor
+                            }
+                        }
+
+                        Repeater {
+                            model: dashedOutline.verticalDashCount
+
+                            Rectangle {
+                                x: 0
+                                y: dashedOutline.corner + index * (dashedOutline.dashLength + dashedOutline.dashGap)
+                                width: dashedOutline.thickness
+                                height: Math.min(dashedOutline.dashLength, dashedOutline.height - y - dashedOutline.corner)
+                                radius: dashedOutline.thickness / 2
+                                color: addHostTile.ghostColor
+                            }
+                        }
+
+                        Repeater {
+                            model: dashedOutline.verticalDashCount
+
+                            Rectangle {
+                                x: dashedOutline.width - dashedOutline.thickness
+                                y: dashedOutline.corner + index * (dashedOutline.dashLength + dashedOutline.dashGap)
+                                width: dashedOutline.thickness
+                                height: Math.min(dashedOutline.dashLength, dashedOutline.height - y - dashedOutline.corner)
+                                radius: dashedOutline.thickness / 2
+                                color: addHostTile.ghostColor
+                            }
                         }
                     }
 
