@@ -115,7 +115,7 @@ std::string ViewStatus::state_text() const
     }
 
     if (!*display_online_) {
-        return "Connected, no video";
+        return "Connected, no input";
     }
 
     if (!frame_ready_) {
