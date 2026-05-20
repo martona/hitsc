@@ -301,6 +301,16 @@ QVariantMap LauncherHostModel::deleteHost(const QString& host_id)
     return ok_result();
 }
 
+QVariantMap LauncherHostModel::connectHost(const QString& host_id)
+{
+    const int row = index_for_id(host_id);
+    if (row < 0) {
+        return error_result(QStringLiteral("Saved host was not found."));
+    }
+
+    return child_processes_.launch_host(hosts_.at(row));
+}
+
 QString LauncherHostModel::defaultUrlForName(const QString& name) const
 {
     return sanitize_host_name_to_url(name);

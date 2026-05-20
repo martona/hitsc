@@ -44,6 +44,12 @@ ApplicationWindow {
         return theme.mutedText
     }
 
+    function connectHost(hostId) {
+        const result = hostModel.connectHost(hostId)
+        if (!result.ok)
+            console.error(result.error)
+    }
+
     color: theme.window
     palette.window: theme.window
     palette.windowText: theme.text
@@ -119,6 +125,11 @@ ApplicationWindow {
                             }
                         }
 
+                        TapHandler {
+                            acceptedButtons: Qt.LeftButton
+                            onDoubleTapped: root.connectHost(hostId)
+                        }
+
                         Menu {
                             id: hostMenu
 
@@ -128,7 +139,7 @@ ApplicationWindow {
                                 text: "Connect"
                                 font.bold: true
                                 palette: root.palette
-                                onTriggered: {}
+                                onTriggered: root.connectHost(hostId)
                             }
 
                             MenuItem {

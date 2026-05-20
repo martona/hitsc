@@ -1,5 +1,6 @@
 #pragma once
 
+#include "launcher_child_process_manager.hpp"
 #include "launcher_host_store.hpp"
 #include "launcher_reachability_probe.hpp"
 
@@ -55,6 +56,7 @@ public:
         const QString& password,
         const QString& repeat_password);
     Q_INVOKABLE QVariantMap deleteHost(const QString& host_id);
+    Q_INVOKABLE QVariantMap connectHost(const QString& host_id);
     Q_INVOKABLE QString defaultUrlForName(const QString& name) const;
 
     void shutdown();
@@ -69,6 +71,7 @@ private:
 
     HostStore store_;
     QList<SavedHost> hosts_;
+    ChildProcessManager child_processes_;
     ReachabilityProbe reachability_probe_;
     QTimer probe_timer_;
     QSet<QString> probes_in_flight_;

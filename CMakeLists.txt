@@ -65,7 +65,12 @@ add_executable(
   src/cookie_jar.cpp
   src/diagnostics.cpp
   src/http_client.cpp
+  src/launcher_child_command.cpp
+  src/launcher_child_command.hpp
+  src/launcher_child_process_manager.cpp
+  src/launcher_child_process_manager.hpp
   src/launcher_child_protocol.cpp
+  src/launcher_child_protocol.hpp
   src/launcher_gui.cpp
   src/launcher_host_model.cpp
   src/launcher_host_store.cpp
@@ -74,6 +79,8 @@ add_executable(
   src/launcher_theme.hpp
   src/launcher_types.cpp
   src/log.cpp
+  src/parent_liveness_monitor.cpp
+  src/parent_liveness_monitor.hpp
   src/window_placement.cpp
   src/window_placement.hpp
   src/window_prefs_store.cpp
