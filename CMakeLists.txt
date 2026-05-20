@@ -166,10 +166,6 @@ target_link_libraries(
     ZLIB::ZLIB
 )
 
-if(HITSC_STATIC_VCPKG_TRIPLET)
-  target_link_libraries(hitsc PRIVATE hitsc_launcher_qmlplugin)
-endif()
-
 if(WIN32)
   target_link_libraries(hitsc PRIVATE Crypt32 D3d11 Dbghelp Dwmapi Dxgi Iphlpapi Ws2_32)
 endif()

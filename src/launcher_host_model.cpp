@@ -26,7 +26,6 @@ QVariantMap error_result(const QString& message)
 LauncherHostModel::LauncherHostModel(QObject* parent)
     : QAbstractListModel(parent)
     , hosts_(store_.load_hosts())
-    , reachability_probe_(this)
 {
     probe_timer_.setInterval(1000);
     connect(&probe_timer_, &QTimer::timeout, this, &LauncherHostModel::start_probes);

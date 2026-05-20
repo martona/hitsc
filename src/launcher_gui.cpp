@@ -4,7 +4,6 @@
 #include "launcher_theme.hpp"
 
 #include <QColor>
-#include <QCoreApplication>
 #include <QGuiApplication>
 #include <QPalette>
 #include <QQmlApplicationEngine>
@@ -15,7 +14,6 @@
 #include <QWindow>
 
 #include <cstdlib>
-#include <memory>
 
 #ifdef _WIN32
 #include <QAbstractNativeEventFilter>
@@ -82,6 +80,8 @@ COLORREF to_color_ref(const QColor& color)
     return RGB(color.red(), color.green(), color.blue());
 }
 
+// windows loves flashbanging you while the window is being resized
+// and qt can't do its damn job, so we do it for them
 class LauncherBackgroundEraseFilter : public QAbstractNativeEventFilter {
 public:
     void set_window(QWindow* window)
@@ -129,26 +129,6 @@ private:
     COLORREF color_ = RGB(31, 32, 36);
 };
 
-void ensure_resizable_window_frame(QWindow* window)
-{
-    if (window == nullptr) {
-        return;
-    }
-
-    const HWND hwnd = reinterpret_cast<HWND>(window->winId());
-    LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
-    style |= WS_THICKFRAME | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
-    SetWindowLongPtrW(hwnd, GWL_STYLE, style);
-    SetWindowPos(
-        hwnd,
-        nullptr,
-        0,
-        0,
-        0,
-        0,
-        SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOOWNERZORDER | SWP_NOZORDER);
-}
-
 void apply_title_bar_theme(QWindow* window, Qt::ColorScheme color_scheme)
 {
     if (window == nullptr) {
@@ -170,6 +150,8 @@ void apply_title_bar_theme(QWindow* window, Qt::ColorScheme color_scheme)
 
 int run_launcher_gui(int argc, char* argv[])
 {
+    qputenv("QT_FATAL_WARNINGS", "1");
+
     QGuiApplication app(argc, argv);
     QGuiApplication::setOrganizationName(QStringLiteral("hitsc"));
     QGuiApplication::setApplicationName(QStringLiteral("hitsc"));
@@ -181,21 +163,20 @@ int run_launcher_gui(int argc, char* argv[])
     LauncherHostModel host_model;
     LauncherTheme launcher_theme(app.styleHints()->colorScheme());
 
-    auto engine = std::make_unique<QQmlApplicationEngine>();
-    engine->rootContext()->setContextProperty(QStringLiteral("hostModel"), &host_model);
-    engine->rootContext()->setContextProperty(QStringLiteral("launcherTheme"), &launcher_theme);
-    engine->loadFromModule(QStringLiteral("Hitsc.Launcher"), QStringLiteral("LauncherWindow"));
-    if (engine->rootObjects().isEmpty()) {
+    QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("hostModel"), &host_model);
+    engine.rootContext()->setContextProperty(QStringLiteral("launcherTheme"), &launcher_theme);
+    engine.load(QUrl(QStringLiteral("qrc:/qt/qml/Hitsc/Launcher/LauncherWindow.qml")));
+    if (engine.rootObjects().isEmpty()) {
         return EXIT_FAILURE;
     }
 
 #ifdef _WIN32
-    auto* root_window = qobject_cast<QWindow*>(engine->rootObjects().first());
+    auto* root_window = qobject_cast<QWindow*>(engine.rootObjects().first());
     LauncherBackgroundEraseFilter background_erase_filter;
     background_erase_filter.set_window(root_window);
     background_erase_filter.set_color(app.palette().color(QPalette::Window));
     app.installNativeEventFilter(&background_erase_filter);
-    ensure_resizable_window_frame(root_window);
     apply_title_bar_theme(root_window, app.styleHints()->colorScheme());
     QObject::connect(
         app.styleHints(),
@@ -208,16 +189,6 @@ int run_launcher_gui(int argc, char* argv[])
             background_erase_filter.set_color(app.palette().color(QPalette::Window));
             apply_title_bar_theme(root_window, color_scheme);
         });
-    QObject::connect(
-        &app,
-        &QCoreApplication::aboutToQuit,
-        &app,
-        [&app, &host_model, &engine, &background_erase_filter] {
-            app.removeNativeEventFilter(&background_erase_filter);
-            background_erase_filter.set_window(nullptr);
-            host_model.shutdown();
-            engine.reset();
-        });
 #else
     QObject::connect(
         app.styleHints(),
@@ -227,15 +198,9 @@ int run_launcher_gui(int argc, char* argv[])
             apply_application_theme(app, light_palette, color_scheme);
             launcher_theme.setColorScheme(color_scheme);
         });
-    QObject::connect(&app, &QCoreApplication::aboutToQuit, &app, [&host_model, &engine] {
-        host_model.shutdown();
-        engine.reset();
-    });
 #endif
 
-    const int result = app.exec();
-    host_model.shutdown();
-    return result;
+    return app.exec();;
 }
 
 } // namespace hitsc

@@ -1,10 +1,12 @@
 #include "launcher_reachability_probe.hpp"
 
 #include <QMetaObject>
-#include <QPointer>
+#include <QThread>
+
 #include <algorithm>
 #include <array>
 #include <mutex>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -21,7 +23,37 @@
 namespace hitsc {
 namespace {
 
+constexpr unsigned long kPingTimeoutMs = 750;
+
 #ifdef _WIN32
+
+class IcmpHandle {
+public:
+    IcmpHandle()
+        : handle_(IcmpCreateFile())
+    {
+    }
+
+    ~IcmpHandle()
+    {
+        if (valid()) {
+            IcmpCloseHandle(handle_);
+        }
+    }
+
+    [[nodiscard]] bool valid() const
+    {
+        return handle_ != INVALID_HANDLE_VALUE;
+    }
+
+    [[nodiscard]] HANDLE get() const
+    {
+        return handle_;
+    }
+
+private:
+    HANDLE handle_ = INVALID_HANDLE_VALUE;
+};
 
 bool ensure_winsock()
 {
@@ -41,26 +73,72 @@ std::wstring to_wide(const QString& value)
         static_cast<std::size_t>(value.size()));
 }
 
-bool ping_ipv4(const sockaddr_in& address)
+std::size_t reply_buffer_size()
 {
-    const HANDLE icmp = IcmpCreateFile();
-    if (icmp == INVALID_HANDLE_VALUE) {
+#ifdef _WIN64
+    return std::max(sizeof(ICMP_ECHO_REPLY), sizeof(ICMP_ECHO_REPLY32)) + 16;
+#else
+    return sizeof(ICMP_ECHO_REPLY) + 16;
+#endif
+}
+
+std::optional<IPAddr> resolve_ipv4_address(const QString& host)
+{
+    const QString trimmed_host = host.trimmed();
+    if (trimmed_host.isEmpty() || !ensure_winsock()) {
+        return std::nullopt;
+    }
+
+    const std::wstring wide_host = to_wide(trimmed_host);
+    IN_ADDR literal_address{};
+    if (InetPtonW(AF_INET, wide_host.c_str(), &literal_address) == 1) {
+        return literal_address.S_un.S_addr;
+    }
+
+    addrinfoW hints{};
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_DGRAM;
+
+    addrinfoW* results = nullptr;
+    const int resolved = GetAddrInfoW(wide_host.c_str(), nullptr, &hints, &results);
+    if (resolved != 0 || results == nullptr) {
+        return std::nullopt;
+    }
+
+    std::optional<IPAddr> address;
+    for (addrinfoW* current = results; current != nullptr; current = current->ai_next) {
+        if (current->ai_family != AF_INET || current->ai_addr == nullptr) {
+            continue;
+        }
+
+        address = reinterpret_cast<const sockaddr_in*>(current->ai_addr)->sin_addr.S_un.S_addr;
+        break;
+    }
+
+    FreeAddrInfoW(results);
+    return address;
+}
+
+bool ping_ipv4_address(IPAddr address)
+{
+    IcmpHandle icmp;
+    if (!icmp.valid()) {
         return false;
     }
 
-    const std::array<char, 8> payload{'h', 'i', 't', 's', 'c', '\0', '\0', '\0'};
-    std::vector<unsigned char> reply(sizeof(ICMP_ECHO_REPLY) + payload.size() + 8);
+    std::array<char, 8> payload{'h', 'i', 't', 's', 'c', '\0', '\0', '\0'};
+    std::vector<unsigned char> reply(reply_buffer_size() + payload.size());
+
     const DWORD reply_count = IcmpSendEcho(
-        icmp,
-        address.sin_addr.S_un.S_addr,
-        const_cast<char*>(payload.data()),
+        icmp.get(),
+        address,
+        payload.data(),
         static_cast<WORD>(payload.size()),
         nullptr,
         reply.data(),
         static_cast<DWORD>(reply.size()),
-        750);
+        kPingTimeoutMs);
 
-    IcmpCloseHandle(icmp);
     if (reply_count == 0) {
         return false;
     }
@@ -69,55 +147,28 @@ bool ping_ipv4(const sockaddr_in& address)
     return echo->Status == IP_SUCCESS;
 }
 
-bool ping_host(const QString& host)
+#endif
+
+bool probe_host(const QString& host)
 {
-    if (host.trimmed().isEmpty() || !ensure_winsock()) {
+#ifdef _WIN32
+    const std::optional<IPAddr> address = resolve_ipv4_address(host);
+    if (!address) {
         return false;
     }
-
-    addrinfoW hints{};
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-
-    addrinfoW* results = nullptr;
-    const std::wstring wide_host = to_wide(host);
-    const int resolved = GetAddrInfoW(wide_host.c_str(), nullptr, &hints, &results);
-    if (resolved != 0 || results == nullptr) {
-        return false;
-    }
-
-    bool online = false;
-    for (addrinfoW* current = results; current != nullptr; current = current->ai_next) {
-        if (current->ai_family != AF_INET || current->ai_addr == nullptr) {
-            continue;
-        }
-
-        online = ping_ipv4(*reinterpret_cast<const sockaddr_in*>(current->ai_addr));
-        if (online) {
-            break;
-        }
-    }
-
-    FreeAddrInfoW(results);
-    return online;
-}
-
+    return ping_ipv4_address(*address);
 #else
-
-bool ping_host(const QString& host)
-{
     (void)host;
     return false;
-}
-
 #endif
+}
 
 } // namespace
 
 ReachabilityProbe::ReachabilityProbe(QObject* parent)
     : QObject(parent)
 {
-    thread_pool_.setMaxThreadCount(std::max(thread_pool_.maxThreadCount(), 64));
+    pool_.setMaxThreadCount(std::max(4, QThread::idealThreadCount()));
 }
 
 ReachabilityProbe::~ReachabilityProbe()
@@ -127,8 +178,12 @@ ReachabilityProbe::~ReachabilityProbe()
 
 void ReachabilityProbe::shutdown()
 {
-    thread_pool_.clear();
-    thread_pool_.waitForDone();
+    if (shutting_down_.exchange(true)) {
+        return;
+    }
+
+    pool_.clear();
+    pool_.waitForDone();
 }
 
 void ReachabilityProbe::probe(
@@ -137,25 +192,48 @@ void ReachabilityProbe::probe(
     QObject* receiver,
     Callback callback)
 {
-    QPointer<QObject> target(receiver);
-    thread_pool_.start([host_id = std::move(host_id),
-                        host = std::move(host),
-                        target,
-                        callback = std::move(callback)]() mutable {
-        const bool online = ping_host(host);
-        if (!target) {
-            return;
-        }
+    if (shutting_down_.load()) {
+        return;
+    }
 
-        QMetaObject::invokeMethod(
-            target,
-            [host_id = std::move(host_id),
-             online,
-             callback = std::move(callback)]() mutable {
+    QPointer<QObject> target(receiver);
+    pool_.start(
+        [this,
+         host_id = std::move(host_id),
+         host = std::move(host),
+         target,
+         callback = std::move(callback)]() mutable {
+            const bool online = probe_host(host);
+            deliver_result(std::move(host_id), target, std::move(callback), online);
+        });
+}
+
+void ReachabilityProbe::deliver_result(
+    QString host_id,
+    QPointer<QObject> receiver,
+    Callback callback,
+    bool online)
+{
+    if (!receiver || !callback || shutting_down_.load()) {
+        return;
+    }
+
+    if (receiver->thread() == QThread::currentThread()) {
+        callback(std::move(host_id), online);
+        return;
+    }
+
+    QMetaObject::invokeMethod(
+        receiver.data(),
+        [host_id = std::move(host_id),
+         receiver,
+         callback = std::move(callback),
+         online]() mutable {
+            if (receiver) {
                 callback(std::move(host_id), online);
-            },
-            Qt::QueuedConnection);
-    });
+            }
+        },
+        Qt::QueuedConnection);
 }
 
 } // namespace hitsc

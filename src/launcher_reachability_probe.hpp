@@ -1,9 +1,11 @@
 #pragma once
 
 #include <QObject>
+#include <QPointer>
 #include <QString>
 #include <QThreadPool>
 
+#include <atomic>
 #include <functional>
 
 namespace hitsc {
@@ -22,7 +24,14 @@ public:
     void shutdown();
 
 private:
-    QThreadPool thread_pool_;
+    void deliver_result(
+        QString host_id,
+        QPointer<QObject> receiver,
+        Callback callback,
+        bool online);
+
+    QThreadPool pool_;
+    std::atomic_bool shutting_down_{false};
 };
 
 } // namespace hitsc

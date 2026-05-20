@@ -17,6 +17,11 @@
 #include <iostream>
 #include <string>
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
+
 namespace hitsc {
 namespace {
 
@@ -205,7 +210,17 @@ int run_cli(int argc, char* argv[])
     }
 
     if (*gui) {
-        return run_launcher_gui(argc, argv);
+        int result = run_launcher_gui(argc, argv);
+        #ifdef _WIN32
+            // Fuck. QT. Sideways.
+            // QObject::~QObject: Timers cannot be stopped from another thread
+            // The above warning is thrown when exiting; it's coming from a QQuickPixmapCache
+            // destructor, so Qt Quick Controls/Fusion internals. Fucking piece of shit.
+            // I'm not leaving that on the console, engine.clearComponentCache() doesn't
+            // help, so a blunt instrument it is:
+            ExitProcess(result);
+        #endif
+        return result;
     }
 
     return EXIT_SUCCESS;
