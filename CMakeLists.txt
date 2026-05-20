@@ -69,6 +69,8 @@ add_executable(
   src/launcher_host_model.cpp
   src/launcher_host_store.cpp
   src/launcher_reachability_probe.cpp
+  src/launcher_theme.cpp
+  src/launcher_theme.hpp
   src/launcher_types.cpp
   src/log.cpp
   src/megarac_view.cpp

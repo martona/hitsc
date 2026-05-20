@@ -43,6 +43,16 @@ public:
         const QString& username,
         const QString& password,
         const QString& repeat_password);
+    Q_INVOKABLE QVariantMap hostDetails(const QString& host_id) const;
+    Q_INVOKABLE QVariantMap updateHost(
+        const QString& host_id,
+        const QString& type,
+        const QString& name,
+        const QString& url,
+        const QString& username,
+        const QString& password,
+        const QString& repeat_password);
+    Q_INVOKABLE QVariantMap deleteHost(const QString& host_id);
     Q_INVOKABLE QString defaultUrlForName(const QString& name) const;
 
 signals:

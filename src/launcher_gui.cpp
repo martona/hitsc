@@ -1,6 +1,7 @@
 #include "launcher_gui.hpp"
 
 #include "launcher_host_model.hpp"
+#include "launcher_theme.hpp"
 
 #include <QColor>
 #include <QGuiApplication>
@@ -8,7 +9,6 @@
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
 #include <QQuickStyle>
-#include <QSettings>
 #include <QStyleHints>
 #include <QUrl>
 #include <QWindow>
@@ -23,32 +23,6 @@
 namespace hitsc {
 
 namespace {
-
-#ifdef _WIN32
-bool windows_apps_use_dark_theme()
-{
-    const QSettings theme_settings(
-        QStringLiteral("HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"),
-        QSettings::NativeFormat);
-    return theme_settings.value(QStringLiteral("AppsUseLightTheme"), 1).toInt() == 0;
-}
-#endif
-
-bool should_use_dark_theme(Qt::ColorScheme color_scheme)
-{
-    if (color_scheme == Qt::ColorScheme::Dark) {
-        return true;
-    }
-    if (color_scheme == Qt::ColorScheme::Light) {
-        return false;
-    }
-
-#ifdef _WIN32
-    return windows_apps_use_dark_theme();
-#else
-    return false;
-#endif
-}
 
 QPalette make_dark_palette()
 {
@@ -93,19 +67,39 @@ QPalette make_dark_palette()
 
 void apply_application_theme(QGuiApplication& app, const QPalette& light_palette, Qt::ColorScheme color_scheme)
 {
-    const bool dark = should_use_dark_theme(color_scheme);
+    const bool dark = launcher_should_use_dark_theme(color_scheme);
     app.styleHints()->setColorScheme(dark ? Qt::ColorScheme::Dark : Qt::ColorScheme::Light);
     app.setPalette(dark ? make_dark_palette() : light_palette);
 }
 
 #ifdef _WIN32
+void ensure_resizable_window_frame(QWindow* window)
+{
+    if (window == nullptr) {
+        return;
+    }
+
+    const HWND hwnd = reinterpret_cast<HWND>(window->winId());
+    LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+    style |= WS_THICKFRAME | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
+    SetWindowLongPtrW(hwnd, GWL_STYLE, style);
+    SetWindowPos(
+        hwnd,
+        nullptr,
+        0,
+        0,
+        0,
+        0,
+        SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOOWNERZORDER | SWP_NOZORDER);
+}
+
 void apply_title_bar_theme(QWindow* window, Qt::ColorScheme color_scheme)
 {
     if (window == nullptr) {
         return;
     }
 
-    const BOOL use_dark_title_bar = should_use_dark_theme(color_scheme) ? TRUE : FALSE;
+    const BOOL use_dark_title_bar = launcher_should_use_dark_theme(color_scheme) ? TRUE : FALSE;
     const HWND hwnd = reinterpret_cast<HWND>(window->winId());
     constexpr DWORD kDwmWindowAttributeUseImmersiveDarkMode = 20;
     DwmSetWindowAttribute(
@@ -129,9 +123,11 @@ int run_launcher_gui(int argc, char* argv[])
     apply_application_theme(app, light_palette, app.styleHints()->colorScheme());
 
     LauncherHostModel host_model;
+    LauncherTheme launcher_theme(app.styleHints()->colorScheme());
 
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty(QStringLiteral("hostModel"), &host_model);
+    engine.rootContext()->setContextProperty(QStringLiteral("launcherTheme"), &launcher_theme);
     engine.loadFromModule(QStringLiteral("Hitsc.Launcher"), QStringLiteral("LauncherWindow"));
     if (engine.rootObjects().isEmpty()) {
         return EXIT_FAILURE;
@@ -139,13 +135,15 @@ int run_launcher_gui(int argc, char* argv[])
 
 #ifdef _WIN32
     auto* root_window = qobject_cast<QWindow*>(engine.rootObjects().first());
+    ensure_resizable_window_frame(root_window);
     apply_title_bar_theme(root_window, app.styleHints()->colorScheme());
     QObject::connect(
         app.styleHints(),
         &QStyleHints::colorSchemeChanged,
         &app,
-        [&app, light_palette, root_window](Qt::ColorScheme color_scheme) {
+        [&app, light_palette, root_window, &launcher_theme](Qt::ColorScheme color_scheme) {
             apply_application_theme(app, light_palette, color_scheme);
+            launcher_theme.setColorScheme(color_scheme);
             apply_title_bar_theme(root_window, color_scheme);
         });
 #else
@@ -153,8 +151,9 @@ int run_launcher_gui(int argc, char* argv[])
         app.styleHints(),
         &QStyleHints::colorSchemeChanged,
         &app,
-        [&app, light_palette](Qt::ColorScheme color_scheme) {
+        [&app, light_palette, &launcher_theme](Qt::ColorScheme color_scheme) {
             apply_application_theme(app, light_palette, color_scheme);
+            launcher_theme.setColorScheme(color_scheme);
         });
 #endif
 

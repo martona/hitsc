@@ -433,6 +433,24 @@ void HostStore::save_host(const SavedHost& host) const
     }
 }
 
+void HostStore::delete_host(const QString& id) const
+{
+    const QString trimmed_id = id.trimmed();
+    if (trimmed_id.isEmpty()) {
+        throw UserError("saved host id is empty");
+    }
+
+    const RegistryKey root = create_key(HKEY_CURRENT_USER, root_path_);
+    write_schema_version(root.get());
+    const RegistryKey hosts = create_key(root.get(), QStringLiteral("Hosts"));
+
+    const std::wstring wide_id = to_wide(trimmed_id);
+    const LONG result = RegDeleteTreeW(hosts.get(), wide_id.c_str());
+    if (result != ERROR_SUCCESS && result != ERROR_FILE_NOT_FOUND) {
+        throw_windows_error("failed to delete saved host", result);
+    }
+}
+
 #else
 
 QByteArray CredentialProtector::protect(const QByteArray& plaintext) const
@@ -455,6 +473,12 @@ QList<SavedHost> HostStore::load_hosts() const
 void HostStore::save_host(const SavedHost& host) const
 {
     (void)host;
+    throw UserError("saved host storage is not implemented on this platform");
+}
+
+void HostStore::delete_host(const QString& id) const
+{
+    (void)id;
     throw UserError("saved host storage is not implemented on this platform");
 }
 

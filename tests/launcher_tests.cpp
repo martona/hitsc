@@ -131,6 +131,9 @@ void test_host_store()
                     "registry store preserves password");
             }
         }
+
+        store.delete_host(host.id);
+        expect(store.load_hosts().empty(), "registry store deletes host");
     } catch (const std::exception& ex) {
         std::cerr << "FAIL: registry store round-trip threw: " << ex.what() << "\n";
         ++failures;

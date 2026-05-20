@@ -149,6 +149,135 @@ QVariantMap LauncherHostModel::addHost(
     return ok_result();
 }
 
+QVariantMap LauncherHostModel::hostDetails(const QString& host_id) const
+{
+    const int row = index_for_id(host_id);
+    if (row < 0) {
+        return error_result(QStringLiteral("Saved host was not found."));
+    }
+
+    const SavedHost& host = hosts_.at(row);
+    return QVariantMap{
+        {QStringLiteral("ok"), true},
+        {QStringLiteral("error"), QString{}},
+        {QStringLiteral("id"), host.id},
+        {QStringLiteral("type"), launcher_host_type_key(host.type)},
+        {QStringLiteral("typeLabel"), launcher_host_type_label(host.type)},
+        {QStringLiteral("name"), host.name},
+        {QStringLiteral("url"), host.url},
+        {QStringLiteral("username"), host.credentials ? host.credentials->username : QString{}},
+        {QStringLiteral("hasCredentials"), host.credentials.has_value() && !host.credentials->empty()},
+    };
+}
+
+QVariantMap LauncherHostModel::updateHost(
+    const QString& host_id,
+    const QString& type,
+    const QString& name,
+    const QString& url,
+    const QString& username,
+    const QString& password,
+    const QString& repeat_password)
+{
+    const int row = index_for_id(host_id);
+    if (row < 0) {
+        return error_result(QStringLiteral("Saved host was not found."));
+    }
+
+    const std::optional<LauncherHostType> parsed_type = parse_launcher_host_type(type);
+    if (!parsed_type) {
+        return error_result(QStringLiteral("Choose a supported host type."));
+    }
+
+    const QString trimmed_name = name.trimmed();
+    if (trimmed_name.isEmpty()) {
+        return error_result(QStringLiteral("Name is required."));
+    }
+
+    const QString trimmed_url = url.trimmed();
+    QString url_error;
+    if (trimmed_url.isEmpty() || !validate_launcher_url(trimmed_url, &url_error)) {
+        return error_result(
+            url_error.isEmpty() ? QStringLiteral("Enter a valid https:// URL.") : url_error);
+    }
+
+    if (password != repeat_password) {
+        return error_result(QStringLiteral("Passwords do not match."));
+    }
+
+    SavedHost host = hosts_.at(row);
+    const bool url_changed = host.url != trimmed_url;
+    host.type = *parsed_type;
+    host.name = trimmed_name;
+    host.url = trimmed_url;
+
+    LauncherCredentials credentials;
+    credentials.username = username.trimmed();
+    if (password.isEmpty() && repeat_password.isEmpty() && host.credentials) {
+        credentials.password = host.credentials->password;
+    } else {
+        credentials.password = password;
+    }
+
+    if (!credentials.empty()) {
+        host.credentials = credentials;
+    } else {
+        host.credentials.reset();
+    }
+
+    if (url_changed) {
+        probes_in_flight_.remove(host.id);
+        host.reachability = ReachabilityStatus::Unknown;
+    }
+
+    try {
+        store_.save_host(host);
+    } catch (const std::exception& ex) {
+        return error_result(QString::fromUtf8(ex.what()));
+    }
+
+    hosts_[row] = host;
+    const QModelIndex changed = index(row, 0);
+    emit dataChanged(
+        changed,
+        changed,
+        {TypeRole,
+         TypeLabelRole,
+         NameRole,
+         UrlRole,
+         HostRole,
+         StatusRole,
+         StatusLabelRole,
+         HasCredentialsRole});
+
+    if (url_changed) {
+        start_probes();
+    }
+
+    return ok_result();
+}
+
+QVariantMap LauncherHostModel::deleteHost(const QString& host_id)
+{
+    const int row = index_for_id(host_id);
+    if (row < 0) {
+        return error_result(QStringLiteral("Saved host was not found."));
+    }
+
+    try {
+        store_.delete_host(host_id);
+    } catch (const std::exception& ex) {
+        return error_result(QString::fromUtf8(ex.what()));
+    }
+
+    probes_in_flight_.remove(host_id);
+    beginRemoveRows(QModelIndex(), row, row);
+    hosts_.removeAt(row);
+    endRemoveRows();
+    emit countChanged();
+    return ok_result();
+}
+
 QString LauncherHostModel::defaultUrlForName(const QString& name) const
 {
     return sanitize_host_name_to_url(name);

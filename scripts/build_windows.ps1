@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [ValidateSet("Debug", "Release", "RelWithDebInfo", "MinSizeRel")]
-    [string]$BuildType = "Debug",
+    [string]$BuildType = "Release",
 
     [string]$Triplet = "",
 

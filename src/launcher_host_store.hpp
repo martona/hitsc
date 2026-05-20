@@ -20,6 +20,7 @@ public:
 
     QList<SavedHost> load_hosts() const;
     void save_host(const SavedHost& host) const;
+    void delete_host(const QString& id) const;
 
     const QString& root_path() const;
 
