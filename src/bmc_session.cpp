@@ -393,6 +393,12 @@ BmcWebSession login_bmc_web_session(const LoginOptions& options, const BmcLoginP
             + std::to_string(status) + ": " + body_snippet(body));
     }
 
+    if (profile.require_login_cookie && session.cookie_count() == 0) {
+        throw UserError(
+            profile.vendor_name
+            + " login failed: authentication response did not set a session cookie");
+    }
+
     const std::string decoded_body = decode_response_body(response);
     if (profile.token_parser != nullptr) {
         session.set_session_token(profile.token_parser(decoded_body), profile.token_cookie_name);

@@ -47,6 +47,7 @@ struct BmcLoginProfile {
     BmcSessionTokenParser token_parser = nullptr;
     std::string token_cookie_name;
     int max_success_status = 299;
+    bool require_login_cookie = true;
 };
 
 using BmcWebSocketStream = boost::beast::websocket::stream<
