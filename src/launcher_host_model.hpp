@@ -4,6 +4,7 @@
 #include "launcher_reachability_probe.hpp"
 
 #include <QAbstractListModel>
+#include <QHash>
 #include <QList>
 #include <QSet>
 #include <QTimer>
@@ -71,6 +72,7 @@ private:
     ReachabilityProbe reachability_probe_;
     QTimer probe_timer_;
     QSet<QString> probes_in_flight_;
+    QHash<QString, int> consecutive_probe_failures_;
 };
 
 } // namespace hitsc

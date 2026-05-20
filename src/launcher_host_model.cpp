@@ -11,6 +11,8 @@
 namespace hitsc {
 namespace {
 
+constexpr int kOnlineOfflineFailureThreshold = 2;
+
 QVariantMap ok_result()
 {
     return QVariantMap{{QStringLiteral("ok"), true}, {QStringLiteral("error"), QString{}}};
@@ -47,6 +49,7 @@ void LauncherHostModel::shutdown()
 
     probe_timer_.stop();
     probes_in_flight_.clear();
+    consecutive_probe_failures_.clear();
     reachability_probe_.shutdown();
 }
 
@@ -245,6 +248,7 @@ QVariantMap LauncherHostModel::updateHost(
 
     if (url_changed) {
         probes_in_flight_.remove(host.id);
+        consecutive_probe_failures_.remove(host.id);
         host.reachability = ReachabilityStatus::Unknown;
     }
 
@@ -289,6 +293,7 @@ QVariantMap LauncherHostModel::deleteHost(const QString& host_id)
     }
 
     probes_in_flight_.remove(host_id);
+    consecutive_probe_failures_.remove(host_id);
     beginRemoveRows(QModelIndex(), row, row);
     hosts_.removeAt(row);
     endRemoveRows();
@@ -311,6 +316,7 @@ void LauncherHostModel::start_probes()
 
         const QString host = host_from_launcher_url(saved_host.url);
         if (host.isEmpty()) {
+            consecutive_probe_failures_.remove(saved_host.id);
             saved_host.reachability = ReachabilityStatus::Offline;
             const QModelIndex changed = index(row, 0);
             emit dataChanged(changed, changed, {StatusRole, StatusLabelRole});
@@ -342,8 +348,19 @@ void LauncherHostModel::update_reachability(const QString& host_id, bool online)
         return;
     }
 
-    const ReachabilityStatus next_status =
-        online ? ReachabilityStatus::Online : ReachabilityStatus::Offline;
+    ReachabilityStatus next_status = ReachabilityStatus::Offline;
+    if (online) {
+        consecutive_probe_failures_.remove(host_id);
+        next_status = ReachabilityStatus::Online;
+    } else {
+        const int failure_count = consecutive_probe_failures_.value(host_id, 0) + 1;
+        consecutive_probe_failures_.insert(host_id, failure_count);
+        if (hosts_[row].reachability == ReachabilityStatus::Online
+            && failure_count < kOnlineOfflineFailureThreshold) {
+            return;
+        }
+    }
+
     if (hosts_[row].reachability == next_status) {
         return;
     }

@@ -2,6 +2,8 @@
 
 #include "launcher_host_model.hpp"
 #include "launcher_theme.hpp"
+#include "window_placement.hpp"
+#include "window_prefs_store.hpp"
 
 #include <QColor>
 #include <QGuiApplication>
@@ -171,8 +173,14 @@ int run_launcher_gui(int argc, char* argv[])
         return EXIT_FAILURE;
     }
 
-#ifdef _WIN32
     auto* root_window = qobject_cast<QWindow*>(engine.rootObjects().first());
+    WindowPlacementController window_placement(
+        root_window,
+        WindowPrefsStore{},
+        QStringLiteral("Launcher"));
+    window_placement.restore();
+
+#ifdef _WIN32
     LauncherBackgroundEraseFilter background_erase_filter;
     background_erase_filter.set_window(root_window);
     background_erase_filter.set_color(app.palette().color(QPalette::Window));

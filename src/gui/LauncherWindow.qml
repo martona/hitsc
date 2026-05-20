@@ -7,7 +7,7 @@ ApplicationWindow {
 
     width: 980
     height: 680
-    minimumWidth: 520
+    minimumWidth: 300
     minimumHeight: 420
     visible: true
     title: "hitsc"
@@ -327,6 +327,7 @@ ApplicationWindow {
         property string editingHostId: ""
         property bool urlDirty: false
         property string errorText: ""
+        readonly property string passwordMismatchText: "Passwords do not match."
 
         modal: true
         closePolicy: Popup.CloseOnEscape
@@ -379,6 +380,46 @@ ApplicationWindow {
             urlDirty = true
             open()
             nameField.forceActiveFocus()
+        }
+
+        function validatePasswordMatch() {
+            if (repeatPasswordField.text.length > 0 && passwordField.text !== repeatPasswordField.text) {
+                errorText = passwordMismatchText
+                return false
+            }
+
+            if (errorText === passwordMismatchText)
+                errorText = ""
+
+            return true
+        }
+
+        function submit() {
+            if (!validatePasswordMatch())
+                return
+
+            const typeKey = typeCombo.currentValue || typeCombo.currentText
+            const result = addHostDialog.editing
+                ? hostModel.updateHost(
+                      addHostDialog.editingHostId,
+                      typeKey,
+                      nameField.text,
+                      urlField.text,
+                      usernameField.text,
+                      passwordField.text,
+                      repeatPasswordField.text)
+                : hostModel.addHost(
+                      typeKey,
+                      nameField.text,
+                      urlField.text,
+                      usernameField.text,
+                      passwordField.text,
+                      repeatPasswordField.text)
+            if (result.ok) {
+                addHostDialog.close()
+            } else {
+                addHostDialog.errorText = result.error
+            }
         }
 
         background: Rectangle {
@@ -436,6 +477,7 @@ ApplicationWindow {
                         if (!addHostDialog.urlDirty)
                             urlField.text = hostModel.defaultUrlForName(text)
                     }
+                    onAccepted: addHostDialog.submit()
                 }
             }
 
@@ -446,6 +488,7 @@ ApplicationWindow {
                 palette: root.palette
                 inputMethodHints: Qt.ImhUrlCharactersOnly
                 onTextEdited: addHostDialog.urlDirty = true
+                onAccepted: addHostDialog.submit()
             }
 
             TextField {
@@ -453,6 +496,7 @@ ApplicationWindow {
                 placeholderText: "Username"
                 Layout.fillWidth: true
                 palette: root.palette
+                onAccepted: addHostDialog.submit()
             }
 
             TextField {
@@ -461,6 +505,8 @@ ApplicationWindow {
                 echoMode: TextInput.Password
                 Layout.fillWidth: true
                 palette: root.palette
+                onTextEdited: addHostDialog.validatePasswordMatch()
+                onAccepted: addHostDialog.submit()
             }
 
             TextField {
@@ -469,14 +515,18 @@ ApplicationWindow {
                 echoMode: TextInput.Password
                 Layout.fillWidth: true
                 palette: root.palette
+                onTextEdited: addHostDialog.validatePasswordMatch()
+                onAccepted: addHostDialog.submit()
             }
 
             Label {
                 text: addHostDialog.errorText
-                visible: text.length > 0
+                opacity: text.length > 0 ? 1 : 0
                 color: "#d75f5f"
                 wrapMode: Text.WordWrap
                 Layout.fillWidth: true
+                Layout.preferredHeight: 20
+                clip: true
             }
 
             RowLayout {
@@ -496,30 +546,7 @@ ApplicationWindow {
                     text: addHostDialog.editing ? "Save" : "Add"
                     highlighted: true
                     palette: root.palette
-                    onClicked: {
-                        const typeKey = typeCombo.currentValue || typeCombo.currentText
-                        const result = addHostDialog.editing
-                            ? hostModel.updateHost(
-                                  addHostDialog.editingHostId,
-                                  typeKey,
-                                  nameField.text,
-                                  urlField.text,
-                                  usernameField.text,
-                                  passwordField.text,
-                                  repeatPasswordField.text)
-                            : hostModel.addHost(
-                                  typeKey,
-                                  nameField.text,
-                                  urlField.text,
-                                  usernameField.text,
-                                  passwordField.text,
-                                  repeatPasswordField.text)
-                        if (result.ok) {
-                            addHostDialog.close()
-                        } else {
-                            addHostDialog.errorText = result.error
-                        }
-                    }
+                    onClicked: addHostDialog.submit()
                 }
             }
         }

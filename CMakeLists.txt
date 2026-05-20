@@ -74,6 +74,10 @@ add_executable(
   src/launcher_theme.hpp
   src/launcher_types.cpp
   src/log.cpp
+  src/window_placement.cpp
+  src/window_placement.hpp
+  src/window_prefs_store.cpp
+  src/window_prefs_store.hpp
   src/megarac_view.cpp
   src/main.cpp
   src/hardware_cursor.cpp
