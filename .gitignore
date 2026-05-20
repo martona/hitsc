@@ -3,6 +3,7 @@
 /out/
 /cmake-build-*/
 /vcpkg_installed/
+/.vcpkg/
 
 # Local CMake/user state
 CMakeUserPresets.json

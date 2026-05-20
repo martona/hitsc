@@ -19,6 +19,8 @@
       ]
     },
     "openssl",
+    "qtbase",
+    "qtdeclarative",
     "sdl3",
     "zlib"
   ]

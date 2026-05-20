@@ -17,12 +17,7 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 
 if (-not $Triplet) {
-    if ($BuildType -eq "Release") {
-        $Triplet = "x64-windows-static"
-    }
-    else {
-        $Triplet = "x64-windows"
-    }
+    $Triplet = "x64-windows-static"
 }
 
 function Find-Executable {
@@ -199,6 +194,7 @@ $resolvedVcpkgRoot = Resolve-VcpkgRoot -RequestedRoot $VcpkgRoot
 $env:VCPKG_ROOT = $resolvedVcpkgRoot
 $toolchainFile = Join-Path $resolvedVcpkgRoot "scripts\buildsystems\vcpkg.cmake"
 $buildDir = Join-Path $repoRoot "build\windows-$($BuildType.ToLowerInvariant())"
+$vcpkgInstalledDir = Join-Path $repoRoot ".vcpkg"
 $cacheFile = Join-Path $buildDir "CMakeCache.txt"
 $cmakeExe = Resolve-Executable -Name "cmake" -Candidates $cmakeCandidates
 
@@ -206,6 +202,7 @@ $configureArgs = @(
     "-S", $repoRoot,
     "-B", $buildDir,
     "-DVCPKG_TARGET_TRIPLET=$Triplet"
+    "-DVCPKG_INSTALLED_DIR=$vcpkgInstalledDir"
     "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"
 )
 

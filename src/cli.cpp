@@ -4,6 +4,7 @@
 #include "aten_view.hpp"
 #include "console.hpp"
 #include "errors.hpp"
+#include "launcher_gui.hpp"
 #include "megarac_view.hpp"
 #include "options.hpp"
 #include "pikvm_view.hpp"
@@ -102,6 +103,8 @@ int run_cli(int argc, char* argv[])
     app.set_version_flag("--version", std::string(kName) + " " + std::string(kVersion));
     app.require_subcommand(1);
 
+    CLI::App* gui = app.add_subcommand("gui", "Open the saved-host launcher.");
+
     MegaracViewOptions megarac_options;
     std::string megarac_url;
     std::string megarac_password_env_name;
@@ -158,7 +161,8 @@ int run_cli(int argc, char* argv[])
             && command.front() != '-'
             && command != "megarac"
             && command != "aten"
-            && command != "pikvm") {
+            && command != "pikvm"
+            && command != "gui") {
             std::cerr << "Unknown subcommand: " << command << "\n";
             std::cerr << "Run with --help for more information.\n";
             return EXIT_FAILURE;
@@ -198,6 +202,10 @@ int run_cli(int argc, char* argv[])
 
         run_pikvm_view(pikvm_options);
         return EXIT_SUCCESS;
+    }
+
+    if (*gui) {
+        return run_launcher_gui(argc, argv);
     }
 
     return EXIT_SUCCESS;

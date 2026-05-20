@@ -21,8 +21,15 @@ find_package(Boost REQUIRED CONFIG COMPONENTS json log log_setup system)
 find_package(CLI11 CONFIG REQUIRED)
 find_package(FFMPEG REQUIRED)
 find_package(OpenSSL REQUIRED)
+find_package(Qt6 REQUIRED COMPONENTS Core Gui Qml Quick QuickControls2 QuickLayouts)
 find_package(SDL3 CONFIG REQUIRED)
 find_package(ZLIB REQUIRED)
+
+qt_policy(SET QTP0001 NEW)
+qt_policy(SET QTP0004 NEW)
+
+set(CMAKE_AUTOMOC ON)
+set(CMAKE_AUTORCC ON)
 
 add_library(
   aspeed_codec
@@ -57,6 +64,12 @@ add_executable(
   src/cookie_jar.cpp
   src/diagnostics.cpp
   src/http_client.cpp
+  src/launcher_child_protocol.cpp
+  src/launcher_gui.cpp
+  src/launcher_host_model.cpp
+  src/launcher_host_store.cpp
+  src/launcher_reachability_probe.cpp
+  src/launcher_types.cpp
   src/log.cpp
   src/megarac_view.cpp
   src/main.cpp
@@ -82,6 +95,8 @@ add_executable(
 
 target_compile_features(hitsc PRIVATE cxx_std_20)
 
+add_subdirectory(src/gui)
+
 target_compile_definitions(
   hitsc
   PRIVATE
@@ -104,7 +119,7 @@ if(MSVC)
   target_link_options(
     hitsc
     PRIVATE
-      "$<$<CONFIG:Release>:/DEBUG:FULL>"
+      "$<$<CONFIG:Release>:/DEBUG>"
       "$<$<CONFIG:Release>:/MAP>"
   )
 else()
@@ -135,10 +150,49 @@ target_link_libraries(
     ${FFMPEG_LIBRARIES}
     OpenSSL::SSL
     OpenSSL::Crypto
+    Qt6::Core
+    Qt6::Gui
+    Qt6::Qml
+    Qt6::Quick
+    Qt6::QuickControls2
+    Qt6::QuickLayouts
     SDL3::SDL3
+    hitsc_launcher_qml
     ZLIB::ZLIB
 )
 
+if(HITSC_STATIC_VCPKG_TRIPLET)
+  target_link_libraries(hitsc PRIVATE hitsc_launcher_qmlplugin)
+endif()
+
 if(WIN32)
-  target_link_libraries(hitsc PRIVATE D3d11 Dbghelp Dxgi)
+  target_link_libraries(hitsc PRIVATE Crypt32 D3d11 Dbghelp Dwmapi Dxgi Iphlpapi Ws2_32)
+endif()
+
+include(CTest)
+if(BUILD_TESTING)
+  add_executable(
+    hitsc_tests
+    src/launcher_host_store.cpp
+    src/launcher_types.cpp
+    src/url.cpp
+    tests/launcher_tests.cpp
+  )
+
+  target_compile_features(hitsc_tests PRIVATE cxx_std_20)
+  target_include_directories(hitsc_tests PRIVATE src)
+  target_link_libraries(hitsc_tests PRIVATE Qt6::Core)
+
+  if(WIN32)
+    target_compile_definitions(
+      hitsc_tests
+      PRIVATE
+        NOMINMAX
+        WIN32_LEAN_AND_MEAN
+        _WIN32_WINNT=0x0A00
+    )
+    target_link_libraries(hitsc_tests PRIVATE Crypt32)
+  endif()
+
+  add_test(NAME hitsc_tests COMMAND hitsc_tests)
 endif()
