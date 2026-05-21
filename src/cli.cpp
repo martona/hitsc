@@ -252,16 +252,17 @@ int run_cli(int argc, char* argv[])
     if (*gui) {
         normalize_verbosity(process_verbosity);
         int result = run_launcher_gui(argc, argv, process_verbosity);
-        #ifdef _WIN32
-            // Fuck. QT. Sideways.
-            // QObject::~QObject: Timers cannot be stopped from another thread
-            // The above warning is thrown when exiting; it's coming from a QQuickPixmapCache
-            // destructor, so Qt Quick Controls/Fusion internals. Fucking piece of shit.
-            // I'm not leaving that on the console, engine.clearComponentCache() doesn't
-            // help, so a blunt instrument it is:
-            ExitProcess(result);
-        #endif
+    #ifdef _WIN32
+        // Fuck. QT. Sideways.
+        // QObject::~QObject: Timers cannot be stopped from another thread
+        // The above warning is thrown when exiting; it's coming from a QQuickPixmapCache
+        // destructor, so Qt Quick Controls/Fusion internals. Fucking piece of shit.
+        // I'm not leaving that on the console, engine.clearComponentCache() doesn't
+        // help, so a blunt instrument it is:
+        ExitProcess(result);
+    #else
         return result;
+    #endif
     }
 
     return EXIT_SUCCESS;
