@@ -401,71 +401,6 @@ AtenRfbServerInit read_server_init(RfbHandshakeStream& rfb, bool insyde_extensio
     return init;
 }
 
-void set_aten_force_close(AtenViewState& state, std::function<void()> force_close)
-{
-    std::lock_guard lock(state.control_mutex);
-    state.force_close = std::move(force_close);
-}
-
-void push_aten_render_event(AtenViewState& state)
-{
-    const auto frame_event_type = static_cast<Uint32>(state.frame_event_type.load());
-    if (frame_event_type != 0 && !state.frame_event_pending.exchange(true)) {
-        SDL_Event event{};
-        event.type = frame_event_type;
-        if (!SDL_PushEvent(&event)) {
-            state.frame_event_pending.store(false);
-        }
-    }
-}
-
-void publish_aten_frame(AtenViewState& state, AtenCompressedFrame frame)
-{
-    frame.published_at = std::chrono::steady_clock::now();
-    {
-        std::lock_guard lock(state.frame_mutex);
-        frame.sequence = ++state.frame_sequence;
-        state.frame = std::make_shared<AtenCompressedFrame>(std::move(frame));
-    }
-
-    push_aten_render_event(state);
-}
-
-void publish_aten_cursor(AtenViewState& state, HardwareCursor cursor)
-{
-    {
-        std::lock_guard lock(state.frame_mutex);
-        cursor.sequence = ++state.cursor_sequence;
-        state.cursor = std::move(cursor);
-        state.has_cursor = true;
-    }
-
-    push_aten_render_event(state);
-}
-
-void install_aten_input_sink(
-    AtenViewState& state,
-    std::function<void(std::vector<std::uint8_t>)> input_sink)
-{
-    std::deque<std::vector<std::uint8_t>> pending;
-    {
-        std::lock_guard lock(state.control_mutex);
-        state.input_sink = input_sink;
-        pending.swap(state.pending_input);
-    }
-
-    for (std::vector<std::uint8_t>& packet : pending) {
-        input_sink(std::move(packet));
-    }
-}
-
-void clear_aten_input_sink(AtenViewState& state)
-{
-    std::lock_guard lock(state.control_mutex);
-    state.input_sink = {};
-    state.pending_input.clear();
-}
-
 class AtenNetworkRfbSession : public std::enable_shared_from_this<AtenNetworkRfbSession> {
 public:
     AtenNetworkRfbSession(
@@ -489,8 +424,7 @@ public:
     void start(std::vector<std::uint8_t> initial_bytes)
     {
         auto weak = weak_from_this();
-        install_aten_input_sink(
-            state_,
+        state_.input.install(
             [weak](std::vector<std::uint8_t> packet) mutable {
                 if (auto self = weak.lock()) {
                     self->send_packet(std::move(packet));
@@ -601,7 +535,7 @@ private:
             || error == asio::error::bad_descriptor
             || error == ssl::error::stream_truncated;
         if (!expected_stop) {
-            set_aten_exception(state_, std::make_exception_ptr(
+            state_.set_exception(std::make_exception_ptr(
                 beast::system_error(error, "ATEN websocket read failed")));
             log_error() << "aten websocket read callback error=" << error.message();
         } else if (options_.login.verbose) {
@@ -645,7 +579,7 @@ private:
             }
             log_stats_if_due();
         } catch (...) {
-            set_aten_exception(state_, std::current_exception());
+            state_.set_exception(std::current_exception());
             close_now();
         }
     }
@@ -778,7 +712,9 @@ private:
         frame.compressed.assign(payload.begin() + 4, payload.end());
         frame.received_at = std::chrono::steady_clock::now();
         frame.websocket_bytes = last_websocket_message_bytes_;
-        publish_aten_frame(state_, std::move(frame));
+        frame.published_at = std::chrono::steady_clock::now();
+        state_.frames.publish(std::move(frame));
+        state_.push_render_event();
         state_.view_status.kvm_display_status(true);
 
         previous_width_ = rect.width;
@@ -831,7 +767,8 @@ private:
             cursor_pattern_height_ = hardware_cursor.pattern_height;
         }
         const HardwareCursor cursor_for_log = hardware_cursor;
-        publish_aten_cursor(state_, std::move(hardware_cursor));
+        state_.cursors.publish(std::move(hardware_cursor));
+        state_.push_render_event();
 
         if (options_.login.vverbose) {
             LogLine line = log_info();
@@ -892,7 +829,7 @@ private:
                     return;
                 }
                 if (error) {
-                    set_aten_exception(self->state_, std::make_exception_ptr(
+                    self->state_.set_exception(std::make_exception_ptr(
                         beast::system_error(error, "ATEN framebuffer request timer failed")));
                     self->close_now();
                     return;
@@ -960,7 +897,7 @@ private:
                 || error == asio::error::bad_descriptor;
             if (!expected_stop) {
                 log_error() << "aten websocket write callback error=" << error.message();
-                set_aten_exception(state_, std::make_exception_ptr(
+                state_.set_exception(std::make_exception_ptr(
                     beast::system_error(error, "ATEN websocket write failed")));
             }
             close_now();
@@ -980,7 +917,7 @@ private:
             return;
         }
         closed_ = true;
-        clear_aten_input_sink(state_);
+        state_.input.clear();
         framebuffer_request_timer_.cancel();
         parser_.clear();
 
@@ -1038,82 +975,6 @@ private:
 
 } // namespace
 
-void set_aten_exception(AtenViewState& state, std::exception_ptr exception)
-{
-    std::lock_guard lock(state.control_mutex);
-    if (!state.exception) {
-        state.exception = exception;
-    }
-}
-
-std::exception_ptr take_aten_exception(AtenViewState& state)
-{
-    std::lock_guard lock(state.control_mutex);
-    return state.exception;
-}
-
-std::shared_ptr<const AtenCompressedFrame> take_latest_aten_frame(
-    AtenViewState& state,
-    std::uint64_t last_sequence)
-{
-    std::lock_guard lock(state.frame_mutex);
-    if (!state.frame || state.frame->sequence == last_sequence) {
-        return {};
-    }
-    return state.frame;
-}
-
-void clear_latest_aten_frame(AtenViewState& state)
-{
-    std::lock_guard lock(state.frame_mutex);
-    state.frame.reset();
-}
-
-std::optional<HardwareCursor> take_latest_aten_cursor(
-    AtenViewState& state,
-    std::uint64_t last_sequence)
-{
-    std::lock_guard lock(state.frame_mutex);
-    if (!state.has_cursor || state.cursor.sequence == last_sequence) {
-        return std::nullopt;
-    }
-    return state.cursor;
-}
-
-void queue_aten_input_packet(
-    AtenViewState& state,
-    std::vector<std::uint8_t> packet)
-{
-    std::function<void(std::vector<std::uint8_t>)> input_sink;
-    {
-        std::lock_guard lock(state.control_mutex);
-        input_sink = state.input_sink;
-        if (!input_sink) {
-            state.pending_input.push_back(std::move(packet));
-            return;
-        }
-    }
-
-    input_sink(std::move(packet));
-}
-
-void queue_aten_key_event(
-    AtenViewState& state,
-    std::uint32_t usage,
-    bool down)
-{
-    queue_aten_input_packet(state, make_aten_key_event(usage, down));
-}
-
-void queue_aten_pointer_event(
-    AtenViewState& state,
-    int x,
-    int y,
-    std::uint8_t mask)
-{
-    queue_aten_input_packet(state, make_aten_pointer_event(x, y, mask));
-}
-
 void stop_aten_network(
     AtenViewState& state,
     std::atomic_bool& stop_requested,
@@ -1121,12 +982,7 @@ void stop_aten_network(
 {
     stop_requested.store(true);
 
-    std::function<void()> force_close;
-    {
-        std::lock_guard lock(state.control_mutex);
-        force_close = state.force_close;
-    }
-    if (force_close) {
+    if (std::function<void()> force_close = state.force_close_snapshot()) {
         force_close();
     }
 
@@ -1176,7 +1032,7 @@ void run_aten_network_session(
     auto ws_ptr = websocket.connection->stream();
     AtenWebSocket& ws = *ws_ptr;
     asio::io_context& io = websocket.connection->io_context();
-    set_aten_force_close(state, [&web = session.web] {
+    state.set_force_close([&web = session.web] {
         web.force_close_websocket("aten");
     });
 
@@ -1233,7 +1089,7 @@ void run_aten_network_session(
         init,
         stop_requested);
     std::weak_ptr<AtenNetworkRfbSession> weak_network = network_session;
-    set_aten_force_close(state, [weak_network] {
+    state.set_force_close([weak_network] {
         if (auto network = weak_network.lock()) {
             network->request_stop();
         }
@@ -1242,8 +1098,8 @@ void run_aten_network_session(
     network_session->start(rfb.take_queued_bytes());
     io.run();
 
-    clear_aten_input_sink(state);
-    set_aten_force_close(state, {});
+    state.input.clear();
+    state.set_force_close({});
 }
 
 } // namespace hitsc

@@ -104,6 +104,7 @@ add_executable(
   src/tls_session_cache.cpp
   src/trace.cpp
   src/url.cpp
+  src/view_base.cpp
   src/view_status.cpp
 )
 

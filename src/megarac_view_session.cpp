@@ -9,8 +9,6 @@
 #include "megarac_video.hpp"
 #include "text.hpp"
 
-#include <SDL3/SDL.h>
-
 #include <boost/asio/bind_executor.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/ip/tcp.hpp>
@@ -300,164 +298,30 @@ std::string selected_subprotocol(const websocket::response_type& response)
     return protocol.empty() ? "base64" : protocol;
 }
 
-void push_render_event(MegaracViewSessionState& state)
-{
-    const auto frame_event_type = static_cast<Uint32>(state.frame_event_type.load());
-    if (frame_event_type != 0 && !state.frame_event_pending.exchange(true)) {
-        SDL_Event event{};
-        event.type = frame_event_type;
-        if (!SDL_PushEvent(&event)) {
-            state.frame_event_pending.store(false);
-        }
-    }
-}
-
-void publish_frame(MegaracViewSessionState& state, MegaracCompressedFrame frame)
-{
-    frame.published_at = std::chrono::steady_clock::now();
-    {
-        std::lock_guard lock(state.frame_mutex);
-        frame.sequence = ++state.frame_sequence;
-        state.frame = std::make_shared<MegaracCompressedFrame>(std::move(frame));
-    }
-
-    push_render_event(state);
-}
-
-void publish_cursor(MegaracViewSessionState& state, SharedCursor cursor)
-{
-    {
-        std::lock_guard lock(state.frame_mutex);
-        cursor.sequence = ++state.cursor_sequence;
-        state.cursor = std::move(cursor);
-        state.has_cursor = true;
-    }
-
-    push_render_event(state);
-}
-
 void set_mouse_mode(MegaracViewSessionState& state, int mouse_mode)
 {
     state.mouse_mode.store(mouse_mode);
 }
 
-void set_megarac_force_close(MegaracViewSessionState& state, std::function<void()> force_close)
-{
-    std::lock_guard lock(state.control_mutex);
-    state.force_close = std::move(force_close);
-}
-
-void clear_megarac_input_sink(MegaracViewSessionState& state)
-{
-    std::lock_guard lock(state.control_mutex);
-    state.input_sink = {};
-    state.pending_input.clear();
-}
-
-void install_megarac_input_sink(
-    MegaracViewSessionState& state,
-    std::function<void(std::uint16_t, std::vector<std::uint8_t>)> input_sink)
-{
-    std::deque<PendingMegaracInputPacket> pending;
-    {
-        std::lock_guard lock(state.control_mutex);
-        state.input_sink = input_sink;
-        pending.swap(state.pending_input);
-    }
-
-    for (PendingMegaracInputPacket& packet : pending) {
-        input_sink(packet.type, std::move(packet.packet));
-    }
-}
-
 void clear_megarac_control_callbacks(MegaracViewSessionState& state)
 {
-    std::lock_guard lock(state.control_mutex);
-    state.input_sink = {};
-    state.pending_input.clear();
-    state.force_close = {};
+    state.input.clear();
+    state.set_force_close({});
 }
 
 void force_close_network(MegaracViewSessionState& state)
 {
-    std::function<void()> force_close;
-    {
-        std::lock_guard lock(state.control_mutex);
-        force_close = state.force_close;
-        state.input_sink = {};
-        state.pending_input.clear();
-        state.force_close = {};
-    }
+    std::function<void()> force_close = state.force_close_snapshot();
+    clear_megarac_control_callbacks(state);
 
     if (force_close) {
         force_close();
     }
 }
 
-void set_megarac_exception(MegaracViewSessionState& state, std::exception_ptr exception)
-{
-    std::lock_guard lock(state.control_mutex);
-    if (!state.exception) {
-        state.exception = exception;
-    }
-}
-
-std::exception_ptr take_megarac_exception(MegaracViewSessionState& state)
-{
-    std::lock_guard lock(state.control_mutex);
-    return state.exception;
-}
-
 int megarac_view_mouse_mode_snapshot(MegaracViewSessionState& state)
 {
     return state.mouse_mode.load();
-}
-
-bool queue_megarac_view_packet(
-    MegaracViewSessionState& state,
-    std::uint16_t type,
-    std::vector<std::uint8_t> packet)
-{
-    std::function<void(std::uint16_t, std::vector<std::uint8_t>)> input_sink;
-    {
-        std::lock_guard lock(state.control_mutex);
-        input_sink = state.input_sink;
-        if (!input_sink) {
-            state.pending_input.push_back(PendingMegaracInputPacket{type, std::move(packet)});
-            return true;
-        }
-    }
-
-    input_sink(type, std::move(packet));
-    return true;
-}
-
-std::shared_ptr<const MegaracCompressedFrame> take_latest_megarac_view_frame(
-    MegaracViewSessionState& state,
-    std::uint64_t last_sequence)
-{
-    std::lock_guard lock(state.frame_mutex);
-    if (!state.frame || state.frame->sequence == last_sequence) {
-        return {};
-    }
-    return state.frame;
-}
-
-void clear_latest_megarac_view_frame(MegaracViewSessionState& state)
-{
-    std::lock_guard lock(state.frame_mutex);
-    state.frame.reset();
-}
-
-std::optional<MegaracHardwareCursor> take_latest_megarac_view_cursor(
-    MegaracViewSessionState& state,
-    std::uint64_t last_sequence)
-{
-    std::lock_guard lock(state.frame_mutex);
-    if (!state.has_cursor || state.cursor.sequence == last_sequence) {
-        return std::nullopt;
-    }
-    return state.cursor;
 }
 
 void log_packet(int number, const KvmPacket& packet)
@@ -602,7 +466,7 @@ private:
                 }
             }
         } catch (...) {
-            set_megarac_exception(state_, std::current_exception());
+            state_.set_exception(std::current_exception());
             print_current_exception_with_stack(std::cerr, "kvm websocket handler");
             close_socket();
             return;
@@ -634,7 +498,7 @@ private:
             return;
         }
 
-        set_megarac_exception(state_, std::make_exception_ptr(
+        state_.set_exception(std::make_exception_ptr(
             beast::system_error(error, "MegaRAC websocket read failed")));
         log_error() << "megarac view error: " << error.message()
                     << " [" << error.category().name() << ':' << error.value() << ']';
@@ -682,7 +546,7 @@ private:
             query_power_status("next-master");
         } else if (packet.type == kCmdMaxSessionClose) {
             const std::string reason = max_session_close_reason(packet.status);
-            set_megarac_exception(state_, std::make_exception_ptr(
+            state_.set_exception(std::make_exception_ptr(
                 std::runtime_error("MegaRAC KVM session closed: " + reason)));
             log_warning() << "kvm session closed: " << reason
                           << " status=" << packet.status;
@@ -702,7 +566,7 @@ private:
     void handle_validation_response(const KvmPacket& packet)
     {
         if (packet.payload.empty()) {
-            set_megarac_exception(state_, std::make_exception_ptr(
+            state_.set_exception(std::make_exception_ptr(
                 std::runtime_error("MegaRAC KVM validation failed: empty response")));
             log_error() << "KVM validation failed: empty response";
             close_socket();
@@ -712,7 +576,7 @@ private:
         const auto response = static_cast<std::uint8_t>(packet.payload[0]);
         if (response != kValidateSessionValid) {
             const std::string reason = validation_response_name(response);
-            set_megarac_exception(state_, std::make_exception_ptr(
+            state_.set_exception(std::make_exception_ptr(
                 std::runtime_error("MegaRAC KVM validation failed: " + reason)));
             log_error() << "KVM validation failed: " << reason
                         << " response=" << static_cast<int>(response);
@@ -808,7 +672,8 @@ private:
             cursor_pattern_ = cursor->pattern;
         }
         const SharedCursor cursor_for_log = *cursor;
-        publish_cursor(state_, std::move(*cursor));
+        state_.cursors.publish(std::move(*cursor));
+        state_.push_render_event();
 
         if (options_.login.vverbose) {
             log_info() << "hardware cursor"
@@ -871,7 +736,9 @@ private:
         framebuffer_width_ = frame->width;
         framebuffer_height_ = frame->height;
         state_.view_status.kvm_display_status(true);
-        publish_frame(state_, std::move(compressed_frame));
+        compressed_frame.published_at = std::chrono::steady_clock::now();
+        state_.frames.publish(std::move(compressed_frame));
+        state_.push_render_event();
         ++frames_seen_;
     }
 
@@ -935,7 +802,7 @@ private:
                 return;
             }
 
-            set_megarac_exception(state_, std::make_exception_ptr(
+            state_.set_exception(std::make_exception_ptr(
                 beast::system_error(error, "MegaRAC websocket write failed")));
             log_error() << "kvm write error: " << error.message()
                         << " [" << error.category().name() << ':' << error.value() << ']';
@@ -989,8 +856,8 @@ private:
 
         closed_ = true;
         force_close_timer_.cancel();
-        clear_megarac_input_sink(state_);
-        set_megarac_force_close(state_, {});
+        state_.input.clear();
+        state_.set_force_close({});
         discard_queued_packets_preserving_active_write();
         beast::error_code error;
         beast::get_lowest_layer(*ws_).socket().shutdown(tcp::socket::shutdown_both, error);
@@ -1035,12 +902,7 @@ void stop_megarac_network(
 {
     stop_requested.store(true);
 
-    std::function<void()> force_close;
-    {
-        std::lock_guard lock(state.control_mutex);
-        force_close = state.force_close;
-    }
-    if (force_close) {
+    if (std::function<void()> force_close = state.force_close_snapshot()) {
         force_close();
     }
 
@@ -1073,7 +935,7 @@ void run_megarac_view_session(const MegaracViewOptions& options, MegaracViewSess
                    << " token=present"
                    << " reconnect=" << (config.reconnect_enabled ? "yes" : "no");
 
-        set_megarac_force_close(state, [&web = session.web] {
+        state.set_force_close([&web = session.web] {
             web.force_close_websocket("megarac-kvm");
         });
 
@@ -1097,14 +959,13 @@ void run_megarac_view_session(const MegaracViewOptions& options, MegaracViewSess
 
         auto async_session = std::make_shared<KvmAsyncSession>(io, ws, options, config, subprotocol, state);
         std::weak_ptr<KvmAsyncSession> weak_session = async_session;
-        install_megarac_input_sink(
-            state,
-            [weak_session](std::uint16_t type, std::vector<std::uint8_t> packet) mutable {
+        state.input.install(
+            [weak_session](MegaracInputWork work) mutable {
                 if (auto session = weak_session.lock()) {
-                    session->send_packet(type, std::move(packet));
+                    session->send_packet(work.type, std::move(work.packet));
                 }
             });
-        set_megarac_force_close(state, [weak_session] {
+        state.set_force_close([weak_session] {
             if (auto session = weak_session.lock()) {
                 session->request_stop();
             }
@@ -1113,7 +974,7 @@ void run_megarac_view_session(const MegaracViewOptions& options, MegaracViewSess
         io.run();
     } catch (...) {
         if (!stop_requested.load()) {
-            set_megarac_exception(state, std::current_exception());
+            state.set_exception(std::current_exception());
             print_current_exception_with_stack(std::cerr, "kvm network thread");
         }
     }

@@ -7,7 +7,7 @@
 #include "pikvm_input.hpp"
 #include "pikvm_session.hpp"
 #include "pikvm_video.hpp"
-#include "view_status.hpp"
+#include "view_base.hpp"
 
 #include <SDL3/SDL.h>
 
@@ -21,9 +21,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cwchar>
-#include <cmath>
 #include <cstdint>
-#include <deque>
 #include <exception>
 #include <functional>
 #include <iomanip>
@@ -50,20 +48,11 @@ constexpr std::uint64_t kPikvmMouseMotionIntervalMilliseconds = 8;
 constexpr std::chrono::milliseconds kPikvmInputStopGrace{250};
 constexpr std::size_t kPikvmMouseButtonSlots = 8;
 
-struct PikvmViewState {
-    std::mutex frame_mutex;
-    std::mutex control_mutex;
-    std::shared_ptr<const PikvmVideoFrame> frame;
-    std::atomic_uint32_t frame_event_type{0};
-    std::atomic_bool frame_event_pending{false};
+struct PikvmViewState : ViewStateBase {
+    LatestMailbox<PikvmVideoFrame> frames;
+    InputQueue<PikvmInputWork> input;
     std::atomic_bool video_decode_paused{false};
-    std::uint64_t frame_sequence = 0;
     std::string status = "starting";
-    ViewStatus view_status;
-    std::exception_ptr exception;
-    std::function<void()> force_close;
-    std::function<void(PikvmInputWork)> input_sink;
-    std::deque<PikvmInputWork> pending_input;
 };
 
 struct DurationStats {
@@ -344,29 +333,6 @@ PikvmRendererSetup create_pikvm_renderer(SDL_Window* window, const PikvmViewOpti
     return {renderer, {}};
 }
 
-SDL_FRect centered_target_rect(int window_width, int window_height, int frame_width, int frame_height)
-{
-    const float width_scale = static_cast<float>(window_width) / static_cast<float>(frame_width);
-    const float height_scale = static_cast<float>(window_height) / static_cast<float>(frame_height);
-    const float scale = std::min(width_scale, height_scale);
-    SDL_FRect rect{};
-    rect.w = std::floor(static_cast<float>(frame_width) * scale);
-    rect.h = std::floor(static_cast<float>(frame_height) * scale);
-    rect.x = std::floor((static_cast<float>(window_width) - rect.w) / 2.0f);
-    rect.y = std::floor((static_cast<float>(window_height) - rect.h) / 2.0f);
-    return rect;
-}
-
-SDL_FRect current_target_rect(SDL_Window* window, int frame_width, int frame_height)
-{
-    int window_width = 0;
-    int window_height = 0;
-    if (!SDL_GetWindowSizeInPixels(window, &window_width, &window_height)) {
-        SDL_GetWindowSize(window, &window_width, &window_height);
-    }
-    return centered_target_rect(window_width, window_height, frame_width, frame_height);
-}
-
 std::optional<PikvmAbsoluteMousePosition> pikvm_mouse_position(
     float window_x,
     float window_y,
@@ -573,76 +539,12 @@ void set_pikvm_status(PikvmViewState& state, std::string status)
     state.status = std::move(status);
 }
 
-void set_pikvm_exception(PikvmViewState& state, std::exception_ptr exception)
-{
-    std::lock_guard lock(state.control_mutex);
-    if (!state.exception) {
-        state.exception = exception;
-    }
-}
-
-std::exception_ptr take_pikvm_exception(PikvmViewState& state)
-{
-    std::lock_guard lock(state.control_mutex);
-    return state.exception;
-}
-
-void set_pikvm_force_close(PikvmViewState& state, std::function<void()> force_close)
-{
-    std::lock_guard lock(state.control_mutex);
-    state.force_close = std::move(force_close);
-}
-
-bool queue_pikvm_input_packet(
-    PikvmViewState& state,
-    std::vector<std::uint8_t> packet)
-{
-    PikvmInputWork work;
-    work.packet = std::move(packet);
-
-    std::function<void(PikvmInputWork)> input_sink;
-    {
-        std::lock_guard lock(state.control_mutex);
-        input_sink = state.input_sink;
-        if (!input_sink) {
-            state.pending_input.push_back(std::move(work));
-            return true;
-        }
-    }
-
-    input_sink(std::move(work));
-    return true;
-}
-
-void clear_pikvm_input_sink(PikvmViewState& state)
-{
-    std::lock_guard lock(state.control_mutex);
-    state.input_sink = {};
-    state.pending_input.clear();
-}
-
-void install_pikvm_input_sink(
-    PikvmViewState& state,
-    std::function<void(PikvmInputWork)> input_sink)
-{
-    std::deque<PikvmInputWork> pending;
-    {
-        std::lock_guard lock(state.control_mutex);
-        state.input_sink = input_sink;
-        pending.swap(state.pending_input);
-    }
-
-    for (PikvmInputWork& work : pending) {
-        input_sink(std::move(work));
-    }
-}
-
 void queue_pikvm_key_event(
     PikvmViewState& state,
     std::string_view code,
     bool pressed)
 {
-    queue_pikvm_input_packet(state, make_pikvm_key_packet(code, pressed));
+    state.input.enqueue(PikvmInputWork{make_pikvm_key_packet(code, pressed)});
 }
 
 void queue_pikvm_mouse_button_event(
@@ -650,16 +552,14 @@ void queue_pikvm_mouse_button_event(
     std::string_view button,
     bool pressed)
 {
-    queue_pikvm_input_packet(state, make_pikvm_mouse_button_packet(button, pressed));
+    state.input.enqueue(PikvmInputWork{make_pikvm_mouse_button_packet(button, pressed)});
 }
 
 void queue_pikvm_mouse_move_event(
     PikvmViewState& state,
     const PikvmAbsoluteMousePosition& position)
 {
-    queue_pikvm_input_packet(
-        state,
-        make_pikvm_mouse_move_packet(position));
+    state.input.enqueue(PikvmInputWork{make_pikvm_mouse_move_packet(position)});
 }
 
 void queue_pikvm_mouse_wheel_event(
@@ -667,9 +567,7 @@ void queue_pikvm_mouse_wheel_event(
     int delta_x,
     int delta_y)
 {
-    queue_pikvm_input_packet(
-        state,
-        make_pikvm_mouse_wheel_packet(delta_x, delta_y));
+    state.input.enqueue(PikvmInputWork{make_pikvm_mouse_wheel_packet(delta_x, delta_y)});
 }
 
 bool any_pikvm_mouse_button_down(const PikvmMouseButtonDownState& mouse_down)
@@ -710,40 +608,13 @@ void clear_pikvm_local_mouse_capture(PikvmMouseButtonDownState& mouse_down)
 void store_pikvm_frame(PikvmViewState& state, PikvmVideoFrame frame)
 {
     frame.timing.stored_at = PikvmClock::now();
-    {
-        std::lock_guard lock(state.frame_mutex);
-        frame.sequence = ++state.frame_sequence;
-        state.frame = std::make_shared<PikvmVideoFrame>(std::move(frame));
-    }
-
-    const auto frame_event_type = static_cast<Uint32>(state.frame_event_type.load());
-    if (frame_event_type != 0 && !state.frame_event_pending.exchange(true)) {
-        SDL_Event event{};
-        event.type = frame_event_type;
-        if (!SDL_PushEvent(&event)) {
-            state.frame_event_pending.store(false);
-        }
-    }
+    state.frames.publish(std::move(frame));
+    state.push_render_event();
 }
 
-std::shared_ptr<const PikvmVideoFrame> take_latest_pikvm_frame(
-    PikvmViewState& state,
-    std::uint64_t last_sequence)
+void release_pikvm_latest_frame(PikvmViewState& state)
 {
-    std::lock_guard lock(state.frame_mutex);
-    if (!state.frame || state.frame->sequence == last_sequence) {
-        return {};
-    }
-    return state.frame;
-}
-
-void clear_pikvm_frame(PikvmViewState& state)
-{
-    std::shared_ptr<const PikvmVideoFrame> frame;
-    {
-        std::lock_guard lock(state.frame_mutex);
-        frame = std::move(state.frame);
-    }
+    std::shared_ptr<const PikvmVideoFrame> frame = state.frames.clear();
 
     if (frame && frame->d3d11_lock) {
         std::lock_guard lock(*frame->d3d11_lock);
@@ -924,7 +795,7 @@ void run_pikvm_control_worker(
                 },
                 on_error);
         stop_state->session = event_session;
-        install_pikvm_input_sink(state, make_pikvm_event_input_sink(event_session));
+        state.input.install(make_pikvm_event_input_sink(event_session));
         set_pikvm_status(state, "control websocket connected");
         websocket->io_context().run();
     } catch (...) {
@@ -1003,10 +874,10 @@ void run_pikvm_network_session(
         stop_requested.store(true);
         stop_handles->stop_all();
     };
-    set_pikvm_force_close(state, request_stop);
+    state.set_force_close(request_stop);
 
     auto on_error = [&](std::exception_ptr exception) {
-        set_pikvm_exception(state, exception);
+        state.set_exception(exception);
         request_stop();
     };
 
@@ -1081,15 +952,15 @@ void run_pikvm_network_session(
         if (video_thread.joinable()) {
             video_thread.join();
         }
-        clear_pikvm_input_sink(state);
-        set_pikvm_force_close(state, {});
+        state.input.clear();
+        state.set_force_close({});
         throw;
     }
 
     stop_handles->set_control({});
     stop_handles->set_video({});
-    clear_pikvm_input_sink(state);
-    set_pikvm_force_close(state, {});
+    state.input.clear();
+    state.set_force_close({});
     if (stop_requested.load()) {
         set_pikvm_status(state, "stopped");
     }
@@ -1101,12 +972,7 @@ void stop_pikvm_network(
     std::thread& network_thread)
 {
     stop_requested.store(true);
-    std::function<void()> force_close;
-    {
-        std::lock_guard lock(state.control_mutex);
-        force_close = state.force_close;
-    }
-    if (force_close) {
+    if (std::function<void()> force_close = state.force_close_snapshot()) {
         force_close();
     }
 
@@ -1115,428 +981,454 @@ void stop_pikvm_network(
     }
 }
 
+class PikvmView : public KvmViewBase {
+public:
+    explicit PikvmView(const PikvmViewOptions& options)
+        : PikvmView(options, std::make_shared<PikvmViewState>())
+    {
+    }
+
+private:
+    PikvmView(const PikvmViewOptions& options, std::shared_ptr<PikvmViewState> state)
+        : KvmViewBase(*state, options.login.base_url.host, "pikvm")
+        , options_(options)
+        , network_options_(options)
+        , state_(std::move(state))
+    {
+    }
+
+    SDL_Renderer* create_renderer(SDL_Window* window) override
+    {
+        PikvmRendererSetup renderer_setup = create_pikvm_renderer(window, options_);
+        d3d11_context_ = renderer_setup.d3d11_context;
+        if (!d3d11_context_ && network_options_.video_decode == PikvmVideoDecodeMode::auto_select) {
+            network_options_.video_decode = PikvmVideoDecodeMode::software;
+        }
+        return renderer_setup.renderer;
+    }
+
+    void destroy_renderer(SDL_Renderer* renderer) override
+    {
+        SDL_Renderer* renderer_to_destroy = renderer;
+        destroy_pikvm_renderer(renderer_to_destroy, d3d11_context_);
+        d3d11_context_.reset();
+    }
+
+    void start_network() override
+    {
+        PikvmViewOptions network_options = network_options_;
+        network_thread_ = std::thread([network_options, d3d11_context = d3d11_context_, state = state_,
+                                       stop_requested = stop_requested_, network_done = network_done_] {
+            try {
+                run_pikvm_network_session(network_options, d3d11_context, *state, *stop_requested);
+            } catch (...) {
+                state->set_exception(std::current_exception());
+            }
+            state->input.clear();
+            state->set_force_close({});
+            network_done->store(true);
+        });
+    }
+
+    void stop_network() override
+    {
+        stop_pikvm_network(*state_, *stop_requested_, network_thread_);
+    }
+
+    bool network_done() const override
+    {
+        return network_done_->load();
+    }
+
+    std::exception_ptr take_network_exception() override
+    {
+        return state_->take_exception();
+    }
+
+    void before_sdl_cleanup() override
+    {
+        clear_pikvm_local_mouse_capture(mouse_down_);
+        if (options_.login.vverbose) {
+            maybe_log_pikvm_frame_latency(frame_latency_, last_frame_latency_log_, true);
+        }
+        pending_present_latency_frame_.reset();
+        release_pikvm_latest_frame(*state_);
+        destroy_pikvm_texture(texture_, d3d11_context_);
+    }
+
+    void on_close() override
+    {
+        clear_pikvm_local_mouse_capture(mouse_down_);
+    }
+
+    void on_minimized() override
+    {
+        state_->video_decode_paused.store(true);
+        pending_present_latency_frame_.reset();
+        release_pikvm_latest_frame(*state_);
+        reset_pikvm_texture_state(
+            texture_,
+            texture_width_,
+            texture_height_,
+            texture_format_,
+            texture_wraps_d3d11_source_,
+            texture_wrapped_d3d11_source_,
+            d3d11_context_);
+        last_sequence_ = 0;
+    }
+
+    void on_restored() override
+    {
+        state_->video_decode_paused.store(false);
+    }
+
+    void on_focus_lost() override
+    {
+        release_all_pikvm_keys(*state_, key_down_);
+    }
+
+    void handle_event(const SDL_Event& event, bool&) override
+    {
+        if (event.type == SDL_EVENT_KEY_DOWN || event.type == SDL_EVENT_KEY_UP) {
+            handle_key_event(event);
+        } else if (texture_width_ > 0 && texture_height_ > 0 &&
+                   (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
+                    event.type == SDL_EVENT_MOUSE_BUTTON_UP)) {
+            handle_mouse_button_event(event);
+        } else if (texture_width_ > 0 && texture_height_ > 0 &&
+                   event.type == SDL_EVENT_MOUSE_MOTION) {
+            handle_mouse_motion_event(event);
+        } else if (texture_width_ > 0 && texture_height_ > 0 &&
+                   event.type == SDL_EVENT_MOUSE_WHEEL) {
+            handle_mouse_wheel_event(event);
+        }
+    }
+
+    void render_visible(bool& render_needed, bool& first_render) override
+    {
+        upload_latest_frame(render_needed);
+        if (!render_needed || state_->video_decode_paused.load()) {
+            return;
+        }
+
+        std::unique_lock<std::recursive_mutex> d3d11_render_lock;
+        if (d3d11_context_ && d3d11_context_->lock) {
+            d3d11_render_lock = std::unique_lock<std::recursive_mutex>(*d3d11_context_->lock);
+        }
+
+        clear_background();
+        if (texture_ != nullptr && texture_width_ > 0 && texture_height_ > 0) {
+            const SDL_FRect target = current_target_rect(texture_width_, texture_height_);
+            SDL_RenderTexture(renderer(), texture_, nullptr, &target);
+        }
+        present();
+
+        if (pending_present_latency_frame_) {
+            const auto presented_at = PikvmClock::now();
+            frame_presented(
+                pending_present_latency_frame_->width,
+                pending_present_latency_frame_->height);
+            if (options_.login.vverbose) {
+                add_pikvm_frame_latency(
+                    frame_latency_,
+                    *pending_present_latency_frame_,
+                    presented_at);
+                maybe_log_pikvm_frame_latency(frame_latency_, last_frame_latency_log_, false);
+            }
+            pending_present_latency_frame_.reset();
+        }
+        first_render = false;
+    }
+
+    void handle_key_event(const SDL_Event& event)
+    {
+        if (event.type == SDL_EVENT_KEY_DOWN && event.key.repeat) {
+            return;
+        }
+
+        const std::optional<std::string_view> code =
+            pikvm_key_code_from_sdl_scancode(event.key.scancode);
+        const auto scancode = static_cast<std::size_t>(event.key.scancode);
+        if (!code || scancode >= key_down_.size()) {
+            if (options_.login.vverbose) {
+                log_info() << "ignored PiKVM key"
+                           << " scancode=" << event.key.scancode
+                           << " key=" << event.key.key;
+            }
+            return;
+        }
+
+        const bool down = event.type == SDL_EVENT_KEY_DOWN;
+        if (key_down_[scancode] != down) {
+            key_down_[scancode] = down;
+            queue_pikvm_key_event(*state_, *code, down);
+        }
+    }
+
+    void handle_mouse_button_event(const SDL_Event& event)
+    {
+        const std::optional<std::string_view> button =
+            pikvm_mouse_button_from_sdl_button(event.button.button);
+        std::size_t button_slot = 0;
+        if (!button || !pikvm_mouse_button_slot(event.button.button, button_slot)) {
+            if (options_.login.vverbose) {
+                log_info() << "ignored PiKVM mouse button"
+                           << " button=" << static_cast<int>(event.button.button);
+            }
+            return;
+        }
+
+        const bool down = event.type == SDL_EVENT_MOUSE_BUTTON_DOWN;
+        const SDL_FRect target = current_target_rect(texture_width_, texture_height_);
+        const bool drag_active = any_pikvm_mouse_button_down(mouse_down_);
+        const std::optional<PikvmAbsoluteMousePosition> position = pikvm_mouse_position(
+            event.button.x,
+            event.button.y,
+            target,
+            drag_active || !down);
+
+        if (down && !position) {
+            return;
+        }
+        if (position) {
+            queue_pikvm_mouse_move_event(*state_, *position);
+        }
+
+        if (mouse_down_[button_slot] != down) {
+            mouse_down_[button_slot] = down;
+            queue_pikvm_mouse_button_event(*state_, *button, down);
+        }
+        SDL_CaptureMouse(any_pikvm_mouse_button_down(mouse_down_));
+    }
+
+    void handle_mouse_motion_event(const SDL_Event& event)
+    {
+        const bool drag_active = any_pikvm_mouse_button_down(mouse_down_);
+        const std::uint64_t ticks = SDL_GetTicks();
+        const bool throttled =
+            !drag_active
+            && ticks - last_mouse_motion_ticks_ < kPikvmMouseMotionIntervalMilliseconds;
+        if (throttled) {
+            return;
+        }
+
+        const SDL_FRect target = current_target_rect(texture_width_, texture_height_);
+        const std::optional<PikvmAbsoluteMousePosition> position = pikvm_mouse_position(
+            event.motion.x,
+            event.motion.y,
+            target,
+            drag_active);
+        if (position) {
+            queue_pikvm_mouse_move_event(*state_, *position);
+            last_mouse_motion_ticks_ = ticks;
+        }
+    }
+
+    void handle_mouse_wheel_event(const SDL_Event& event)
+    {
+        const SDL_FRect target = current_target_rect(texture_width_, texture_height_);
+        const std::optional<PikvmAbsoluteMousePosition> position = pikvm_mouse_position(
+            event.wheel.mouse_x,
+            event.wheel.mouse_y,
+            target,
+            any_pikvm_mouse_button_down(mouse_down_));
+        if (!position) {
+            return;
+        }
+
+        queue_pikvm_mouse_move_event(*state_, *position);
+        const float x = event.wheel.direction == SDL_MOUSEWHEEL_FLIPPED
+            ? -event.wheel.x
+            : event.wheel.x;
+        const float y = event.wheel.direction == SDL_MOUSEWHEEL_FLIPPED
+            ? -event.wheel.y
+            : event.wheel.y;
+        const int delta_x = x == 0.0f ? 0 : (x > 0.0f ? 5 : -5);
+        const int delta_y = y == 0.0f ? 0 : (y > 0.0f ? 5 : -5);
+        if (delta_x != 0 || delta_y != 0) {
+            queue_pikvm_mouse_wheel_event(*state_, delta_x, delta_y);
+        }
+    }
+
+    void upload_latest_frame(bool& render_needed)
+    {
+        const std::shared_ptr<const PikvmVideoFrame> frame =
+            state_->video_decode_paused.load()
+                ? nullptr
+                : state_->frames.latest(last_sequence_);
+        if (!frame) {
+            return;
+        }
+
+        std::unique_lock<std::recursive_mutex> d3d11_render_lock;
+        if (d3d11_context_ && d3d11_context_->lock) {
+            d3d11_render_lock = std::unique_lock<std::recursive_mutex>(*d3d11_context_->lock);
+        }
+
+        last_sequence_ = frame->sequence;
+        if (frame->format == PikvmVideoPixelFormat::d3d11_nv12) {
+            upload_d3d11_frame(*frame);
+        } else {
+            upload_software_frame(*frame);
+        }
+
+        pending_present_latency_frame_ = frame;
+        render_needed = true;
+    }
+
+    void upload_d3d11_frame(const PikvmVideoFrame& frame)
+    {
+        const bool direct_wrap =
+            !d3d11_direct_wrap_disabled_ && d3d11_frame_can_wrap_direct(frame);
+        if (direct_wrap) {
+            try_wrap_d3d11_frame(frame);
+        }
+
+        if (texture_ == nullptr || !texture_wraps_d3d11_source_) {
+            ensure_d3d11_copy_texture(frame);
+            copy_d3d11_frame_to_texture(texture_, frame, d3d11_context_);
+        }
+    }
+
+    void try_wrap_d3d11_frame(const PikvmVideoFrame& frame)
+    {
+        if (texture_ != nullptr
+            && texture_width_ == frame.width
+            && texture_height_ == frame.height
+            && texture_format_ == frame.format
+            && texture_wraps_d3d11_source_
+            && texture_wrapped_d3d11_source_ == frame.d3d11_texture) {
+            return;
+        }
+
+        if (texture_ != nullptr) {
+            SDL_DestroyTexture(texture_);
+            texture_ = nullptr;
+        }
+
+        std::string wrap_error;
+        texture_ = try_create_wrapped_d3d11_texture(renderer(), frame, wrap_error);
+        if (texture_ != nullptr) {
+            texture_width_ = frame.width;
+            texture_height_ = frame.height;
+            texture_format_ = frame.format;
+            texture_wraps_d3d11_source_ = true;
+            texture_wrapped_d3d11_source_ = frame.d3d11_texture;
+            if (options_.login.verbose) {
+                log_info() << "wrapped PiKVM D3D11 video texture directly";
+            }
+            return;
+        }
+
+        d3d11_direct_wrap_disabled_ = true;
+        texture_width_ = 0;
+        texture_height_ = 0;
+        texture_format_ = PikvmVideoPixelFormat::rgba32;
+        texture_wraps_d3d11_source_ = false;
+        texture_wrapped_d3d11_source_ = nullptr;
+        if (options_.login.verbose) {
+            log_warning() << "direct D3D11 texture wrap failed; using GPU copy: "
+                          << wrap_error;
+        }
+    }
+
+    void ensure_d3d11_copy_texture(const PikvmVideoFrame& frame)
+    {
+        if (texture_ != nullptr
+            && texture_width_ == frame.width
+            && texture_height_ == frame.height
+            && texture_format_ == frame.format
+            && !texture_wraps_d3d11_source_) {
+            return;
+        }
+
+        if (texture_ != nullptr) {
+            SDL_DestroyTexture(texture_);
+        }
+        texture_ = SDL_CreateTexture(
+            renderer(),
+            SDL_PIXELFORMAT_NV12,
+            SDL_TEXTUREACCESS_STATIC,
+            frame.width,
+            frame.height);
+        if (texture_ == nullptr) {
+            throw_sdl_error("SDL_CreateTexture(D3D11 NV12)");
+        }
+        if (sdl_texture_d3d11_resource(texture_) == nullptr) {
+            throw std::runtime_error("SDL NV12 texture did not expose a D3D11 resource");
+        }
+        texture_width_ = frame.width;
+        texture_height_ = frame.height;
+        texture_format_ = frame.format;
+        texture_wraps_d3d11_source_ = false;
+        texture_wrapped_d3d11_source_ = nullptr;
+    }
+
+    void upload_software_frame(const PikvmVideoFrame& frame)
+    {
+        if (texture_ == nullptr
+            || texture_width_ != frame.width
+            || texture_height_ != frame.height
+            || texture_format_ != frame.format
+            || texture_wraps_d3d11_source_) {
+            if (texture_ != nullptr) {
+                SDL_DestroyTexture(texture_);
+            }
+            texture_ = SDL_CreateTexture(
+                renderer(),
+                sdl_pixel_format_for_frame(frame.format),
+                SDL_TEXTUREACCESS_STREAMING,
+                frame.width,
+                frame.height);
+            if (texture_ == nullptr) {
+                throw_sdl_error("SDL_CreateTexture");
+            }
+            texture_width_ = frame.width;
+            texture_height_ = frame.height;
+            texture_format_ = frame.format;
+            texture_wraps_d3d11_source_ = false;
+            texture_wrapped_d3d11_source_ = nullptr;
+        }
+
+        update_pikvm_texture(texture_, frame);
+    }
+
+    PikvmViewOptions options_;
+    PikvmViewOptions network_options_;
+    std::shared_ptr<PikvmViewState> state_;
+    std::shared_ptr<std::atomic_bool> stop_requested_ = std::make_shared<std::atomic_bool>(false);
+    std::shared_ptr<std::atomic_bool> network_done_ = std::make_shared<std::atomic_bool>(false);
+    std::thread network_thread_;
+    PikvmKeyDownState key_down_{};
+    PikvmMouseButtonDownState mouse_down_{};
+    SDL_Texture* texture_ = nullptr;
+    std::shared_ptr<PikvmD3D11Context> d3d11_context_;
+    int texture_width_ = 0;
+    int texture_height_ = 0;
+    PikvmVideoPixelFormat texture_format_ = PikvmVideoPixelFormat::rgba32;
+    bool texture_wraps_d3d11_source_ = false;
+    bool d3d11_direct_wrap_disabled_ = false;
+    ID3D11Texture2D* texture_wrapped_d3d11_source_ = nullptr;
+    PikvmFrameLatencyBatch frame_latency_;
+    PikvmClock::time_point last_frame_latency_log_ = PikvmClock::now();
+    std::shared_ptr<const PikvmVideoFrame> pending_present_latency_frame_;
+    std::uint64_t last_sequence_ = 0;
+    std::uint64_t last_mouse_motion_ticks_ = 0;
+};
+
 } // namespace
 
 void run_pikvm_view(const PikvmViewOptions& options)
 {
-    if (!SDL_Init(SDL_INIT_VIDEO)) {
-        throw_sdl_error("SDL_Init");
-    }
-
-    SDL_Window* window = nullptr;
-    SDL_Renderer* renderer = nullptr;
-    SDL_Texture* texture = nullptr;
-    std::shared_ptr<PikvmD3D11Context> d3d11_context;
-    auto state = std::make_shared<PikvmViewState>();
-    auto stop_requested = std::make_shared<std::atomic_bool>(false);
-    auto network_done = std::make_shared<std::atomic_bool>(false);
-    std::thread network_thread;
-    PikvmKeyDownState key_down{};
-    PikvmMouseButtonDownState mouse_down{};
-
-    auto cleanup_after_exception = [&] {
-        clear_pikvm_local_mouse_capture(mouse_down);
-        stop_pikvm_network(*state, *stop_requested, network_thread);
-        clear_pikvm_frame(*state);
-        destroy_pikvm_texture(texture, d3d11_context);
-        destroy_pikvm_renderer(renderer, d3d11_context);
-        if (window != nullptr) {
-            SDL_DestroyWindow(window);
-            window = nullptr;
-        }
-        d3d11_context.reset();
-        SDL_Quit();
-    };
-
-    auto hide_window_for_teardown = [&] {
-        if (window != nullptr) {
-            SDL_HideWindow(window);
-        }
-    };
-
     try {
-        const Uint32 frame_event_type = SDL_RegisterEvents(1);
-        if (frame_event_type == 0) {
-            throw_sdl_error("SDL_RegisterEvents");
-        }
-        state->frame_event_type.store(frame_event_type);
-
-        window = SDL_CreateWindow("hitsc", 1024, 768, SDL_WINDOW_RESIZABLE);
-        if (window == nullptr) {
-            throw_sdl_error("SDL_CreateWindow");
-        }
-        SDL_SetWindowTitle(window, state->view_status.title(options.login.base_url.host).c_str());
-
-        PikvmRendererSetup renderer_setup = create_pikvm_renderer(window, options);
-        renderer = renderer_setup.renderer;
-        d3d11_context = renderer_setup.d3d11_context;
-
-        PikvmViewOptions network_options = options;
-        if (!d3d11_context && network_options.video_decode == PikvmVideoDecodeMode::auto_select) {
-            network_options.video_decode = PikvmVideoDecodeMode::software;
-        }
-        network_thread = std::thread([network_options, d3d11_context, state, stop_requested, network_done] {
-            try {
-                run_pikvm_network_session(network_options, d3d11_context, *state, *stop_requested);
-            } catch (...) {
-                set_pikvm_exception(*state, std::current_exception());
-            }
-            clear_pikvm_input_sink(*state);
-            set_pikvm_force_close(*state, {});
-            network_done->store(true);
-        });
-
-        bool running = true;
-        bool first_render = true;
-        bool close_event_logged = false;
-        std::uint64_t last_sequence = 0;
-        std::uint64_t last_status_tick = 0;
-        int texture_width = 0;
-        int texture_height = 0;
-        PikvmVideoPixelFormat texture_format = PikvmVideoPixelFormat::rgba32;
-        bool texture_wraps_d3d11_source = false;
-        bool d3d11_direct_wrap_disabled = false;
-        ID3D11Texture2D* texture_wrapped_d3d11_source = nullptr;
-        PikvmFrameLatencyBatch frame_latency;
-        PikvmClock::time_point last_frame_latency_log = PikvmClock::now();
-        std::shared_ptr<const PikvmVideoFrame> pending_present_latency_frame;
-        std::uint64_t last_mouse_motion_ticks = 0;
-
-        while (running) {
-            bool render_needed = first_render;
-            SDL_Event event{};
-            bool have_event = SDL_WaitEventTimeout(&event, 16);
-            while (have_event) {
-                if (event.type == SDL_EVENT_QUIT ||
-                    event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED) {
-                    if (!close_event_logged) {
-                        close_event_logged = true;
-                        log_info() << "pikvm window close event"
-                                   << " type=" << event.type;
-                    }
-                    clear_pikvm_local_mouse_capture(mouse_down);
-                    running = false;
-                } else if (event.type == SDL_EVENT_WINDOW_MINIMIZED ||
-                           event.type == SDL_EVENT_WINDOW_HIDDEN) {
-                    state->video_decode_paused.store(true);
-                    state->frame_event_pending.store(false);
-                    state->view_status.minimize();
-                    clear_pikvm_frame(*state);
-                    pending_present_latency_frame.reset();
-                    reset_pikvm_texture_state(
-                        texture,
-                        texture_width,
-                        texture_height,
-                        texture_format,
-                        texture_wraps_d3d11_source,
-                        texture_wrapped_d3d11_source,
-                        d3d11_context);
-                    last_sequence = 0;
-                    last_status_tick = 0;
-                    SDL_SetWindowTitle(window, state->view_status.title(options.login.base_url.host).c_str());
-                } else if (event.type == SDL_EVENT_WINDOW_RESTORED ||
-                           event.type == SDL_EVENT_WINDOW_SHOWN) {
-                    state->video_decode_paused.store(false);
-                    render_needed = true;
-                    last_status_tick = 0;
-                    SDL_SetWindowTitle(window, state->view_status.title(options.login.base_url.host).c_str());
-                } else if (event.type == state->frame_event_type.load()) {
-                    state->frame_event_pending.store(false);
-                    render_needed = true;
-                } else if (event.type == SDL_EVENT_WINDOW_RESIZED ||
-                           event.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED ||
-                           event.type == SDL_EVENT_WINDOW_EXPOSED) {
-                    render_needed = true;
-                } else if (event.type == SDL_EVENT_WINDOW_FOCUS_LOST) {
-                    release_all_pikvm_keys(*state, key_down);
-                } else if (event.type == SDL_EVENT_KEY_DOWN ||
-                           event.type == SDL_EVENT_KEY_UP) {
-                    if (!(event.type == SDL_EVENT_KEY_DOWN && event.key.repeat)) {
-                        const std::optional<std::string_view> code =
-                            pikvm_key_code_from_sdl_scancode(event.key.scancode);
-                        const auto scancode = static_cast<std::size_t>(event.key.scancode);
-                        if (!code || scancode >= key_down.size()) {
-                            if (options.login.vverbose) {
-                                log_info() << "ignored PiKVM key"
-                                           << " scancode=" << event.key.scancode
-                                           << " key=" << event.key.key;
-                            }
-                        } else {
-                            const bool down = event.type == SDL_EVENT_KEY_DOWN;
-                            if (key_down[scancode] != down) {
-                                key_down[scancode] = down;
-                                queue_pikvm_key_event(
-                                    *state,
-                                    *code,
-                                    down);
-                            }
-                        }
-                    }
-                } else if (texture_width > 0 && texture_height > 0 &&
-                           (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
-                            event.type == SDL_EVENT_MOUSE_BUTTON_UP)) {
-                    const std::optional<std::string_view> button =
-                        pikvm_mouse_button_from_sdl_button(event.button.button);
-                    std::size_t button_slot = 0;
-                    if (button && pikvm_mouse_button_slot(event.button.button, button_slot)) {
-                        const bool down = event.type == SDL_EVENT_MOUSE_BUTTON_DOWN;
-                        const SDL_FRect target = current_target_rect(window, texture_width, texture_height);
-                        const bool drag_active = any_pikvm_mouse_button_down(mouse_down);
-                        const std::optional<PikvmAbsoluteMousePosition> position = pikvm_mouse_position(
-                            event.button.x,
-                            event.button.y,
-                            target,
-                            drag_active || !down);
-
-                        if (down && !position) {
-                            have_event = SDL_PollEvent(&event);
-                            continue;
-                        }
-                        if (position) {
-                            queue_pikvm_mouse_move_event(*state, *position);
-                        }
-
-                        if (mouse_down[button_slot] != down) {
-                            mouse_down[button_slot] = down;
-                            queue_pikvm_mouse_button_event(
-                                *state,
-                                *button,
-                                down);
-                        }
-                        SDL_CaptureMouse(any_pikvm_mouse_button_down(mouse_down));
-                    } else if (options.login.vverbose) {
-                        log_info() << "ignored PiKVM mouse button"
-                                   << " button=" << static_cast<int>(event.button.button);
-                    }
-                } else if (texture_width > 0 && texture_height > 0 &&
-                           event.type == SDL_EVENT_MOUSE_MOTION) {
-                    const bool drag_active = any_pikvm_mouse_button_down(mouse_down);
-                    const std::uint64_t ticks = SDL_GetTicks();
-                    const bool throttled =
-                        !drag_active
-                        && ticks - last_mouse_motion_ticks < kPikvmMouseMotionIntervalMilliseconds;
-                    if (!throttled) {
-                        const SDL_FRect target = current_target_rect(window, texture_width, texture_height);
-                        const std::optional<PikvmAbsoluteMousePosition> position = pikvm_mouse_position(
-                            event.motion.x,
-                            event.motion.y,
-                            target,
-                            drag_active);
-                        if (position) {
-                            queue_pikvm_mouse_move_event(
-                                *state,
-                                *position);
-                            last_mouse_motion_ticks = ticks;
-                        }
-                    }
-                } else if (texture_width > 0 && texture_height > 0 &&
-                           event.type == SDL_EVENT_MOUSE_WHEEL) {
-                    const SDL_FRect target = current_target_rect(window, texture_width, texture_height);
-                    const std::optional<PikvmAbsoluteMousePosition> position = pikvm_mouse_position(
-                        event.wheel.mouse_x,
-                        event.wheel.mouse_y,
-                        target,
-                        any_pikvm_mouse_button_down(mouse_down));
-                    if (position) {
-                        queue_pikvm_mouse_move_event(*state, *position);
-                        const float x = event.wheel.direction == SDL_MOUSEWHEEL_FLIPPED
-                            ? -event.wheel.x
-                            : event.wheel.x;
-                        const float y = event.wheel.direction == SDL_MOUSEWHEEL_FLIPPED
-                            ? -event.wheel.y
-                            : event.wheel.y;
-                        const int delta_x = x == 0.0f ? 0 : (x > 0.0f ? 5 : -5);
-                        const int delta_y = y == 0.0f ? 0 : (y > 0.0f ? 5 : -5);
-                        if (delta_x != 0 || delta_y != 0) {
-                            queue_pikvm_mouse_wheel_event(
-                                *state,
-                                delta_x,
-                                delta_y);
-                        }
-                    }
-                }
-                have_event = SDL_PollEvent(&event);
-            }
-
-            const std::shared_ptr<const PikvmVideoFrame> frame =
-                state->video_decode_paused.load()
-                    ? nullptr
-                    : take_latest_pikvm_frame(*state, last_sequence);
-            if (frame) {
-                std::unique_lock<std::recursive_mutex> d3d11_render_lock;
-                if (d3d11_context && d3d11_context->lock) {
-                    d3d11_render_lock = std::unique_lock<std::recursive_mutex>(*d3d11_context->lock);
-                }
-
-                last_sequence = frame->sequence;
-                if (frame->format == PikvmVideoPixelFormat::d3d11_nv12) {
-                    const bool direct_wrap =
-                        !d3d11_direct_wrap_disabled && d3d11_frame_can_wrap_direct(*frame);
-                    if (direct_wrap) {
-                        if (texture == nullptr
-                            || texture_width != frame->width
-                            || texture_height != frame->height
-                            || texture_format != frame->format
-                            || !texture_wraps_d3d11_source
-                            || texture_wrapped_d3d11_source != frame->d3d11_texture) {
-                            if (texture != nullptr) {
-                                SDL_DestroyTexture(texture);
-                            }
-
-                            std::string wrap_error;
-                            texture = try_create_wrapped_d3d11_texture(renderer, *frame, wrap_error);
-                            if (texture != nullptr) {
-                                texture_width = frame->width;
-                                texture_height = frame->height;
-                                texture_format = frame->format;
-                                texture_wraps_d3d11_source = true;
-                                texture_wrapped_d3d11_source = frame->d3d11_texture;
-                                if (options.login.verbose) {
-                                    log_info() << "wrapped PiKVM D3D11 video texture directly";
-                                }
-                            } else {
-                                d3d11_direct_wrap_disabled = true;
-                                texture_width = 0;
-                                texture_height = 0;
-                                texture_format = PikvmVideoPixelFormat::rgba32;
-                                texture_wraps_d3d11_source = false;
-                                texture_wrapped_d3d11_source = nullptr;
-                                if (options.login.verbose) {
-                                    log_warning() << "direct D3D11 texture wrap failed; using GPU copy: "
-                                                  << wrap_error;
-                                }
-                            }
-                        }
-                    }
-
-                    if (texture == nullptr || !texture_wraps_d3d11_source) {
-                        if (texture == nullptr
-                            || texture_width != frame->width
-                            || texture_height != frame->height
-                            || texture_format != frame->format
-                            || texture_wraps_d3d11_source) {
-                            if (texture != nullptr) {
-                                SDL_DestroyTexture(texture);
-                            }
-                            texture = SDL_CreateTexture(
-                                renderer,
-                                SDL_PIXELFORMAT_NV12,
-                                SDL_TEXTUREACCESS_STATIC,
-                                frame->width,
-                                frame->height);
-                            if (texture == nullptr) {
-                                throw_sdl_error("SDL_CreateTexture(D3D11 NV12)");
-                            }
-                            if (sdl_texture_d3d11_resource(texture) == nullptr) {
-                                throw std::runtime_error("SDL NV12 texture did not expose a D3D11 resource");
-                            }
-                            texture_width = frame->width;
-                            texture_height = frame->height;
-                            texture_format = frame->format;
-                            texture_wraps_d3d11_source = false;
-                            texture_wrapped_d3d11_source = nullptr;
-                        }
-
-                        copy_d3d11_frame_to_texture(texture, *frame, d3d11_context);
-                    }
-                } else {
-                    if (texture == nullptr
-                        || texture_width != frame->width
-                        || texture_height != frame->height
-                        || texture_format != frame->format
-                        || texture_wraps_d3d11_source) {
-                        if (texture != nullptr) {
-                            SDL_DestroyTexture(texture);
-                        }
-                        texture = SDL_CreateTexture(
-                            renderer,
-                            sdl_pixel_format_for_frame(frame->format),
-                            SDL_TEXTUREACCESS_STREAMING,
-                            frame->width,
-                            frame->height);
-                        if (texture == nullptr) {
-                            throw_sdl_error("SDL_CreateTexture");
-                        }
-                        texture_width = frame->width;
-                        texture_height = frame->height;
-                        texture_format = frame->format;
-                        texture_wraps_d3d11_source = false;
-                        texture_wrapped_d3d11_source = nullptr;
-                    }
-
-                    update_pikvm_texture(texture, *frame);
-                }
-
-                pending_present_latency_frame = frame;
-                render_needed = true;
-            }
-
-            if (render_needed && !state->video_decode_paused.load()) {
-                std::unique_lock<std::recursive_mutex> d3d11_render_lock;
-                if (d3d11_context && d3d11_context->lock) {
-                    d3d11_render_lock = std::unique_lock<std::recursive_mutex>(*d3d11_context->lock);
-                }
-
-                SDL_SetRenderDrawColor(renderer, 12, 14, 18, 255);
-                SDL_RenderClear(renderer);
-                if (texture != nullptr && texture_width > 0 && texture_height > 0) {
-                    const SDL_FRect target = current_target_rect(window, texture_width, texture_height);
-                    SDL_RenderTexture(renderer, texture, nullptr, &target);
-                }
-                SDL_RenderPresent(renderer);
-                if (pending_present_latency_frame) {
-                    const auto presented_at = PikvmClock::now();
-                    state->view_status.frame_presented(
-                        pending_present_latency_frame->width,
-                        pending_present_latency_frame->height);
-                    if (options.login.vverbose) {
-                        add_pikvm_frame_latency(
-                            frame_latency,
-                            *pending_present_latency_frame,
-                            presented_at);
-                        maybe_log_pikvm_frame_latency(frame_latency, last_frame_latency_log, false);
-                    }
-                    pending_present_latency_frame.reset();
-                }
-                first_render = false;
-            }
-
-            const std::uint64_t ticks = SDL_GetTicks();
-            if (ticks - last_status_tick >= 1000) {
-                last_status_tick = ticks;
-                SDL_SetWindowTitle(window, state->view_status.title(options.login.base_url.host).c_str());
-            }
-
-            if (network_done->load()) {
-                if (std::exception_ptr exception = take_pikvm_exception(*state)) {
-                    std::rethrow_exception(exception);
-                }
-                running = false;
-            }
-        }
-        if (options.login.vverbose) {
-            maybe_log_pikvm_frame_latency(frame_latency, last_frame_latency_log, true);
-        }
+        PikvmView view(options);
+        view.run();
     } catch (const UserError&) {
-        cleanup_after_exception();
         throw;
     } catch (...) {
         print_current_exception_with_stack(std::cerr, "pikvm view ui thread");
-        cleanup_after_exception();
         throw;
     }
-
-    clear_pikvm_local_mouse_capture(mouse_down);
-    hide_window_for_teardown();
-    stop_pikvm_network(*state, *stop_requested, network_thread);
-
-    clear_pikvm_frame(*state);
-    destroy_pikvm_texture(texture, d3d11_context);
-    destroy_pikvm_renderer(renderer, d3d11_context);
-    SDL_DestroyWindow(window);
-    window = nullptr;
-    d3d11_context.reset();
-    SDL_Quit();
 }
 
 } // namespace hitsc

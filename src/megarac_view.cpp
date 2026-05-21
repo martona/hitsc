@@ -1,11 +1,8 @@
 #include "megarac_view.hpp"
 
-#include "aspeed_decoder.hpp"
-#include "aspeed_presenter.hpp"
+#include "aspeed_view_renderer.hpp"
 #include "diagnostics.hpp"
 #include "log.hpp"
-#include "hardware_cursor.hpp"
-#include "hardware_cursor_presenter.hpp"
 #include "megarac_hid.hpp"
 #include "megarac_protocol.hpp"
 #include "megarac_view_session.hpp"
@@ -20,12 +17,10 @@
 #include <iomanip>
 #include <iostream>
 #include <memory>
-#include <mutex>
 #include <optional>
-#include <stdexcept>
-#include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace hitsc {
@@ -36,7 +31,6 @@ constexpr std::uint64_t kMouseMotionIntervalMilliseconds = 8;
 constexpr std::uint16_t kCmdSendHidPacket = command_value(MegaracCommand::SendHidPacket);
 constexpr std::uint16_t kCmdGetFullScreen = command_value(MegaracCommand::GetFullScreen);
 using KeyboardKeySlots = MegaracKeyboardKeySlots;
-using SharedCursor = MegaracHardwareCursor;
 
 constexpr int kRelativeMouseMode = kMegaracRelativeMouseMode;
 constexpr int kOtherMouseMode = kMegaracOtherMouseMode;
@@ -56,34 +50,6 @@ struct RemoteMousePosition {
     int x = 0;
     int y = 0;
 };
-
-void throw_sdl_error(std::string_view context)
-{
-    throw std::runtime_error(std::string(context) + ": " + SDL_GetError());
-}
-
-SDL_FRect centered_target_rect(int window_width, int window_height, int frame_width, int frame_height)
-{
-    const float width_scale = static_cast<float>(window_width) / static_cast<float>(frame_width);
-    const float height_scale = static_cast<float>(window_height) / static_cast<float>(frame_height);
-    const float scale = std::min(width_scale, height_scale);
-    SDL_FRect rect{};
-    rect.w = std::floor(static_cast<float>(frame_width) * scale);
-    rect.h = std::floor(static_cast<float>(frame_height) * scale);
-    rect.x = std::floor((static_cast<float>(window_width) - rect.w) / 2.0f);
-    rect.y = std::floor((static_cast<float>(window_height) - rect.h) / 2.0f);
-    return rect;
-}
-
-SDL_FRect current_target_rect(SDL_Window* window, int frame_width, int frame_height)
-{
-    int window_width = 0;
-    int window_height = 0;
-    if (!SDL_GetWindowSizeInPixels(window, &window_width, &window_height)) {
-        SDL_GetWindowSize(window, &window_width, &window_height);
-    }
-    return centered_target_rect(window_width, window_height, frame_width, frame_height);
-}
 
 std::optional<RemoteMousePosition> remote_mouse_position(
     float window_x,
@@ -205,10 +171,10 @@ void send_keyboard_report(
     std::uint32_t& sequence,
     bool verbose)
 {
-    std::vector<std::uint8_t> packet =
-        make_megarac_keyboard_packet(MegaracKeyboardReport{modifiers, keys}, sequence++);
-    const bool accepted = queue_megarac_view_packet(state, kCmdSendHidPacket, std::move(packet));
-    if (verbose && accepted) {
+    state.input.enqueue(MegaracInputWork{
+        kCmdSendHidPacket,
+        make_megarac_keyboard_packet(MegaracKeyboardReport{modifiers, keys}, sequence++)});
+    if (verbose) {
         LogLine line = log_info();
         line << "queued keyboard"
              << " modifiers=0x" << std::hex << std::setw(2) << std::setfill('0')
@@ -258,8 +224,8 @@ void send_mouse_report(
     }
 
     last_relative_position = position;
-    const bool accepted = queue_megarac_view_packet(state, kCmdSendHidPacket, std::move(packet));
-    if (verbose && accepted) {
+    state.input.enqueue(MegaracInputWork{kCmdSendHidPacket, std::move(packet)});
+    if (verbose) {
         log_info() << "queued mouse"
                    << " mode=" << mouse_mode
                    << " buttons=" << static_cast<int>(buttons)
@@ -269,375 +235,291 @@ void send_mouse_report(
     }
 }
 
+class MegaracView : public KvmViewBase {
+public:
+    explicit MegaracView(const MegaracViewOptions& options)
+        : MegaracView(options, std::make_shared<MegaracViewSessionState>())
+    {
+    }
+
+private:
+    MegaracView(const MegaracViewOptions& options, std::shared_ptr<MegaracViewSessionState> state)
+        : KvmViewBase(*state, options.login.base_url.host, "megarac")
+        , options_(options)
+        , state_(std::move(state))
+    {
+    }
+
+    void start_network() override
+    {
+        MegaracViewOptions network_options = options_;
+        network_thread_ = std::thread([network_options, state = state_, stop_requested = stop_requested_,
+                                       network_done = network_done_] {
+            try {
+                run_megarac_view_session(network_options, *state, *stop_requested);
+            } catch (...) {
+                state->set_exception(std::current_exception());
+            }
+            state->input.clear();
+            state->set_force_close({});
+            network_done->store(true);
+        });
+    }
+
+    void stop_network() override
+    {
+        stop_megarac_network(*state_, *stop_requested_, network_thread_);
+    }
+
+    bool network_done() const override
+    {
+        return network_done_->load();
+    }
+
+    std::exception_ptr take_network_exception() override
+    {
+        return state_->take_exception();
+    }
+
+    void before_sdl_cleanup() override
+    {
+        aspeed_.destroy();
+    }
+
+    void on_minimized() override
+    {
+        state_->frames.clear();
+        aspeed_.destroy();
+        aspeed_.reset_sequences();
+    }
+
+    void on_restored() override
+    {
+        state_->frames.clear();
+        aspeed_.reset_sequences();
+        state_->input.enqueue(MegaracInputWork{kCmdGetFullScreen, make_simple_packet(kCmdGetFullScreen, 1)});
+    }
+
+    void on_focus_lost() override
+    {
+        if (has_keyboard_state(keyboard_modifiers_, keyboard_keys_)) {
+            keyboard_modifiers_ = 0;
+            keyboard_keys_.fill(0);
+            send_keyboard_report(
+                *state_,
+                keyboard_modifiers_,
+                keyboard_keys_,
+                keyboard_sequence_,
+                options_.login.vverbose);
+        }
+    }
+
+    void handle_event(const SDL_Event& event, bool&) override
+    {
+        const AspeedPresentationSlot* active = aspeed_.active_slot();
+        if (event.type == SDL_EVENT_KEY_DOWN || event.type == SDL_EVENT_KEY_UP) {
+            handle_key_event(event);
+        } else if (active != nullptr &&
+                   (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
+                    event.type == SDL_EVENT_MOUSE_BUTTON_UP)) {
+            handle_mouse_button_event(event, *active);
+        } else if (active != nullptr && event.type == SDL_EVENT_MOUSE_MOTION) {
+            handle_mouse_motion_event(event, *active);
+        } else if (active != nullptr && event.type == SDL_EVENT_MOUSE_WHEEL) {
+            handle_mouse_wheel_event(event, *active);
+        }
+    }
+
+    void render_visible(bool& render_needed, bool& first_render) override
+    {
+        bool presented_new_frame = false;
+        aspeed_.update(
+            renderer(),
+            state_->frames,
+            state_->cursors,
+            "MegaRAC",
+            options_.login.vverbose,
+            render_needed,
+            presented_new_frame);
+
+        if (!render_needed) {
+            return;
+        }
+
+        clear_background();
+        if (const AspeedPresentationSlot* active = aspeed_.active_slot();
+            active != nullptr && active->texture != nullptr) {
+            aspeed_.render(renderer(), current_target_rect(active->width, active->height));
+        }
+        present();
+
+        if (presented_new_frame) {
+            if (const AspeedPresentationSlot* active = aspeed_.active_slot()) {
+                frame_presented(active->width, active->height);
+            }
+        }
+        first_render = false;
+    }
+
+    void handle_key_event(const SDL_Event& event)
+    {
+        if (event.type == SDL_EVENT_KEY_DOWN && event.key.repeat) {
+            return;
+        }
+
+        const bool pressed = event.type == SDL_EVENT_KEY_DOWN;
+        const std::optional<std::uint8_t> modifier = keyboard_modifier_bit(event.key.scancode);
+        bool changed = false;
+        if (modifier) {
+            if (pressed) {
+                changed = (keyboard_modifiers_ & *modifier) == 0;
+                keyboard_modifiers_ |= *modifier;
+            } else {
+                changed = (keyboard_modifiers_ & *modifier) != 0;
+                keyboard_modifiers_ &= static_cast<std::uint8_t>(~*modifier);
+            }
+        } else if (const std::optional<std::uint8_t> usage =
+                       keyboard_usage_from_sdl_scancode(event.key.scancode)) {
+            changed = set_keyboard_usage(keyboard_keys_, *usage, pressed);
+        }
+
+        if (changed) {
+            send_keyboard_report(
+                *state_,
+                keyboard_modifiers_,
+                keyboard_keys_,
+                keyboard_sequence_,
+                options_.login.vverbose);
+        }
+    }
+
+    void handle_mouse_button_event(const SDL_Event& event, const AspeedPresentationSlot& active)
+    {
+        const std::uint8_t mask = button_mask_for_sdl_button(event.button.button);
+        if (mask == 0) {
+            return;
+        }
+
+        const SDL_FRect target = current_target_rect(active.width, active.height);
+        const bool down = event.type == SDL_EVENT_MOUSE_BUTTON_DOWN;
+        const bool drag_active = mouse_buttons_ != 0;
+        const std::optional<RemoteMousePosition> position = remote_mouse_position(
+            event.button.x,
+            event.button.y,
+            target,
+            active.width,
+            active.height,
+            drag_active || !down);
+        if (!position) {
+            return;
+        }
+
+        if (down) {
+            mouse_buttons_ |= mask;
+        } else {
+            mouse_buttons_ &= static_cast<std::uint8_t>(~mask);
+        }
+        SDL_CaptureMouse(mouse_buttons_ != 0);
+        send_mouse_report(
+            *state_,
+            mouse_buttons_,
+            *position,
+            active.width,
+            active.height,
+            0,
+            last_relative_mouse_position_,
+            mouse_sequence_,
+            options_.login.vverbose);
+    }
+
+    void handle_mouse_motion_event(const SDL_Event& event, const AspeedPresentationSlot& active)
+    {
+        const std::uint64_t ticks = SDL_GetTicks();
+        const bool throttled =
+            mouse_buttons_ == 0 &&
+            ticks - last_mouse_motion_ticks_ < kMouseMotionIntervalMilliseconds;
+        if (throttled) {
+            return;
+        }
+
+        const SDL_FRect target = current_target_rect(active.width, active.height);
+        const std::optional<RemoteMousePosition> position = remote_mouse_position(
+            event.motion.x,
+            event.motion.y,
+            target,
+            active.width,
+            active.height,
+            mouse_buttons_ != 0);
+        if (position) {
+            send_mouse_report(
+                *state_,
+                mouse_buttons_,
+                *position,
+                active.width,
+                active.height,
+                0,
+                last_relative_mouse_position_,
+                mouse_sequence_,
+                options_.login.vverbose);
+            last_mouse_motion_ticks_ = ticks;
+        }
+    }
+
+    void handle_mouse_wheel_event(const SDL_Event& event, const AspeedPresentationSlot& active)
+    {
+        const SDL_FRect target = current_target_rect(active.width, active.height);
+        const std::optional<RemoteMousePosition> position = remote_mouse_position(
+            event.wheel.mouse_x,
+            event.wheel.mouse_y,
+            target,
+            active.width,
+            active.height,
+            mouse_buttons_ != 0);
+        if (!position) {
+            return;
+        }
+
+        const int wheel = event.wheel.direction == SDL_MOUSEWHEEL_FLIPPED
+            ? static_cast<int>(-event.wheel.y)
+            : static_cast<int>(event.wheel.y);
+        send_mouse_report(
+            *state_,
+            mouse_buttons_,
+            *position,
+            active.width,
+            active.height,
+            wheel,
+            last_relative_mouse_position_,
+            mouse_sequence_,
+            options_.login.vverbose);
+    }
+
+    MegaracViewOptions options_;
+    std::shared_ptr<MegaracViewSessionState> state_;
+    std::shared_ptr<std::atomic_bool> stop_requested_ = std::make_shared<std::atomic_bool>(false);
+    std::shared_ptr<std::atomic_bool> network_done_ = std::make_shared<std::atomic_bool>(false);
+    std::thread network_thread_;
+    AspeedViewRenderer aspeed_;
+    std::uint8_t mouse_buttons_ = 0;
+    std::uint32_t mouse_sequence_ = 0;
+    std::uint8_t keyboard_modifiers_ = 0;
+    KeyboardKeySlots keyboard_keys_{};
+    std::uint32_t keyboard_sequence_ = 0;
+    std::uint64_t last_mouse_motion_ticks_ = 0;
+    std::optional<RemoteMousePosition> last_relative_mouse_position_;
+};
+
 } // namespace
 
 void run_megarac_view(const MegaracViewOptions& options)
 {
-    if (!SDL_Init(SDL_INIT_VIDEO)) {
-        throw_sdl_error("SDL_Init");
-    }
-
-    SDL_Window* window = nullptr;
-    SDL_Renderer* renderer = nullptr;
-
-    auto stop_requested = std::make_shared<std::atomic_bool>(false);
-    auto network_done = std::make_shared<std::atomic_bool>(false);
-    auto state = std::make_shared<MegaracViewSessionState>();
-    std::thread network_thread;
-    AspeedPresenter presenter;
-    HardwareCursorPresenter cursor_presenter;
-
-    auto cleanup = [&] {
-        SDL_CaptureMouse(false);
-        presenter.destroy();
-        cursor_presenter.destroy();
-        if (renderer != nullptr) {
-            SDL_DestroyRenderer(renderer);
-            renderer = nullptr;
-        }
-        if (window != nullptr) {
-            SDL_DestroyWindow(window);
-            window = nullptr;
-        }
-        SDL_Quit();
-    };
-
-    auto hide_window_for_teardown = [&] {
-        if (window != nullptr) {
-            SDL_HideWindow(window);
-        }
-    };
-
     try {
-        const Uint32 frame_event_type = SDL_RegisterEvents(1);
-        if (frame_event_type == 0) {
-            throw_sdl_error("SDL_RegisterEvents");
-        }
-        state->frame_event_type.store(frame_event_type);
-
-        window = SDL_CreateWindow("hitsc", 1024, 768, SDL_WINDOW_RESIZABLE);
-        if (window == nullptr) {
-            throw_sdl_error("SDL_CreateWindow");
-        }
-        SDL_SetWindowTitle(window, state->view_status.title(options.login.base_url.host).c_str());
-
-        renderer = SDL_CreateRenderer(window, nullptr);
-        if (renderer == nullptr) {
-            throw_sdl_error("SDL_CreateRenderer");
-        }
-
-        MegaracViewOptions network_options = options;
-        network_thread = std::thread([network_options, state, stop_requested, network_done] {
-            try {
-                run_megarac_view_session(network_options, *state, *stop_requested);
-            } catch (...) {
-                set_megarac_exception(*state, std::current_exception());
-            }
-            {
-                std::lock_guard lock(state->control_mutex);
-                state->input_sink = {};
-                state->pending_input.clear();
-                state->force_close = {};
-            }
-            network_done->store(true);
-        });
-
-        AspeedDecoder decoder;
-        bool running = true;
-        bool first_render = true;
-        bool visible = true;
-        bool close_event_logged = false;
-        std::uint64_t last_sequence = 0;
-        std::uint64_t last_status_tick = 0;
-        int presented_frames = 0;
-        SharedCursor hardware_cursor;
-        bool has_hardware_cursor = false;
-        std::uint64_t last_cursor_sequence = 0;
-        std::uint8_t mouse_buttons = 0;
-        std::uint32_t mouse_sequence = 0;
-        std::uint8_t keyboard_modifiers = 0;
-        KeyboardKeySlots keyboard_keys{};
-        std::uint32_t keyboard_sequence = 0;
-        std::uint64_t last_mouse_motion_ticks = 0;
-        std::optional<RemoteMousePosition> last_relative_mouse_position;
-
-        while (running) {
-            bool render_needed = first_render;
-            bool presented_new_frame = false;
-            SDL_Event event{};
-            bool have_event = SDL_WaitEventTimeout(&event, 16);
-            while (have_event) {
-                if (event.type == SDL_EVENT_QUIT ||
-                    event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED) {
-                    if (!close_event_logged) {
-                        close_event_logged = true;
-                        log_info() << "megarac window close event"
-                                   << " type=" << event.type;
-                    }
-                    running = false;
-                } else if (event.type == SDL_EVENT_WINDOW_MINIMIZED ||
-                           event.type == SDL_EVENT_WINDOW_HIDDEN) {
-                    visible = false;
-                    state->frame_event_pending.store(false);
-                    state->view_status.minimize();
-                    clear_latest_megarac_view_frame(*state);
-                    presenter.destroy();
-                    cursor_presenter.destroy();
-                    last_sequence = 0;
-                    last_cursor_sequence = 0;
-                    last_status_tick = 0;
-                    SDL_SetWindowTitle(window, state->view_status.title(options.login.base_url.host).c_str());
-                } else if (event.type == SDL_EVENT_WINDOW_RESTORED ||
-                           event.type == SDL_EVENT_WINDOW_SHOWN) {
-                    visible = true;
-                    clear_latest_megarac_view_frame(*state);
-                    last_sequence = 0;
-                    queue_megarac_view_packet(
-                        *state,
-                        kCmdGetFullScreen,
-                        make_simple_packet(kCmdGetFullScreen, 1));
-                    render_needed = true;
-                    last_status_tick = 0;
-                    SDL_SetWindowTitle(window, state->view_status.title(options.login.base_url.host).c_str());
-                } else if (event.type == state->frame_event_type.load()) {
-                    state->frame_event_pending.store(false);
-                    render_needed = true;
-                } else if (event.type == SDL_EVENT_WINDOW_RESIZED ||
-                           event.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED ||
-                           event.type == SDL_EVENT_WINDOW_EXPOSED) {
-                    render_needed = true;
-                } else if (event.type == SDL_EVENT_WINDOW_FOCUS_LOST) {
-                    if (has_keyboard_state(keyboard_modifiers, keyboard_keys)) {
-                        keyboard_modifiers = 0;
-                        keyboard_keys.fill(0);
-                        send_keyboard_report(
-                            *state,
-                            keyboard_modifiers,
-                            keyboard_keys,
-                            keyboard_sequence,
-                            options.login.vverbose);
-                    }
-                } else if (event.type == SDL_EVENT_KEY_DOWN ||
-                           event.type == SDL_EVENT_KEY_UP) {
-                    if (!(event.type == SDL_EVENT_KEY_DOWN && event.key.repeat)) {
-                        const bool pressed = event.type == SDL_EVENT_KEY_DOWN;
-                        const std::optional<std::uint8_t> modifier = keyboard_modifier_bit(event.key.scancode);
-                        bool changed = false;
-                        if (modifier) {
-                            if (pressed) {
-                                changed = (keyboard_modifiers & *modifier) == 0;
-                                keyboard_modifiers |= *modifier;
-                            } else {
-                                changed = (keyboard_modifiers & *modifier) != 0;
-                                keyboard_modifiers &= static_cast<std::uint8_t>(~*modifier);
-                            }
-                        } else if (const std::optional<std::uint8_t> usage =
-                                       keyboard_usage_from_sdl_scancode(event.key.scancode)) {
-                            changed = set_keyboard_usage(keyboard_keys, *usage, pressed);
-                        }
-
-                        if (changed) {
-                            send_keyboard_report(
-                                *state,
-                                keyboard_modifiers,
-                                keyboard_keys,
-                                keyboard_sequence,
-                                options.login.vverbose);
-                        }
-                    }
-                } else if (presenter.active_slot() != nullptr &&
-                           (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
-                            event.type == SDL_EVENT_MOUSE_BUTTON_UP)) {
-                    const AspeedPresentationSlot& active = *presenter.active_slot();
-                    const std::uint8_t mask = button_mask_for_sdl_button(event.button.button);
-                    if (mask != 0) {
-                        const SDL_FRect target = current_target_rect(window, active.width, active.height);
-                        const bool down = event.type == SDL_EVENT_MOUSE_BUTTON_DOWN;
-                        const bool drag_active = mouse_buttons != 0;
-                        const std::optional<RemoteMousePosition> position = remote_mouse_position(
-                            event.button.x,
-                            event.button.y,
-                            target,
-                            active.width,
-                            active.height,
-                            drag_active || !down);
-                        if (position) {
-                            if (down) {
-                                mouse_buttons |= mask;
-                            } else {
-                                mouse_buttons &= static_cast<std::uint8_t>(~mask);
-                            }
-                            SDL_CaptureMouse(mouse_buttons != 0);
-                            send_mouse_report(
-                                *state,
-                                mouse_buttons,
-                                *position,
-                                active.width,
-                                active.height,
-                                0,
-                                last_relative_mouse_position,
-                                mouse_sequence,
-                                options.login.vverbose);
-                        }
-                    }
-                } else if (presenter.active_slot() != nullptr && event.type == SDL_EVENT_MOUSE_MOTION) {
-                    const AspeedPresentationSlot& active = *presenter.active_slot();
-                    const std::uint64_t ticks = SDL_GetTicks();
-                    const bool throttled =
-                        mouse_buttons == 0 &&
-                        ticks - last_mouse_motion_ticks < kMouseMotionIntervalMilliseconds;
-                    if (!throttled) {
-                        const SDL_FRect target = current_target_rect(window, active.width, active.height);
-                        const std::optional<RemoteMousePosition> position = remote_mouse_position(
-                            event.motion.x,
-                            event.motion.y,
-                            target,
-                            active.width,
-                            active.height,
-                            mouse_buttons != 0);
-                        if (position) {
-                            send_mouse_report(
-                                *state,
-                                mouse_buttons,
-                                *position,
-                                active.width,
-                                active.height,
-                                0,
-                                last_relative_mouse_position,
-                                mouse_sequence,
-                                options.login.vverbose);
-                            last_mouse_motion_ticks = ticks;
-                        }
-                    }
-                } else if (presenter.active_slot() != nullptr && event.type == SDL_EVENT_MOUSE_WHEEL) {
-                    const AspeedPresentationSlot& active = *presenter.active_slot();
-                    const SDL_FRect target = current_target_rect(window, active.width, active.height);
-                    const std::optional<RemoteMousePosition> position = remote_mouse_position(
-                        event.wheel.mouse_x,
-                        event.wheel.mouse_y,
-                        target,
-                        active.width,
-                        active.height,
-                        mouse_buttons != 0);
-                    if (position) {
-                        const int wheel = event.wheel.direction == SDL_MOUSEWHEEL_FLIPPED
-                            ? static_cast<int>(-event.wheel.y)
-                            : static_cast<int>(event.wheel.y);
-                        send_mouse_report(
-                            *state,
-                            mouse_buttons,
-                            *position,
-                            active.width,
-                            active.height,
-                            wheel,
-                            last_relative_mouse_position,
-                            mouse_sequence,
-                            options.login.vverbose);
-                    }
-                }
-                have_event = SDL_PollEvent(&event);
-            }
-
-            if (visible) {
-                bool cursor_texture_dirty = false;
-                if (std::optional<SharedCursor> cursor =
-                        take_latest_megarac_view_cursor(*state, last_cursor_sequence)) {
-                    hardware_cursor = std::move(*cursor);
-                    last_cursor_sequence = hardware_cursor.sequence;
-                    has_hardware_cursor = true;
-                    cursor_texture_dirty = true;
-                }
-
-                const std::shared_ptr<const MegaracCompressedFrame> frame =
-                    take_latest_megarac_view_frame(*state, last_sequence);
-                if (frame) {
-                    last_sequence = frame->sequence;
-                    const bool direct = presenter.present(
-                        renderer,
-                        decoder,
-                        frame->width,
-                        frame->height,
-                        frame->decode_options,
-                        frame->compressed);
-                    const AspeedPresentationSlot* active = presenter.active_slot();
-                    cursor_texture_dirty = has_hardware_cursor;
-
-                    ++presented_frames;
-                    if (active != nullptr &&
-                        options.login.vverbose && (presented_frames <= 20 || presented_frames % 60 == 0)) {
-                        log_info() << "presented MegaRAC frame #" << presented_frames
-                                   << " sequence=" << frame->sequence
-                                   << " size=" << frame->width << 'x' << frame->height
-                                   << " direct-texture=" << (direct ? "yes" : "no")
-                                   << " avg-rgb=" << aspeed_sampled_average_rgb(active->shadow);
-                    }
-                    render_needed = true;
-                    presented_new_frame = true;
-                }
-
-                if (cursor_texture_dirty && has_hardware_cursor) {
-                    const AspeedPresentationSlot* active = presenter.active_slot();
-                    if (active != nullptr) {
-                        const CursorImage cursor_image = make_cursor_image(
-                            hardware_cursor,
-                            active->shadow,
-                            active->width,
-                            active->height);
-                        cursor_presenter.update(renderer, cursor_image);
-                        render_needed = true;
-                    }
-                }
-
-                if (render_needed) {
-                    SDL_SetRenderDrawColor(renderer, 12, 14, 18, 255);
-                    SDL_RenderClear(renderer);
-                    if (const AspeedPresentationSlot* active = presenter.active_slot();
-                        active != nullptr && active->texture != nullptr) {
-                        const SDL_FRect target = current_target_rect(window, active->width, active->height);
-                        SDL_RenderTexture(renderer, active->texture, nullptr, &target);
-                        if (has_hardware_cursor) {
-                            cursor_presenter.render(
-                                renderer,
-                                hardware_cursor,
-                                target,
-                                active->width,
-                                active->height);
-                        }
-                    }
-                    SDL_RenderPresent(renderer);
-                    if (presented_new_frame) {
-                        const AspeedPresentationSlot* active = presenter.active_slot();
-                        if (active != nullptr) {
-                            state->view_status.frame_presented(active->width, active->height);
-                        }
-                    }
-                    first_render = false;
-                }
-            }
-
-            const std::uint64_t ticks = SDL_GetTicks();
-            if (ticks - last_status_tick >= 1000) {
-                last_status_tick = ticks;
-                SDL_SetWindowTitle(window, state->view_status.title(options.login.base_url.host).c_str());
-            }
-
-            if (network_done->load()) {
-                if (std::exception_ptr exception = take_megarac_exception(*state)) {
-                    std::rethrow_exception(exception);
-                }
-                running = false;
-            }
-        }
+        MegaracView view(options);
+        view.run();
     } catch (...) {
         print_current_exception_with_stack(std::cerr, "megarac view ui thread");
-        stop_megarac_network(*state, *stop_requested, network_thread);
-        cleanup();
         throw;
     }
-
-    hide_window_for_teardown();
-    stop_megarac_network(*state, *stop_requested, network_thread);
-    cleanup();
 }
 
 } // namespace hitsc
