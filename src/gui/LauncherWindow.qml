@@ -88,6 +88,7 @@ ApplicationWindow {
             property bool compactMode: layoutMode === 1
             property bool extraCompactMode: layoutMode === 2
             property int tileHeight: extraCompactMode ? extraCompactTileHeight : compactMode ? compactTileHeight : expandedTileHeight
+            property int deleteDelayMs: 5000
 
             width: hostScroll.availableWidth
             columns: columnCount
@@ -108,17 +109,85 @@ ApplicationWindow {
                     required property string status
                     required property string statusLabel
 
+                    property bool pendingDelete: false
+                    property real deleteProgress: 0
+
                     Layout.preferredWidth: hostGrid.tileWidth
                     Layout.preferredHeight: hostGrid.tileHeight
                     activeFocusOnTab: true
 
-                    Keys.onReturnPressed: root.connectHost(hostId)
-                    Keys.onEnterPressed: root.connectHost(hostId)
+                    function beginPendingDelete() {
+                        forceActiveFocus()
+                        pendingDelete = true
+                        deleteProgress = 0
+                        deleteTimer.restart()
+                        deleteWipe.restart()
+                    }
+
+                    function cancelPendingDelete() {
+                        if (!pendingDelete)
+                            return false
+                        deleteTimer.stop()
+                        deleteWipe.stop()
+                        pendingDelete = false
+                        deleteProgress = 0
+                        return true
+                    }
+
+                    function confirmPendingDelete() {
+                        deleteTimer.stop()
+                        deleteWipe.stop()
+                        pendingDelete = false
+                        deleteProgress = 0
+                        const result = hostModel.deleteHost(hostId)
+                        if (!result.ok)
+                            console.error(result.error)
+                    }
+
+                    function activateConnect() {
+                        if (cancelPendingDelete())
+                            return
+                        root.connectHost(hostId)
+                    }
+
+                    function activateEdit() {
+                        if (cancelPendingDelete())
+                            return
+                        addHostDialog.openForEdit(hostId)
+                    }
+
+                    Keys.onReturnPressed: activateConnect()
+                    Keys.onEnterPressed: activateConnect()
                     Keys.onPressed: function(event) {
                         if (event.key === Qt.Key_F2) {
-                            addHostDialog.openForEdit(hostId)
+                            activateEdit()
+                            event.accepted = true
+                        } else if (event.key === Qt.Key_Delete) {
+                            if (pendingDelete)
+                                confirmPendingDelete()
+                            else
+                                beginPendingDelete()
                             event.accepted = true
                         }
+                    }
+
+                    Timer {
+                        id: deleteTimer
+
+                        interval: hostGrid.deleteDelayMs
+                        repeat: false
+                        onTriggered: hostTile.confirmPendingDelete()
+                    }
+
+                    NumberAnimation {
+                        id: deleteWipe
+
+                        target: hostTile
+                        property: "deleteProgress"
+                        from: 0
+                        to: 1
+                        duration: hostGrid.deleteDelayMs
+                        easing.type: Easing.Linear
                     }
 
                     Rectangle {
@@ -148,14 +217,22 @@ ApplicationWindow {
                             acceptedButtons: Qt.RightButton
                             onTapped: function(eventPoint, button) {
                                 hostTile.forceActiveFocus()
+                                if (hostTile.cancelPendingDelete())
+                                    return
                                 hostMenu.popup(hostCard, eventPoint.position.x, eventPoint.position.y)
                             }
                         }
 
                         TapHandler {
                             acceptedButtons: Qt.LeftButton
-                            onTapped: hostTile.forceActiveFocus()
-                            onDoubleTapped: root.connectHost(hostId)
+                            onSingleTapped: {
+                                hostTile.forceActiveFocus()
+                                hostTile.cancelPendingDelete()
+                            }
+                            onDoubleTapped: {
+                                hostTile.forceActiveFocus()
+                                hostTile.activateConnect()
+                            }
                         }
 
                         Menu {
@@ -167,23 +244,19 @@ ApplicationWindow {
                                 text: "Connect"
                                 font.bold: true
                                 palette: root.palette
-                                onTriggered: root.connectHost(hostId)
+                                onTriggered: hostTile.activateConnect()
                             }
 
                             MenuItem {
                                 text: "Edit"
                                 palette: root.palette
-                                onTriggered: addHostDialog.openForEdit(hostId)
+                                onTriggered: hostTile.activateEdit()
                             }
 
                             MenuItem {
                                 text: "Delete"
                                 palette: root.palette
-                                onTriggered: {
-                                    const result = hostModel.deleteHost(hostId)
-                                    if (!result.ok)
-                                        console.error(result.error)
-                                }
+                                onTriggered: hostTile.beginPendingDelete()
                             }
                         }
 
@@ -255,6 +328,47 @@ ApplicationWindow {
                                     color: theme.mutedText
                                     font.pixelSize: 12
                                     horizontalAlignment: Text.AlignRight
+                                }
+                            }
+                        }
+
+                        Item {
+                            anchors.fill: parent
+                            visible: hostTile.pendingDelete
+                            clip: true
+
+                            readonly property real fadeWidth: 16
+
+                            Rectangle {
+                                id: deleteMask
+
+                                anchors.top: parent.top
+                                anchors.right: parent.right
+                                anchors.bottom: parent.bottom
+                                width: parent.width * hostTile.deleteProgress
+                                color: theme.window
+                                opacity: 0.92
+                            }
+
+                            Rectangle {
+                                anchors.top: parent.top
+                                anchors.bottom: parent.bottom
+                                x: Math.max(0, parent.width - deleteMask.width - width)
+                                width: Math.min(parent.width - deleteMask.width, parent.fadeWidth)
+                                visible: deleteMask.width > 0 && deleteMask.width < parent.width
+
+                                gradient: Gradient {
+                                    orientation: Gradient.Horizontal
+
+                                    GradientStop {
+                                        position: 0
+                                        color: Qt.rgba(theme.window.r, theme.window.g, theme.window.b, 0)
+                                    }
+
+                                    GradientStop {
+                                        position: 1
+                                        color: Qt.rgba(theme.window.r, theme.window.g, theme.window.b, 0.92)
+                                    }
                                 }
                             }
                         }
