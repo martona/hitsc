@@ -55,7 +55,8 @@ jobs:
           persist-credentials: false
 
       - name: Map vcpkg short path
-        run: subst V: "$env:GITHUB_WORKSPACE\vcpkg"
+        run: |
+          subst V: "$env:GITHUB_WORKSPACE\vcpkg"
 
       - name: Bootstrap vcpkg
         run: |
