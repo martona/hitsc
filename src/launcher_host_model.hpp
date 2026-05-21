@@ -69,6 +69,8 @@ private:
     void start_probes();
     void update_reachability(const QString& host_id, bool online);
     int index_for_id(const QString& host_id) const;
+    int insertion_row_for_host(const SavedHost& host) const;
+    void sort_hosts();
 
     HostStore store_;
     QList<SavedHost> hosts_;

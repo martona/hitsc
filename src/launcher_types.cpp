@@ -37,6 +37,15 @@ QString strip_url_scheme(QString value)
     return value;
 }
 
+QString host_sort_key(const SavedHost& host)
+{
+    QString value = host_from_launcher_url(host.url).trimmed();
+    if (value.isEmpty()) {
+        value = host.url.trimmed();
+    }
+    return value.toCaseFolded();
+}
+
 } // namespace
 
 bool LauncherCredentials::empty() const
@@ -177,6 +186,22 @@ QString host_from_launcher_url(const QString& url)
     } catch (const UserError&) {
         return {};
     }
+}
+
+bool saved_host_hostname_less(const SavedHost& left, const SavedHost& right)
+{
+    const int host_order = QString::localeAwareCompare(host_sort_key(left), host_sort_key(right));
+    if (host_order != 0) {
+        return host_order < 0;
+    }
+
+    const int name_order =
+        QString::localeAwareCompare(left.name.toCaseFolded(), right.name.toCaseFolded());
+    if (name_order != 0) {
+        return name_order < 0;
+    }
+
+    return QString::compare(left.id, right.id, Qt::CaseSensitive) < 0;
 }
 
 } // namespace hitsc

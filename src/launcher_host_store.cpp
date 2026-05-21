@@ -399,9 +399,7 @@ QList<SavedHost> HostStore::load_hosts() const
         ++index;
     }
 
-    std::sort(loaded.begin(), loaded.end(), [](const SavedHost& left, const SavedHost& right) {
-        return QString::localeAwareCompare(left.name, right.name) < 0;
-    });
+    std::sort(loaded.begin(), loaded.end(), saved_host_hostname_less);
     return loaded;
 }
 

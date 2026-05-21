@@ -43,6 +43,16 @@ void delete_registry_tree(const QString& path)
     }
 }
 
+hitsc::SavedHost make_saved_host(const QString& name, const QString& url)
+{
+    hitsc::SavedHost host;
+    host.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    host.type = hitsc::LauncherHostType::Megarac;
+    host.name = name;
+    host.url = url;
+    return host;
+}
+
 #endif
 
 void test_launcher_types()
@@ -134,6 +144,24 @@ void test_host_store()
 
         store.delete_host(host.id);
         expect(store.load_hosts().empty(), "registry store deletes host");
+
+        hitsc::SavedHost zeta =
+            make_saved_host(QStringLiteral("Alpha display"), QStringLiteral("https://zeta.example"));
+        hitsc::SavedHost alpha =
+            make_saved_host(QStringLiteral("Zulu display"), QStringLiteral("https://alpha.example"));
+
+        store.save_host(zeta);
+        store.save_host(alpha);
+
+        const QList<hitsc::SavedHost> sorted = store.load_hosts();
+        expect(sorted.size() == 2, "registry store loads sorted hosts");
+        if (sorted.size() == 2) {
+            expect(sorted.at(0).id == alpha.id, "registry store sorts by hostname first");
+            expect(sorted.at(1).id == zeta.id, "registry store sorts later hostname last");
+        }
+
+        store.delete_host(alpha.id);
+        store.delete_host(zeta.id);
     } catch (const std::exception& ex) {
         std::cerr << "FAIL: registry store round-trip threw: " << ex.what() << "\n";
         ++failures;

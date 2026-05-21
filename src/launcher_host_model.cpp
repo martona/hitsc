@@ -6,7 +6,9 @@
 #include <QTimer>
 #include <QUuid>
 
+#include <algorithm>
 #include <exception>
+#include <iterator>
 
 namespace hitsc {
 namespace {
@@ -30,6 +32,7 @@ LauncherHostModel::LauncherHostModel(VerbosityOptions verbosity, QObject* parent
     , hosts_(store_.load_hosts())
     , child_processes_(verbosity)
 {
+    sort_hosts();
     probe_timer_.setInterval(1000);
     connect(&probe_timer_, &QTimer::timeout, this, &LauncherHostModel::start_probes);
     probe_timer_.start();
@@ -162,9 +165,9 @@ QVariantMap LauncherHostModel::addHost(
         return error_result(QString::fromUtf8(ex.what()));
     }
 
-    const int row = hosts_.size();
+    const int row = insertion_row_for_host(host);
     beginInsertRows(QModelIndex(), row, row);
-    hosts_.append(host);
+    hosts_.insert(row, host);
     endInsertRows();
     emit countChanged();
     start_probes();
@@ -259,19 +262,25 @@ QVariantMap LauncherHostModel::updateHost(
         return error_result(QString::fromUtf8(ex.what()));
     }
 
+    emit layoutAboutToBeChanged();
     hosts_[row] = host;
-    const QModelIndex changed = index(row, 0);
-    emit dataChanged(
-        changed,
-        changed,
-        {TypeRole,
-         TypeLabelRole,
-         NameRole,
-         UrlRole,
-         HostRole,
-         StatusRole,
-         StatusLabelRole,
-         HasCredentialsRole});
+    sort_hosts();
+    emit layoutChanged();
+    if (!hosts_.empty()) {
+        const QModelIndex first = index(0, 0);
+        const QModelIndex last = index(hosts_.size() - 1, 0);
+        emit dataChanged(
+            first,
+            last,
+            {TypeRole,
+             TypeLabelRole,
+             NameRole,
+             UrlRole,
+             HostRole,
+             StatusRole,
+             StatusLabelRole,
+             HasCredentialsRole});
+    }
 
     if (url_changed) {
         start_probes();
@@ -389,6 +398,18 @@ int LauncherHostModel::index_for_id(const QString& host_id) const
         }
     }
     return -1;
+}
+
+int LauncherHostModel::insertion_row_for_host(const SavedHost& host) const
+{
+    const auto position =
+        std::lower_bound(hosts_.begin(), hosts_.end(), host, saved_host_hostname_less);
+    return static_cast<int>(std::distance(hosts_.begin(), position));
+}
+
+void LauncherHostModel::sort_hosts()
+{
+    std::sort(hosts_.begin(), hosts_.end(), saved_host_hostname_less);
 }
 
 } // namespace hitsc

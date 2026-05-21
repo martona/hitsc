@@ -45,5 +45,6 @@ QString reachability_status_label(ReachabilityStatus status);
 QString sanitize_host_name_to_url(const QString& name);
 bool validate_launcher_url(const QString& url, QString* error_message = nullptr);
 QString host_from_launcher_url(const QString& url);
+bool saved_host_hostname_less(const SavedHost& left, const SavedHost& right);
 
 } // namespace hitsc
