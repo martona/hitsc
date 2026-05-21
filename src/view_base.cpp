@@ -70,8 +70,37 @@ void ViewStateBase::push_render_event()
     }
 }
 
-KvmViewBase::KvmViewBase(ViewStateBase& state, std::string host, std::string log_name)
+KvmNetworkWorker::KvmNetworkWorker(ViewStateBase& state, std::function<void()> cleanup)
     : state_(state)
+    , cleanup_(std::move(cleanup))
+{
+}
+
+void KvmNetworkWorker::stop()
+{
+    stop_requested_.store(true);
+
+    if (std::function<void()> force_close = state_.force_close_snapshot()) {
+        force_close();
+    }
+
+    if (thread_.joinable()) {
+        thread_.join();
+    }
+}
+
+bool KvmNetworkWorker::done() const
+{
+    return done_.load();
+}
+
+KvmViewBase::KvmViewBase(
+    ViewStateBase& state,
+    std::string host,
+    std::string log_name,
+    std::function<void()> network_cleanup)
+    : state_(state)
+    , network_(state_, std::move(network_cleanup))
     , host_(std::move(host))
     , log_name_(std::move(log_name))
 {
@@ -81,19 +110,19 @@ void KvmViewBase::run()
 {
     try {
         initialize_sdl();
-        start_network();
+        start_network(network_);
         network_started_ = true;
         event_loop();
 
         if (window_ != nullptr) {
             SDL_HideWindow(window_);
         }
-        stop_network();
+        network_.stop();
         network_started_ = false;
         cleanup_sdl();
     } catch (...) {
         if (network_started_) {
-            stop_network();
+            network_.stop();
             network_started_ = false;
         }
         cleanup_sdl();
@@ -178,30 +207,6 @@ SDL_Renderer* KvmViewBase::create_renderer(SDL_Window* window)
 void KvmViewBase::destroy_renderer(SDL_Renderer* renderer)
 {
     SDL_DestroyRenderer(renderer);
-}
-
-void KvmViewBase::before_sdl_cleanup()
-{
-}
-
-void KvmViewBase::on_close()
-{
-}
-
-void KvmViewBase::on_minimized()
-{
-}
-
-void KvmViewBase::on_restored()
-{
-}
-
-void KvmViewBase::on_focus_lost()
-{
-}
-
-void KvmViewBase::handle_event(const SDL_Event&, bool&)
-{
 }
 
 void KvmViewBase::initialize_sdl()
@@ -311,8 +316,8 @@ void KvmViewBase::event_loop()
             refresh_title();
         }
 
-        if (network_done()) {
-            if (std::exception_ptr exception = take_network_exception()) {
+        if (network_.done()) {
+            if (std::exception_ptr exception = state_.take_exception()) {
                 std::rethrow_exception(exception);
             }
             running = false;

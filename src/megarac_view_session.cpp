@@ -936,22 +936,6 @@ private:
     std::chrono::steady_clock::time_point last_blank_recovery_;
 };
 
-void stop_megarac_network(
-    MegaracViewSessionState& state,
-    std::atomic_bool& stop_requested,
-    std::thread& network_thread)
-{
-    stop_requested.store(true);
-
-    if (std::function<void()> force_close = state.force_close_snapshot()) {
-        force_close();
-    }
-
-    if (network_thread.joinable()) {
-        network_thread.join();
-    }
-}
-
 void run_megarac_view_session(const MegaracViewOptions& options, MegaracViewSessionState& state, const std::atomic_bool& stop_requested)
 {
     struct ConnectionStatusGuard {

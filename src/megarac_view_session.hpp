@@ -10,7 +10,6 @@
 #include <chrono>
 #include <cstdint>
 #include <memory>
-#include <thread>
 #include <vector>
 
 namespace hitsc {
@@ -46,11 +45,6 @@ void run_megarac_view_session(
     const MegaracViewOptions& options,
     MegaracViewSessionState& state,
     const std::atomic_bool& stop_requested);
-
-void stop_megarac_network(
-    MegaracViewSessionState& state,
-    std::atomic_bool& stop_requested,
-    std::thread& network_thread);
 
 int megarac_view_mouse_mode_snapshot(MegaracViewSessionState& state);
 

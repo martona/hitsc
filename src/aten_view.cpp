@@ -16,7 +16,6 @@
 #include <iostream>
 #include <memory>
 #include <optional>
-#include <thread>
 #include <utility>
 
 namespace hitsc {
@@ -120,41 +119,21 @@ public:
 
 private:
     AtenView(const AtenViewOptions& options, std::shared_ptr<AtenViewState> state)
-        : KvmViewBase(*state, options.login.base_url.host, "aten")
+        : KvmViewBase(*state, options.login.base_url.host, "aten", [state] {
+              state->input.clear();
+          })
         , options_(options)
         , state_(std::move(state))
     {
     }
 
-    void start_network() override
+    void start_network(KvmNetworkWorker& network) override
     {
         AtenViewOptions network_options = options_;
-        network_thread_ = std::thread([network_options, state = state_, stop_requested = stop_requested_,
-                                       network_done = network_done_] {
-            try {
-                run_aten_network_session(network_options, *state, *stop_requested);
-            } catch (...) {
-                state->set_exception(std::current_exception());
-            }
-            state->input.clear();
-            state->set_force_close({});
-            network_done->store(true);
+        std::shared_ptr<AtenViewState> state = state_;
+        network.start([network_options, state](std::atomic_bool& stop_requested) {
+            run_aten_network_session(network_options, *state, stop_requested);
         });
-    }
-
-    void stop_network() override
-    {
-        stop_aten_network(*state_, *stop_requested_, network_thread_);
-    }
-
-    bool network_done() const override
-    {
-        return network_done_->load();
-    }
-
-    std::exception_ptr take_network_exception() override
-    {
-        return state_->take_exception();
     }
 
     void before_sdl_cleanup() override
@@ -332,9 +311,6 @@ private:
 
     AtenViewOptions options_;
     std::shared_ptr<AtenViewState> state_;
-    std::shared_ptr<std::atomic_bool> stop_requested_ = std::make_shared<std::atomic_bool>(false);
-    std::shared_ptr<std::atomic_bool> network_done_ = std::make_shared<std::atomic_bool>(false);
-    std::thread network_thread_;
     AspeedViewRenderer aspeed_;
     std::uint8_t mouse_buttons_ = 0;
     std::uint64_t last_mouse_motion_ticks_ = 0;

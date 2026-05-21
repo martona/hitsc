@@ -19,7 +19,6 @@
 #include <memory>
 #include <optional>
 #include <string_view>
-#include <thread>
 #include <utility>
 #include <vector>
 
@@ -244,41 +243,21 @@ public:
 
 private:
     MegaracView(const MegaracViewOptions& options, std::shared_ptr<MegaracViewSessionState> state)
-        : KvmViewBase(*state, options.login.base_url.host, "megarac")
+        : KvmViewBase(*state, options.login.base_url.host, "megarac", [state] {
+              state->input.clear();
+          })
         , options_(options)
         , state_(std::move(state))
     {
     }
 
-    void start_network() override
+    void start_network(KvmNetworkWorker& network) override
     {
         MegaracViewOptions network_options = options_;
-        network_thread_ = std::thread([network_options, state = state_, stop_requested = stop_requested_,
-                                       network_done = network_done_] {
-            try {
-                run_megarac_view_session(network_options, *state, *stop_requested);
-            } catch (...) {
-                state->set_exception(std::current_exception());
-            }
-            state->input.clear();
-            state->set_force_close({});
-            network_done->store(true);
+        std::shared_ptr<MegaracViewSessionState> state = state_;
+        network.start([network_options, state](std::atomic_bool& stop_requested) {
+            run_megarac_view_session(network_options, *state, stop_requested);
         });
-    }
-
-    void stop_network() override
-    {
-        stop_megarac_network(*state_, *stop_requested_, network_thread_);
-    }
-
-    bool network_done() const override
-    {
-        return network_done_->load();
-    }
-
-    std::exception_ptr take_network_exception() override
-    {
-        return state_->take_exception();
     }
 
     void before_sdl_cleanup() override
@@ -497,9 +476,6 @@ private:
 
     MegaracViewOptions options_;
     std::shared_ptr<MegaracViewSessionState> state_;
-    std::shared_ptr<std::atomic_bool> stop_requested_ = std::make_shared<std::atomic_bool>(false);
-    std::shared_ptr<std::atomic_bool> network_done_ = std::make_shared<std::atomic_bool>(false);
-    std::thread network_thread_;
     AspeedViewRenderer aspeed_;
     std::uint8_t mouse_buttons_ = 0;
     std::uint32_t mouse_sequence_ = 0;

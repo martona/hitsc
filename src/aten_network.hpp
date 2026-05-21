@@ -9,7 +9,6 @@
 #include <chrono>
 #include <cstdint>
 #include <memory>
-#include <thread>
 #include <vector>
 
 namespace hitsc {
@@ -36,10 +35,5 @@ void run_aten_network_session(
     const AtenViewOptions& options,
     AtenViewState& state,
     std::atomic_bool& stop_requested);
-
-void stop_aten_network(
-    AtenViewState& state,
-    std::atomic_bool& stop_requested,
-    std::thread& network_thread);
 
 } // namespace hitsc

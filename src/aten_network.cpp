@@ -975,22 +975,6 @@ private:
 
 } // namespace
 
-void stop_aten_network(
-    AtenViewState& state,
-    std::atomic_bool& stop_requested,
-    std::thread& network_thread)
-{
-    stop_requested.store(true);
-
-    if (std::function<void()> force_close = state.force_close_snapshot()) {
-        force_close();
-    }
-
-    if (network_thread.joinable()) {
-        network_thread.join();
-    }
-}
-
 void run_aten_network_session(
     const AtenViewOptions& options,
     AtenViewState& state,

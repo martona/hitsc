@@ -12,6 +12,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <utility>
 
 namespace hitsc {
@@ -118,9 +119,50 @@ private:
     std::deque<Work> pending_;
 };
 
+class KvmNetworkWorker {
+public:
+    KvmNetworkWorker(ViewStateBase& state, std::function<void()> cleanup);
+
+    KvmNetworkWorker(const KvmNetworkWorker&) = delete;
+    KvmNetworkWorker& operator=(const KvmNetworkWorker&) = delete;
+
+    template <typename Run>
+    void start(Run run)
+    {
+        stop_requested_.store(false);
+        done_.store(false);
+        thread_ = std::thread([this, run = std::move(run)]() mutable {
+            try {
+                run(stop_requested_);
+            } catch (...) {
+                state_.set_exception(std::current_exception());
+            }
+            if (cleanup_) {
+                cleanup_();
+            }
+            state_.set_force_close({});
+            done_.store(true);
+        });
+    }
+
+    void stop();
+    bool done() const;
+
+private:
+    ViewStateBase& state_;
+    std::function<void()> cleanup_;
+    std::atomic_bool stop_requested_{false};
+    std::atomic_bool done_{false};
+    std::thread thread_;
+};
+
 class KvmViewBase {
 public:
-    KvmViewBase(ViewStateBase& state, std::string host, std::string log_name);
+    KvmViewBase(
+        ViewStateBase& state,
+        std::string host,
+        std::string log_name,
+        std::function<void()> network_cleanup);
     virtual ~KvmViewBase() = default;
 
     KvmViewBase(const KvmViewBase&) = delete;
@@ -147,18 +189,15 @@ protected:
 
     virtual SDL_Renderer* create_renderer(SDL_Window* window);
     virtual void destroy_renderer(SDL_Renderer* renderer);
-    virtual void before_sdl_cleanup();
+    virtual void before_sdl_cleanup() = 0;
 
-    virtual void start_network() = 0;
-    virtual void stop_network() = 0;
-    virtual bool network_done() const = 0;
-    virtual std::exception_ptr take_network_exception() = 0;
+    virtual void start_network(KvmNetworkWorker& network) = 0;
 
-    virtual void on_close();
-    virtual void on_minimized();
-    virtual void on_restored();
-    virtual void on_focus_lost();
-    virtual void handle_event(const SDL_Event& event, bool& render_needed);
+    virtual void on_close() {};
+    virtual void on_minimized() = 0;
+    virtual void on_restored() = 0;
+    virtual void on_focus_lost() = 0;
+    virtual void handle_event(const SDL_Event& event, bool& render_needed) = 0;
     virtual void render_visible(bool& render_needed, bool& first_render) = 0;
 
 private:
@@ -167,6 +206,7 @@ private:
     void event_loop();
 
     ViewStateBase& state_;
+    KvmNetworkWorker network_;
     std::string host_;
     std::string log_name_;
     SDL_Window* window_ = nullptr;

@@ -966,21 +966,6 @@ void run_pikvm_network_session(
     }
 }
 
-void stop_pikvm_network(
-    PikvmViewState& state,
-    std::atomic_bool& stop_requested,
-    std::thread& network_thread)
-{
-    stop_requested.store(true);
-    if (std::function<void()> force_close = state.force_close_snapshot()) {
-        force_close();
-    }
-
-    if (network_thread.joinable()) {
-        network_thread.join();
-    }
-}
-
 class PikvmView : public KvmViewBase {
 public:
     explicit PikvmView(const PikvmViewOptions& options)
@@ -990,7 +975,9 @@ public:
 
 private:
     PikvmView(const PikvmViewOptions& options, std::shared_ptr<PikvmViewState> state)
-        : KvmViewBase(*state, options.login.base_url.host, "pikvm")
+        : KvmViewBase(*state, options.login.base_url.host, "pikvm", [state] {
+              state->input.clear();
+          })
         , options_(options)
         , network_options_(options)
         , state_(std::move(state))
@@ -1014,35 +1001,14 @@ private:
         d3d11_context_.reset();
     }
 
-    void start_network() override
+    void start_network(KvmNetworkWorker& network) override
     {
         PikvmViewOptions network_options = network_options_;
-        network_thread_ = std::thread([network_options, d3d11_context = d3d11_context_, state = state_,
-                                       stop_requested = stop_requested_, network_done = network_done_] {
-            try {
-                run_pikvm_network_session(network_options, d3d11_context, *state, *stop_requested);
-            } catch (...) {
-                state->set_exception(std::current_exception());
-            }
-            state->input.clear();
-            state->set_force_close({});
-            network_done->store(true);
+        std::shared_ptr<PikvmViewState> state = state_;
+        network.start([network_options, d3d11_context = d3d11_context_, state](
+                          std::atomic_bool& stop_requested) {
+            run_pikvm_network_session(network_options, d3d11_context, *state, stop_requested);
         });
-    }
-
-    void stop_network() override
-    {
-        stop_pikvm_network(*state_, *stop_requested_, network_thread_);
-    }
-
-    bool network_done() const override
-    {
-        return network_done_->load();
-    }
-
-    std::exception_ptr take_network_exception() override
-    {
-        return state_->take_exception();
     }
 
     void before_sdl_cleanup() override
@@ -1396,9 +1362,6 @@ private:
     PikvmViewOptions options_;
     PikvmViewOptions network_options_;
     std::shared_ptr<PikvmViewState> state_;
-    std::shared_ptr<std::atomic_bool> stop_requested_ = std::make_shared<std::atomic_bool>(false);
-    std::shared_ptr<std::atomic_bool> network_done_ = std::make_shared<std::atomic_bool>(false);
-    std::thread network_thread_;
     PikvmKeyDownState key_down_{};
     PikvmMouseButtonDownState mouse_down_{};
     SDL_Texture* texture_ = nullptr;
