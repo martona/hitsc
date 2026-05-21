@@ -124,14 +124,14 @@ std::optional<std::uint32_t> aten_keyboard_usage_from_sdl_scancode(SDL_Scancode 
     return std::nullopt;
 }
 
-void release_all_aten_keys(AtenViewState& state, AtenKeyDownState& key_down, bool verbose)
+void release_all_aten_keys(AtenViewState& state, AtenKeyDownState& key_down)
 {
     for (std::size_t usage = 0; usage < key_down.size(); ++usage) {
         if (!key_down[usage]) {
             continue;
         }
         key_down[usage] = false;
-        queue_aten_key_event(state, static_cast<std::uint32_t>(usage), false, verbose);
+        queue_aten_key_event(state, static_cast<std::uint32_t>(usage), false);
     }
 }
 
@@ -263,7 +263,7 @@ void run_aten_view(const AtenViewOptions& options)
                            event.type == SDL_EVENT_WINDOW_EXPOSED) {
                     render_needed = true;
                 } else if (event.type == SDL_EVENT_WINDOW_FOCUS_LOST) {
-                    release_all_aten_keys(*state, key_down, options.login.vverbose);
+                    release_all_aten_keys(*state, key_down);
                 } else if (event.type == SDL_EVENT_KEY_DOWN ||
                            event.type == SDL_EVENT_KEY_UP) {
                     if (!(event.type == SDL_EVENT_KEY_DOWN && event.key.repeat)) {
@@ -279,7 +279,7 @@ void run_aten_view(const AtenViewOptions& options)
                             const bool down = event.type == SDL_EVENT_KEY_DOWN;
                             if (key_down[*usage] != down) {
                                 key_down[*usage] = down;
-                                queue_aten_key_event(*state, *usage, down, options.login.vverbose);
+                                queue_aten_key_event(*state, *usage, down);
                             }
                         }
                     }
@@ -310,8 +310,7 @@ void run_aten_view(const AtenViewOptions& options)
                                 *state,
                                 position->x,
                                 position->y,
-                                mouse_buttons,
-                                options.login.vverbose);
+                                mouse_buttons);
                         }
                     }
                 } else if (presenter.active_slot() != nullptr && event.type == SDL_EVENT_MOUSE_MOTION) {
@@ -334,8 +333,7 @@ void run_aten_view(const AtenViewOptions& options)
                                 *state,
                                 position->x,
                                 position->y,
-                                mouse_buttons,
-                                options.login.vverbose);
+                                mouse_buttons);
                             last_mouse_motion_ticks = ticks;
                         }
                     }
@@ -359,14 +357,12 @@ void run_aten_view(const AtenViewOptions& options)
                                 *state,
                                 position->x,
                                 position->y,
-                                wheel_mask,
-                                options.login.vverbose);
+                                wheel_mask);
                             queue_aten_pointer_event(
                                 *state,
                                 position->x,
                                 position->y,
-                                0,
-                                options.login.vverbose);
+                                0);
                         }
                     }
                 }
@@ -466,13 +462,13 @@ void run_aten_view(const AtenViewOptions& options)
         }
     } catch (...) {
         print_current_exception_with_stack(std::cerr, "aten view ui thread");
-        stop_aten_network(*state, *stop_requested, network_thread, options.login.verbose);
+        stop_aten_network(*state, *stop_requested, network_thread);
         cleanup();
         throw;
     }
 
     hide_window_for_teardown();
-    stop_aten_network(*state, *stop_requested, network_thread, options.login.verbose);
+    stop_aten_network(*state, *stop_requested, network_thread);
     cleanup();
 }
 

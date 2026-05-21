@@ -630,13 +630,13 @@ void run_megarac_view(const MegaracViewOptions& options)
         }
     } catch (...) {
         print_current_exception_with_stack(std::cerr, "megarac view ui thread");
-        stop_megarac_network(*state, *stop_requested, network_thread, options.login.verbose);
+        stop_megarac_network(*state, *stop_requested, network_thread);
         cleanup();
         throw;
     }
 
     hide_window_for_teardown();
-    stop_megarac_network(*state, *stop_requested, network_thread, options.login.verbose);
+    stop_megarac_network(*state, *stop_requested, network_thread);
     cleanup();
 }
 

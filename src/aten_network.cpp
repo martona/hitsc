@@ -1100,10 +1100,8 @@ void queue_aten_input_packet(
 void queue_aten_key_event(
     AtenViewState& state,
     std::uint32_t usage,
-    bool down,
-    bool verbose)
+    bool down)
 {
-    (void)verbose;
     queue_aten_input_packet(state, make_aten_key_event(usage, down));
 }
 
@@ -1111,20 +1109,16 @@ void queue_aten_pointer_event(
     AtenViewState& state,
     int x,
     int y,
-    std::uint8_t mask,
-    bool verbose)
+    std::uint8_t mask)
 {
-    (void)verbose;
     queue_aten_input_packet(state, make_aten_pointer_event(x, y, mask));
 }
 
 void stop_aten_network(
     AtenViewState& state,
     std::atomic_bool& stop_requested,
-    std::thread& network_thread,
-    bool verbose)
+    std::thread& network_thread)
 {
-    (void)verbose;
     stop_requested.store(true);
 
     std::function<void()> force_close;

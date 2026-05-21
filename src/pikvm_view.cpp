@@ -640,20 +640,16 @@ void install_pikvm_input_sink(
 void queue_pikvm_key_event(
     PikvmViewState& state,
     std::string_view code,
-    bool pressed,
-    bool verbose)
+    bool pressed)
 {
-    (void)verbose;
     queue_pikvm_input_packet(state, make_pikvm_key_packet(code, pressed));
 }
 
 void queue_pikvm_mouse_button_event(
     PikvmViewState& state,
     std::string_view button,
-    bool pressed,
-    bool verbose)
+    bool pressed)
 {
-    (void)verbose;
     queue_pikvm_input_packet(state, make_pikvm_mouse_button_packet(button, pressed));
 }
 
@@ -669,10 +665,8 @@ void queue_pikvm_mouse_move_event(
 void queue_pikvm_mouse_wheel_event(
     PikvmViewState& state,
     int delta_x,
-    int delta_y,
-    bool verbose)
+    int delta_y)
 {
-    (void)verbose;
     queue_pikvm_input_packet(
         state,
         make_pikvm_mouse_wheel_packet(delta_x, delta_y));
@@ -693,8 +687,7 @@ bool pikvm_mouse_button_slot(std::uint8_t button, std::size_t& slot)
 
 void release_all_pikvm_keys(
     PikvmViewState& state,
-    PikvmKeyDownState& key_down,
-    bool verbose)
+    PikvmKeyDownState& key_down)
 {
     for (std::size_t scancode = 0; scancode < key_down.size(); ++scancode) {
         if (!key_down[scancode]) {
@@ -703,7 +696,7 @@ void release_all_pikvm_keys(
         key_down[scancode] = false;
         const auto code = pikvm_key_code_from_sdl_scancode(static_cast<SDL_Scancode>(scancode));
         if (code) {
-            queue_pikvm_key_event(state, *code, false, verbose);
+            queue_pikvm_key_event(state, *code, false);
         }
     }
 }
@@ -1105,10 +1098,8 @@ void run_pikvm_network_session(
 void stop_pikvm_network(
     PikvmViewState& state,
     std::atomic_bool& stop_requested,
-    std::thread& network_thread,
-    bool verbose)
+    std::thread& network_thread)
 {
-    (void)verbose;
     stop_requested.store(true);
     std::function<void()> force_close;
     {
@@ -1145,7 +1136,7 @@ void run_pikvm_view(const PikvmViewOptions& options)
 
     auto cleanup_after_exception = [&] {
         clear_pikvm_local_mouse_capture(mouse_down);
-        stop_pikvm_network(*state, *stop_requested, network_thread, options.login.verbose);
+        stop_pikvm_network(*state, *stop_requested, network_thread);
         clear_pikvm_frame(*state);
         destroy_pikvm_texture(texture, d3d11_context);
         destroy_pikvm_renderer(renderer, d3d11_context);
@@ -1257,7 +1248,7 @@ void run_pikvm_view(const PikvmViewOptions& options)
                            event.type == SDL_EVENT_WINDOW_EXPOSED) {
                     render_needed = true;
                 } else if (event.type == SDL_EVENT_WINDOW_FOCUS_LOST) {
-                    release_all_pikvm_keys(*state, key_down, options.login.vverbose);
+                    release_all_pikvm_keys(*state, key_down);
                 } else if (event.type == SDL_EVENT_KEY_DOWN ||
                            event.type == SDL_EVENT_KEY_UP) {
                     if (!(event.type == SDL_EVENT_KEY_DOWN && event.key.repeat)) {
@@ -1277,8 +1268,7 @@ void run_pikvm_view(const PikvmViewOptions& options)
                                 queue_pikvm_key_event(
                                     *state,
                                     *code,
-                                    down,
-                                    options.login.vverbose);
+                                    down);
                             }
                         }
                     }
@@ -1311,8 +1301,7 @@ void run_pikvm_view(const PikvmViewOptions& options)
                             queue_pikvm_mouse_button_event(
                                 *state,
                                 *button,
-                                down,
-                                options.login.vverbose);
+                                down);
                         }
                         SDL_CaptureMouse(any_pikvm_mouse_button_down(mouse_down));
                     } else if (options.login.vverbose) {
@@ -1362,8 +1351,7 @@ void run_pikvm_view(const PikvmViewOptions& options)
                             queue_pikvm_mouse_wheel_event(
                                 *state,
                                 delta_x,
-                                delta_y,
-                                options.login.vverbose);
+                                delta_y);
                         }
                     }
                 }
@@ -1540,7 +1528,7 @@ void run_pikvm_view(const PikvmViewOptions& options)
 
     clear_pikvm_local_mouse_capture(mouse_down);
     hide_window_for_teardown();
-    stop_pikvm_network(*state, *stop_requested, network_thread, options.login.verbose);
+    stop_pikvm_network(*state, *stop_requested, network_thread);
 
     clear_pikvm_frame(*state);
     destroy_pikvm_texture(texture, d3d11_context);

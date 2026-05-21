@@ -56,8 +56,7 @@ void run_aten_network_session(
 void stop_aten_network(
     AtenViewState& state,
     std::atomic_bool& stop_requested,
-    std::thread& network_thread,
-    bool verbose);
+    std::thread& network_thread);
 
 void set_aten_exception(AtenViewState& state, std::exception_ptr exception);
 std::exception_ptr take_aten_exception(AtenViewState& state);
@@ -78,14 +77,12 @@ void queue_aten_input_packet(
 void queue_aten_key_event(
     AtenViewState& state,
     std::uint32_t usage,
-    bool down,
-    bool verbose);
+    bool down);
     
 void queue_aten_pointer_event(
     AtenViewState& state,
     int x,
     int y,
-    std::uint8_t mask,
-    bool verbose);
+    std::uint8_t mask);
 
 } // namespace hitsc

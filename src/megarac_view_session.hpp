@@ -65,8 +65,7 @@ void run_megarac_view_session(
 void stop_megarac_network(
     MegaracViewSessionState& state,
     std::atomic_bool& stop_requested,
-    std::thread& network_thread,
-    bool verbose);
+    std::thread& network_thread);
 
 void set_megarac_exception(MegaracViewSessionState& state, std::exception_ptr exception);
 std::exception_ptr take_megarac_exception(MegaracViewSessionState& state);

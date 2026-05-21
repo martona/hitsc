@@ -1031,10 +1031,8 @@ private:
 void stop_megarac_network(
     MegaracViewSessionState& state,
     std::atomic_bool& stop_requested,
-    std::thread& network_thread,
-    bool verbose)
+    std::thread& network_thread)
 {
-    (void)verbose;
     stop_requested.store(true);
 
     std::function<void()> force_close;
