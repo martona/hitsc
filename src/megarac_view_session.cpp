@@ -30,6 +30,7 @@
 #include <exception>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -71,6 +72,7 @@ constexpr std::uint16_t kCmdSetNextMaster = command_value(MegaracCommand::SetNex
 constexpr std::uint16_t kCmdPowerStatus = command_value(MegaracCommand::PowerStatus);
 constexpr std::uint16_t kCmdDisplayLockSet = command_value(MegaracCommand::DisplayLockSet);
 constexpr std::uint16_t kCmdMediaLicenseStatus = command_value(MegaracCommand::MediaLicenseStatus);
+constexpr std::uint16_t kCmdFpsDiff = command_value(MegaracCommand::FpsDiff);
 constexpr std::uint16_t kIvtpHwCursor = command_value(MegaracCommand::IvtpHwCursor);
 
 using KvmConfig = MegaracViewConfig;
@@ -561,6 +563,7 @@ private:
             handle_video_packet(packet);
         }
 
+        send_frame_drop_feedback_if_due();
     }
 
     void handle_validation_response(const KvmPacket& packet)
@@ -706,9 +709,11 @@ private:
                           << " compression=" << static_cast<int>(frame->compression_mode)
                           << " rc4=" << static_cast<int>(frame->rc4_enable)
                           << " first-block=0x" << std::hex << static_cast<int>(block_header) << std::dec;
+            note_video_frame_received_for_feedback();
             return;
         }
 
+        note_video_frame_received_for_feedback();
         blank_screen_packets_ = 0;
         const int next_frame_number = frames_seen_ + 1;
         if (options_.login.vverbose && (next_frame_number <= 20 || next_frame_number % 60 == 0)) {
@@ -740,6 +745,37 @@ private:
         state_.frames.publish(std::move(compressed_frame));
         state_.push_render_event();
         ++frames_seen_;
+    }
+
+    void note_video_frame_received_for_feedback()
+    {
+        ++frames_received_since_feedback_;
+        frame_feedback_started_ = true;
+    }
+
+    void send_frame_drop_feedback_if_due()
+    {
+        const auto now = std::chrono::steady_clock::now();
+        if (!frame_feedback_started_ || now - last_frame_feedback_ < std::chrono::milliseconds(100)) {
+            return;
+        }
+
+        const std::uint64_t frames_presented =
+            state_.presented_frames_for_feedback.load(std::memory_order_relaxed);
+        const std::uint64_t presented_delta = frames_presented - last_presented_frames_for_feedback_;
+        const int presented_since_feedback = presented_delta > static_cast<std::uint64_t>(std::numeric_limits<int>::max())
+            ? std::numeric_limits<int>::max()
+            : static_cast<int>(presented_delta);
+        const int diff = frames_received_since_feedback_ > presented_since_feedback
+            ? frames_received_since_feedback_ - presented_since_feedback
+            : presented_since_feedback - frames_received_since_feedback_;
+        const auto reported_diff = static_cast<std::uint16_t>(
+            std::min(diff, static_cast<int>(std::numeric_limits<std::uint16_t>::max())));
+
+        queue_packet_from_strand(kCmdFpsDiff, make_simple_packet(kCmdFpsDiff, reported_diff));
+        frames_received_since_feedback_ = 0;
+        last_presented_frames_for_feedback_ = frames_presented;
+        last_frame_feedback_ = now;
     }
 
     void queue_packet_from_strand(std::uint16_t type, std::vector<std::uint8_t> packet)
@@ -888,10 +924,14 @@ private:
     int power_status_ = -1;
     bool validation_sent_ = false;
     bool full_screen_requested_ = false;
+    bool frame_feedback_started_ = false;
     bool writing_ = false;
     bool stopping_ = false;
     bool closed_ = false;
+    int frames_received_since_feedback_ = 0;
+    std::uint64_t last_presented_frames_for_feedback_ = 0;
     std::size_t last_websocket_message_bytes_ = 0;
+    std::chrono::steady_clock::time_point last_frame_feedback_ = std::chrono::steady_clock::now();
     std::chrono::steady_clock::time_point last_blank_recovery_;
 };
 

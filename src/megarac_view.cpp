@@ -356,6 +356,7 @@ private:
         if (presented_new_frame) {
             if (const AspeedPresentationSlot* active = aspeed_.active_slot()) {
                 frame_presented(active->width, active->height);
+                state_->presented_frames_for_feedback.fetch_add(1, std::memory_order_relaxed);
             }
         }
         first_render = false;

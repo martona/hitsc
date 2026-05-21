@@ -39,6 +39,7 @@ struct MegaracViewSessionState : ViewStateBase {
     LatestMailbox<MegaracHardwareCursor> cursors;
     InputQueue<MegaracInputWork> input;
     std::atomic_int mouse_mode{kMegaracAbsoluteMouseMode};
+    std::atomic_uint64_t presented_frames_for_feedback{0};
 };
 
 void run_megarac_view_session(
