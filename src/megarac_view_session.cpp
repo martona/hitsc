@@ -72,7 +72,8 @@ constexpr std::uint16_t kCmdSetNextMaster = command_value(MegaracCommand::SetNex
 constexpr std::uint16_t kCmdPowerStatus = command_value(MegaracCommand::PowerStatus);
 constexpr std::uint16_t kCmdDisplayLockSet = command_value(MegaracCommand::DisplayLockSet);
 constexpr std::uint16_t kCmdMediaLicenseStatus = command_value(MegaracCommand::MediaLicenseStatus);
-constexpr std::uint16_t kCmdFpsDiff = command_value(MegaracCommand::FpsDiff);
+// MegaRAC expects this periodic video feedback even when the reported diff is zero.
+constexpr std::uint16_t kCmdVideoFeedback = command_value(MegaracCommand::FpsDiff);
 constexpr std::uint16_t kIvtpHwCursor = command_value(MegaracCommand::IvtpHwCursor);
 
 using KvmConfig = MegaracViewConfig;
@@ -563,7 +564,7 @@ private:
             handle_video_packet(packet);
         }
 
-        send_frame_drop_feedback_if_due();
+        send_video_feedback_if_due();
     }
 
     void handle_validation_response(const KvmPacket& packet)
@@ -749,33 +750,33 @@ private:
 
     void note_video_frame_received_for_feedback()
     {
-        ++frames_received_since_feedback_;
-        frame_feedback_started_ = true;
+        ++video_feedback_received_frames_;
+        video_feedback_started_ = true;
     }
 
-    void send_frame_drop_feedback_if_due()
+    void send_video_feedback_if_due()
     {
         const auto now = std::chrono::steady_clock::now();
-        if (!frame_feedback_started_ || now - last_frame_feedback_ < std::chrono::milliseconds(100)) {
+        if (!video_feedback_started_ || now - last_video_feedback_ < std::chrono::milliseconds(100)) {
             return;
         }
 
         const std::uint64_t frames_presented =
-            state_.presented_frames_for_feedback.load(std::memory_order_relaxed);
-        const std::uint64_t presented_delta = frames_presented - last_presented_frames_for_feedback_;
+            state_.video_feedback_presented_frames.load(std::memory_order_relaxed);
+        const std::uint64_t presented_delta = frames_presented - last_video_feedback_presented_frames_;
         const int presented_since_feedback = presented_delta > static_cast<std::uint64_t>(std::numeric_limits<int>::max())
             ? std::numeric_limits<int>::max()
             : static_cast<int>(presented_delta);
-        const int diff = frames_received_since_feedback_ > presented_since_feedback
-            ? frames_received_since_feedback_ - presented_since_feedback
-            : presented_since_feedback - frames_received_since_feedback_;
+        const int diff = video_feedback_received_frames_ > presented_since_feedback
+            ? video_feedback_received_frames_ - presented_since_feedback
+            : presented_since_feedback - video_feedback_received_frames_;
         const auto reported_diff = static_cast<std::uint16_t>(
             std::min(diff, static_cast<int>(std::numeric_limits<std::uint16_t>::max())));
 
-        queue_packet_from_strand(kCmdFpsDiff, make_simple_packet(kCmdFpsDiff, reported_diff));
-        frames_received_since_feedback_ = 0;
-        last_presented_frames_for_feedback_ = frames_presented;
-        last_frame_feedback_ = now;
+        queue_packet_from_strand(kCmdVideoFeedback, make_simple_packet(kCmdVideoFeedback, reported_diff));
+        video_feedback_received_frames_ = 0;
+        last_video_feedback_presented_frames_ = frames_presented;
+        last_video_feedback_ = now;
     }
 
     void queue_packet_from_strand(std::uint16_t type, std::vector<std::uint8_t> packet)
@@ -924,14 +925,14 @@ private:
     int power_status_ = -1;
     bool validation_sent_ = false;
     bool full_screen_requested_ = false;
-    bool frame_feedback_started_ = false;
+    bool video_feedback_started_ = false;
     bool writing_ = false;
     bool stopping_ = false;
     bool closed_ = false;
-    int frames_received_since_feedback_ = 0;
-    std::uint64_t last_presented_frames_for_feedback_ = 0;
+    int video_feedback_received_frames_ = 0;
+    std::uint64_t last_video_feedback_presented_frames_ = 0;
     std::size_t last_websocket_message_bytes_ = 0;
-    std::chrono::steady_clock::time_point last_frame_feedback_ = std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point last_video_feedback_ = std::chrono::steady_clock::now();
     std::chrono::steady_clock::time_point last_blank_recovery_;
 };
 
