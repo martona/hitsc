@@ -55,10 +55,12 @@ LoginOptions make_login_options(const ChildSessionLaunchRequest& request)
 
 } // namespace
 
-int run_launcher_child()
+int run_launcher_child(VerbosityOptions verbosity)
 {
     const ChildSessionLaunchRequest request = read_launch_request();
     LoginOptions login = make_login_options(request);
+    login.verbose = verbosity.verbose;
+    login.vverbose = verbosity.vverbose;
 
     ParentLivenessMonitor parent_liveness_monitor;
     parent_liveness_monitor.start(request.parent_process_id);

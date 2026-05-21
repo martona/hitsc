@@ -6,11 +6,17 @@
 
 namespace hitsc {
 
+struct VerbosityOptions {
+    bool verbose = false;
+    bool vverbose = false;
+};
+
 struct LoginOptions {
     Url base_url;
     std::string username;
     std::string password;
     bool verbose = false;
+    bool vverbose = false;
     bool insecure = false;
     bool debug_disable_http_keepalive = false;
     bool debug_disable_input_coalescing = false;

@@ -253,14 +253,14 @@ void run_aten_view(const AtenViewOptions& options)
                            event.type == SDL_EVENT_WINDOW_EXPOSED) {
                     render_needed = true;
                 } else if (event.type == SDL_EVENT_WINDOW_FOCUS_LOST) {
-                    release_all_aten_keys(*state, key_down, options.login.verbose);
+                    release_all_aten_keys(*state, key_down, options.login.vverbose);
                 } else if (event.type == SDL_EVENT_KEY_DOWN ||
                            event.type == SDL_EVENT_KEY_UP) {
                     if (!(event.type == SDL_EVENT_KEY_DOWN && event.key.repeat)) {
                         const std::optional<std::uint32_t> usage =
                             aten_keyboard_usage_from_sdl_scancode(event.key.scancode);
                         if (!usage || *usage >= key_down.size()) {
-                            if (options.login.verbose) {
+                            if (options.login.vverbose) {
                                 log_info() << "ignored ATEN key"
                                            << " scancode=" << event.key.scancode
                                            << " key=" << event.key.key;
@@ -269,7 +269,7 @@ void run_aten_view(const AtenViewOptions& options)
                             const bool down = event.type == SDL_EVENT_KEY_DOWN;
                             if (key_down[*usage] != down) {
                                 key_down[*usage] = down;
-                                queue_aten_key_event(*state, *usage, down, options.login.verbose);
+                                queue_aten_key_event(*state, *usage, down, options.login.vverbose);
                             }
                         }
                     }
@@ -300,7 +300,7 @@ void run_aten_view(const AtenViewOptions& options)
                                 position->y,
                                 mouse_buttons,
                                 false,
-                                options.login.verbose);
+                                options.login.vverbose);
                         }
                     }
                 } else if (presenter.active_slot() != nullptr && event.type == SDL_EVENT_MOUSE_MOTION) {
@@ -324,7 +324,7 @@ void run_aten_view(const AtenViewOptions& options)
                                 position->y,
                                 mouse_buttons,
                                 !options.login.debug_disable_input_coalescing && mouse_buttons == 0,
-                                options.login.verbose);
+                                options.login.vverbose);
                             last_mouse_motion_ticks = ticks;
                         }
                     }
@@ -349,14 +349,14 @@ void run_aten_view(const AtenViewOptions& options)
                                 position->y,
                                 wheel_mask,
                                 false,
-                                options.login.verbose);
+                                options.login.vverbose);
                             queue_aten_pointer_event(
                                 *state,
                                 position->x,
                                 position->y,
                                 0,
                                 false,
-                                options.login.verbose);
+                                options.login.vverbose);
                         }
                     }
                 }
@@ -387,7 +387,7 @@ void run_aten_view(const AtenViewOptions& options)
                     const AspeedPresentationSlot* active = presenter.active_slot();
                     ++presented_frames;
                     if (active != nullptr &&
-                        options.login.verbose && (presented_frames <= 20 || presented_frames % 60 == 0)) {
+                        options.login.vverbose && (presented_frames <= 20 || presented_frames % 60 == 0)) {
                         log_info() << "presented ATEN frame #" << presented_frames
                                    << " sequence=" << frame->sequence
                                    << " size=" << frame->width << 'x' << frame->height

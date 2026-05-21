@@ -25,9 +25,10 @@ QVariantMap error_result(const QString& message)
 
 } // namespace
 
-LauncherHostModel::LauncherHostModel(QObject* parent)
+LauncherHostModel::LauncherHostModel(VerbosityOptions verbosity, QObject* parent)
     : QAbstractListModel(parent)
     , hosts_(store_.load_hosts())
+    , child_processes_(verbosity)
 {
     probe_timer_.setInterval(1000);
     connect(&probe_timer_, &QTimer::timeout, this, &LauncherHostModel::start_probes);

@@ -73,7 +73,10 @@ Common viewer options:
 - `--password-env TEXT`: read the password from an environment variable.
 - `-k, --insecure`: disable certificate and hostname verification.
 - `-v, --verbose`: log HTTP request/response and protocol details.
+- `--vverbose`: also log noisy input/output events, packets, WebSocket messages, and frames; implies `--verbose`.
 - `--idle-timeout INT`: stop if no WebSocket message arrives for this many seconds; `0` disables it.
+
+The `gui` subcommand accepts `--verbose` and `--vverbose` and forwards the selected logging level to launched child viewers.
 
 ATEN also supports:
 

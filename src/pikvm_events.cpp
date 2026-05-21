@@ -258,7 +258,7 @@ private:
             }
         }
 
-        if (options_.login.verbose && (messages_seen_ <= 8 || messages_seen_ % 120 == 0)) {
+        if (options_.login.vverbose && (messages_seen_ <= 8 || messages_seen_ % 120 == 0)) {
             LogLine line = log_info();
             line << "pikvm event websocket message"
                  << " bytes=" << bytes_transferred;
@@ -382,7 +382,7 @@ private:
 
     void maybe_log_input_latency(PikvmClock::time_point now, bool force)
     {
-        if (!options_.login.verbose || input_latency_.packets == 0) {
+        if (!options_.login.vverbose || input_latency_.packets == 0) {
             return;
         }
         if (!force && input_latency_.packets < 32

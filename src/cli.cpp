@@ -55,10 +55,36 @@ void fill_default_credentials(LoginOptions& options, const std::string& password
     }
 }
 
+void normalize_verbosity(bool& verbose, bool vverbose)
+{
+    if (vverbose) {
+        verbose = true;
+    }
+}
+
+void normalize_verbosity(LoginOptions& options)
+{
+    normalize_verbosity(options.verbose, options.vverbose);
+}
+
+void normalize_verbosity(VerbosityOptions& options)
+{
+    normalize_verbosity(options.verbose, options.vverbose);
+}
+
+void configure_verbosity_options(CLI::App& command, bool& verbose, bool& vverbose)
+{
+    command.add_flag("-v,--verbose", verbose, "Log HTTP request/response and protocol details to stderr.");
+    command.add_flag(
+        "--vverbose",
+        vverbose,
+        "Also log noisy input/output events, packets, websocket messages, and frames; implies --verbose.");
+}
+
 void configure_login_options(CLI::App& command, LoginOptions& options, std::string& password_env_name)
 {
     command.add_flag("-k,--insecure", options.insecure, "Disable certificate and hostname verification.");
-    command.add_flag("-v,--verbose", options.verbose, "Log HTTP request/response and protocol details to stderr.");
+    configure_verbosity_options(command, options.verbose, options.vverbose);
     command.add_flag(
         "--debug-disable-http-keepalive",
         options.debug_disable_http_keepalive,
@@ -111,6 +137,9 @@ int run_cli(int argc, char* argv[])
 
     CLI::App* gui = app.add_subcommand("gui", "Open the saved-host launcher.");
     CLI::App* child = app.add_subcommand("child", "Run a launcher child session.");
+    VerbosityOptions process_verbosity;
+    configure_verbosity_options(*gui, process_verbosity.verbose, process_verbosity.vverbose);
+    configure_verbosity_options(*child, process_verbosity.verbose, process_verbosity.vverbose);
 
     MegaracViewOptions megarac_options;
     std::string megarac_url;
@@ -184,6 +213,7 @@ int run_cli(int argc, char* argv[])
     }
 
     if (*megarac) {
+        normalize_verbosity(megarac_options.login);
         megarac_options.login.base_url = parse_https_url(megarac_url);
         megarac_options.login.base_url.target = "/";
         fill_default_credentials(megarac_options.login, megarac_password_env_name);
@@ -193,6 +223,7 @@ int run_cli(int argc, char* argv[])
     }
 
     if (*aten) {
+        normalize_verbosity(aten_options.login);
         aten_options.login.base_url = parse_https_url(aten_url);
         aten_options.login.base_url.target = "/";
         aten_options.shared = !aten_exclusive;
@@ -203,6 +234,7 @@ int run_cli(int argc, char* argv[])
     }
 
     if (*pikvm) {
+        normalize_verbosity(pikvm_options.login);
         pikvm_options.login.base_url = parse_https_url(pikvm_url);
         pikvm_options.login.base_url.target = "/";
         pikvm_options.video_decode = parse_pikvm_video_decode_mode(pikvm_video_decode);
@@ -213,11 +245,13 @@ int run_cli(int argc, char* argv[])
     }
 
     if (*child) {
-        return run_launcher_child();
+        normalize_verbosity(process_verbosity);
+        return run_launcher_child(process_verbosity);
     }
 
     if (*gui) {
-        int result = run_launcher_gui(argc, argv);
+        normalize_verbosity(process_verbosity);
+        int result = run_launcher_gui(argc, argv, process_verbosity);
         #ifdef _WIN32
             // Fuck. QT. Sideways.
             // QObject::~QObject: Timers cannot be stopped from another thread

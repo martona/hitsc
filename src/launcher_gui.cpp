@@ -150,7 +150,7 @@ void apply_title_bar_theme(QWindow* window, Qt::ColorScheme color_scheme)
 
 } // namespace
 
-int run_launcher_gui(int argc, char* argv[])
+int run_launcher_gui(int argc, char* argv[], VerbosityOptions verbosity)
 {
     qputenv("QT_FATAL_WARNINGS", "1");
 
@@ -162,7 +162,7 @@ int run_launcher_gui(int argc, char* argv[])
     QQuickStyle::setStyle(QStringLiteral("Fusion"));
     apply_application_theme(app, light_palette, app.styleHints()->colorScheme());
 
-    LauncherHostModel host_model;
+    LauncherHostModel host_model(verbosity);
     LauncherTheme launcher_theme(app.styleHints()->colorScheme());
 
     QQmlApplicationEngine engine;

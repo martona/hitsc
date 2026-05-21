@@ -3,6 +3,7 @@
 #include "launcher_child_process_manager.hpp"
 #include "launcher_host_store.hpp"
 #include "launcher_reachability_probe.hpp"
+#include "options.hpp"
 
 #include <QAbstractListModel>
 #include <QHash>
@@ -30,7 +31,7 @@ public:
         HasCredentialsRole,
     };
 
-    explicit LauncherHostModel(QObject* parent = nullptr);
+    explicit LauncherHostModel(VerbosityOptions verbosity = {}, QObject* parent = nullptr);
     ~LauncherHostModel() override;
 
     int rowCount(const QModelIndex& parent = QModelIndex()) const override;

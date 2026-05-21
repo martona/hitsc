@@ -753,7 +753,7 @@ private:
         read_buffer_.consume(read_buffer_.size());
         const std::string event_type = media_event_type(text);
         ++text_messages_seen_;
-        if (options_.login.verbose) {
+        if (options_.login.vverbose) {
             LogLine line = log_info();
             line << "pikvm video websocket text"
                  << " bytes=" << bytes_transferred;
@@ -805,7 +805,7 @@ private:
             closed_ = true;
             return;
         }
-        if (options_.login.verbose) {
+        if (options_.login.vverbose) {
             log_info() << "sent PiKVM media start"
                        << " bytes=" << bytes_transferred;
         }
@@ -828,7 +828,7 @@ private:
         const std::uint8_t op = bytes[0];
         if (op == 255) {
             missed_heartbeats_ = 0;
-            if (options_.login.verbose) {
+            if (options_.login.vverbose) {
                 log_info() << "pikvm video websocket pong"
                            << " bytes=" << bytes_transferred;
             }
@@ -836,7 +836,7 @@ private:
         }
 
         if (op != 1) {
-            if (options_.login.verbose) {
+            if (options_.login.vverbose) {
                 log_warning() << "ignored PiKVM video websocket binary op"
                               << " op=" << static_cast<int>(op)
                               << " bytes=" << bytes_transferred;
@@ -845,7 +845,7 @@ private:
         }
 
         if (bytes.size() < 2) {
-            if (options_.login.verbose) {
+            if (options_.login.vverbose) {
                 log_warning() << "ignored truncated PiKVM video frame header";
             }
             return;

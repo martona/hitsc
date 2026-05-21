@@ -409,11 +409,11 @@ void run_megarac_view(const MegaracViewOptions& options)
                             keyboard_modifiers,
                             keyboard_keys,
                             keyboard_sequence,
-                            options.login.verbose);
+                            options.login.vverbose);
                     }
                 } else if (event.type == SDL_EVENT_KEY_DOWN ||
                            event.type == SDL_EVENT_KEY_UP) {
-                    if (options.login.verbose) {
+                    if (options.login.vverbose) {
                         log_info() << "key "
                                    << (event.type == SDL_EVENT_KEY_DOWN ? "down" : "up")
                                    << " scancode=" << event.key.scancode
@@ -443,7 +443,7 @@ void run_megarac_view(const MegaracViewOptions& options)
                                 keyboard_modifiers,
                                 keyboard_keys,
                                 keyboard_sequence,
-                                options.login.verbose);
+                                options.login.vverbose);
                         }
                     }
                 } else if (presenter.active_slot() != nullptr &&
@@ -477,7 +477,7 @@ void run_megarac_view(const MegaracViewOptions& options)
                                 last_relative_mouse_position,
                                 mouse_sequence,
                                 options.login.debug_disable_input_coalescing,
-                                options.login.verbose);
+                                options.login.vverbose);
                         }
                     }
                 } else if (presenter.active_slot() != nullptr && event.type == SDL_EVENT_MOUSE_MOTION) {
@@ -505,7 +505,7 @@ void run_megarac_view(const MegaracViewOptions& options)
                                 last_relative_mouse_position,
                                 mouse_sequence,
                                 options.login.debug_disable_input_coalescing,
-                                options.login.verbose);
+                                options.login.vverbose);
                             last_mouse_motion_ticks = ticks;
                         }
                     }
@@ -532,7 +532,7 @@ void run_megarac_view(const MegaracViewOptions& options)
                             last_relative_mouse_position,
                             mouse_sequence,
                             options.login.debug_disable_input_coalescing,
-                            options.login.verbose);
+                            options.login.vverbose);
                     }
                 }
                 have_event = SDL_PollEvent(&event);
@@ -563,7 +563,7 @@ void run_megarac_view(const MegaracViewOptions& options)
 
                     ++presented_frames;
                     if (active != nullptr &&
-                        options.login.verbose && (presented_frames <= 20 || presented_frames % 60 == 0)) {
+                        options.login.vverbose && (presented_frames <= 20 || presented_frames % 60 == 0)) {
                         log_info() << "presented MegaRAC frame #" << presented_frames
                                    << " sequence=" << frame->sequence
                                    << " size=" << frame->width << 'x' << frame->height

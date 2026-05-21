@@ -653,7 +653,7 @@ private:
     void handle_packet(const KvmPacket& packet)
     {
         ++packets_seen_;
-        if (options_.login.verbose) {
+        if (options_.login.vverbose) {
             log_packet(packets_seen_, packet);
         }
 
@@ -874,7 +874,7 @@ private:
         const SharedCursor cursor_for_log = *cursor;
         publish_cursor(state_, std::move(*cursor));
 
-        if (options_.login.verbose) {
+        if (options_.login.vverbose) {
             log_info() << "hardware cursor"
                        << " type=" << cursor_for_log.type
                        << " x=" << cursor_for_log.x
@@ -891,7 +891,7 @@ private:
         ++video_packets_seen_;
         std::optional<MegaracVideoFrame> frame = video_assembler_.ingest(packet.payload);
         if (!frame) {
-            if (options_.login.verbose && video_packets_seen_ <= 20) {
+            if (options_.login.vverbose && video_packets_seen_ <= 20) {
                 log_info() << "video packet #" << video_packets_seen_
                            << " payload=" << packet.payload.size()
                            << " complete=no";
@@ -914,7 +914,7 @@ private:
         fps_reporting_started_ = true;
         blank_screen_packets_ = 0;
         const int next_frame_number = frames_seen_ + 1;
-        if (options_.login.verbose && (next_frame_number <= 20 || next_frame_number % 60 == 0)) {
+        if (options_.login.vverbose && (next_frame_number <= 20 || next_frame_number % 60 == 0)) {
             log_info() << "queued MegaRAC ASPEED frame #" << next_frame_number
                        << " packets=" << packets_seen_
                        << " video-packets=" << video_packets_seen_
@@ -1078,7 +1078,7 @@ private:
         if (!outgoing_packets_.empty()) {
             const OutgoingPacket sent = std::move(outgoing_packets_.front());
             outgoing_packets_.pop_front();
-            if (options_.login.verbose) {
+            if (options_.login.vverbose) {
                 log_sent_packet(
                     sent.type,
                     packet_status_from_bytes(sent.bytes),

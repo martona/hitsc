@@ -1285,7 +1285,7 @@ void run_pikvm_view(const PikvmViewOptions& options)
                            event.type == SDL_EVENT_WINDOW_EXPOSED) {
                     render_needed = true;
                 } else if (event.type == SDL_EVENT_WINDOW_FOCUS_LOST) {
-                    release_all_pikvm_keys(*state, key_down, options.login.verbose);
+                    release_all_pikvm_keys(*state, key_down, options.login.vverbose);
                 } else if (event.type == SDL_EVENT_KEY_DOWN ||
                            event.type == SDL_EVENT_KEY_UP) {
                     if (!(event.type == SDL_EVENT_KEY_DOWN && event.key.repeat)) {
@@ -1293,7 +1293,7 @@ void run_pikvm_view(const PikvmViewOptions& options)
                             pikvm_key_code_from_sdl_scancode(event.key.scancode);
                         const auto scancode = static_cast<std::size_t>(event.key.scancode);
                         if (!code || scancode >= key_down.size()) {
-                            if (options.login.verbose) {
+                            if (options.login.vverbose) {
                                 log_info() << "ignored PiKVM key"
                                            << " scancode=" << event.key.scancode
                                            << " key=" << event.key.key;
@@ -1306,7 +1306,7 @@ void run_pikvm_view(const PikvmViewOptions& options)
                                     *state,
                                     *code,
                                     down,
-                                    options.login.verbose,
+                                    options.login.vverbose,
                                     ui_event_at);
                             }
                         }
@@ -1341,11 +1341,11 @@ void run_pikvm_view(const PikvmViewOptions& options)
                                 *state,
                                 *button,
                                 down,
-                                options.login.verbose,
+                                options.login.vverbose,
                                 ui_event_at);
                         }
                         SDL_CaptureMouse(any_pikvm_mouse_button_down(mouse_down));
-                    } else if (options.login.verbose) {
+                    } else if (options.login.vverbose) {
                         log_info() << "ignored PiKVM mouse button"
                                    << " button=" << static_cast<int>(event.button.button);
                     }
@@ -1395,7 +1395,7 @@ void run_pikvm_view(const PikvmViewOptions& options)
                                 *state,
                                 delta_x,
                                 delta_y,
-                                options.login.verbose,
+                                options.login.vverbose,
                                 ui_event_at);
                         }
                     }
@@ -1534,7 +1534,7 @@ void run_pikvm_view(const PikvmViewOptions& options)
                     state->view_status.frame_presented(
                         pending_present_latency_frame->width,
                         pending_present_latency_frame->height);
-                    if (options.login.verbose) {
+                    if (options.login.vverbose) {
                         add_pikvm_frame_latency(
                             frame_latency,
                             *pending_present_latency_frame,
@@ -1559,7 +1559,7 @@ void run_pikvm_view(const PikvmViewOptions& options)
                 running = false;
             }
         }
-        if (options.login.verbose) {
+        if (options.login.vverbose) {
             maybe_log_pikvm_frame_latency(frame_latency, last_frame_latency_log, true);
         }
     } catch (const UserError&) {

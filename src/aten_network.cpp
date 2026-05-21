@@ -507,7 +507,7 @@ public:
                 self->parser_.append(std::move(initial_bytes));
             }
             self->queue_framebuffer_update_request();
-            if (self->options_.login.verbose) {
+            if (self->options_.login.vverbose) {
                 log_info() << "requested ATEN framebuffer update";
             }
             self->parse_receive_buffer();
@@ -578,7 +578,7 @@ private:
         stats_rx_bytes_ += bytes.size();
         last_websocket_message_bytes_ = bytes.size();
 
-        if (options_.login.verbose &&
+        if (options_.login.vverbose &&
             (total_websocket_messages_ <= 5 || total_websocket_messages_ % 120 == 0)) {
             LogLine line = log_info();
             line << "aten websocket message"
@@ -655,7 +655,7 @@ private:
     {
         ++total_messages_;
         ++stats_messages_;
-        if (options_.login.verbose && message.type != 0) {
+        if (options_.login.vverbose && message.type != 0) {
             log_info() << "aten rfb message #" << total_messages_
                        << " type=" << static_cast<int>(message.type)
                        << " " << aten_server_message_name(message.type)
@@ -667,7 +667,7 @@ private:
             handle_framebuffer_update(message);
             break;
         case AtenRfbMessageKind::bell:
-            if (options_.login.verbose) {
+            if (options_.login.vverbose) {
                 log_info() << "aten rfb bell";
             }
             break;
@@ -675,12 +675,12 @@ private:
             handle_cursor_position(message.cursor);
             break;
         case AtenRfbMessageKind::message22:
-            if (options_.login.verbose) {
+            if (options_.login.vverbose) {
                 log_info() << "aten rfb message 22 value=" << static_cast<int>(message.value);
             }
             break;
         case AtenRfbMessageKind::mouse_control:
-            if (options_.login.verbose) {
+            if (options_.login.vverbose) {
                 log_info() << "aten rfb mouse/control"
                            << " type=" << static_cast<int>(message.type)
                            << " crypto=" << static_cast<int>(message.mouse_crypto)
@@ -689,7 +689,7 @@ private:
             }
             break;
         case AtenRfbMessageKind::control_message:
-            if (options_.login.verbose) {
+            if (options_.login.vverbose) {
                 log_info() << "aten rfb control-message"
                            << " count=" << message.control_count
                            << " code-digits=" << message.control_code_digits
@@ -697,7 +697,7 @@ private:
             }
             break;
         case AtenRfbMessageKind::service:
-            if (options_.login.verbose) {
+            if (options_.login.vverbose) {
                 log_info() << "aten rfb service"
                            << " type=" << static_cast<int>(message.type)
                            << " value=" << static_cast<int>(message.value);
@@ -714,7 +714,7 @@ private:
 
         ++updates_;
         ++stats_framebuffer_updates_;
-        if (options_.login.verbose && (updates_ <= 5 || updates_ % 120 == 0)) {
+        if (options_.login.vverbose && (updates_ <= 5 || updates_ % 120 == 0)) {
             log_info() << "aten rfb framebuffer update #" << updates_
                        << " rects=" << message.rects.size();
         }
@@ -723,7 +723,7 @@ private:
             const AtenFramebufferUpdateRect& update_rect = message.rects[i];
             const AtenFramebufferRect& rect = update_rect.rect;
 
-            if (options_.login.verbose && (updates_ <= 5 || updates_ % 120 == 0)) {
+            if (options_.login.vverbose && (updates_ <= 5 || updates_ % 120 == 0)) {
                 LogLine line = log_info();
                 line << "aten rfb rect"
                      << " index=" << (i + 1)
@@ -754,7 +754,7 @@ private:
         if (ast_payload_is_frame_end_only(payload)) {
             previous_width_ = rect.width;
             previous_height_ = rect.height;
-            if (options_.login.verbose && (updates_ <= 20 || updates_ % 60 == 0)) {
+            if (options_.login.vverbose && (updates_ <= 20 || updates_ % 60 == 0)) {
                 log_info() << "skipped ATEN no-op frame #" << updates_
                            << " size=" << rect.width << 'x' << rect.height
                            << " payload=" << payload.size()
@@ -781,7 +781,7 @@ private:
         previous_width_ = rect.width;
         previous_height_ = rect.height;
 
-        if (options_.login.verbose && (updates_ <= 20 || updates_ % 60 == 0)) {
+        if (options_.login.vverbose && (updates_ <= 20 || updates_ % 60 == 0)) {
             log_info() << "queued ATEN frame #" << updates_
                        << " size=" << rect.width << 'x' << rect.height
                        << " compressed=" << (payload.size() - 4)
@@ -810,7 +810,7 @@ private:
         const HardwareCursor cursor_for_log = hardware_cursor;
         publish_aten_cursor(state_, std::move(hardware_cursor));
 
-        if (options_.login.verbose) {
+        if (options_.login.vverbose) {
             LogLine line = log_info();
             line << "ATEN cursor"
                  << " xy=" << cursor.x << ',' << cursor.y
@@ -827,7 +827,7 @@ private:
 
     void log_stats_if_due()
     {
-        if (!options_.login.verbose) {
+        if (!options_.login.vverbose) {
             return;
         }
 
@@ -953,7 +953,7 @@ private:
             return;
         }
 
-        if (options_.login.verbose && !is_hot_write_packet(active_write_.packet)) {
+        if (options_.login.vverbose && !is_hot_write_packet(active_write_.packet)) {
             log_info() << "sent ATEN packet " << describe_aten_client_packet(active_write_.packet);
         }
         active_write_ = {};

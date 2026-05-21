@@ -1,6 +1,7 @@
 #pragma once
 
 #include "launcher_types.hpp"
+#include "options.hpp"
 
 #include <QObject>
 #include <QMultiHash>
@@ -14,7 +15,7 @@ class ChildProcessManager : public QObject {
     Q_OBJECT
 
 public:
-    explicit ChildProcessManager(QObject* parent = nullptr);
+    explicit ChildProcessManager(VerbosityOptions verbosity = {}, QObject* parent = nullptr);
     ~ChildProcessManager() override;
 
     QVariantMap launch_host(const SavedHost& host);
@@ -29,6 +30,7 @@ private:
     void detach_running_children();
 
     QMultiHash<QString, Session*> sessions_;
+    VerbosityOptions verbosity_;
 };
 
 } // namespace hitsc

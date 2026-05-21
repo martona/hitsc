@@ -42,6 +42,18 @@ QString log_prefix_for_host(const SavedHost& host)
     return host.url;
 }
 
+QStringList child_process_arguments(VerbosityOptions verbosity)
+{
+    QStringList arguments{QStringLiteral("child")};
+    if (verbosity.verbose) {
+        arguments.append(QStringLiteral("--verbose"));
+    }
+    if (verbosity.vverbose) {
+        arguments.append(QStringLiteral("--vverbose"));
+    }
+    return arguments;
+}
+
 #ifdef _WIN32
 
 struct WindowSearch {
@@ -114,8 +126,9 @@ struct ChildProcessManager::Session {
     QByteArray stderr_buffer;
 };
 
-ChildProcessManager::ChildProcessManager(QObject* parent)
+ChildProcessManager::ChildProcessManager(VerbosityOptions verbosity, QObject* parent)
     : QObject(parent)
+    , verbosity_(verbosity)
 {
 }
 
@@ -212,7 +225,7 @@ QVariantMap ChildProcessManager::activate_or_launch(const SavedHost& host)
         }
     });
 
-    process->start(QCoreApplication::applicationFilePath(), QStringList{QStringLiteral("child")});
+    process->start(QCoreApplication::applicationFilePath(), child_process_arguments(verbosity_));
     if (!process->waitForStarted(3000)) {
         sessions_.remove(host.id, raw_session);
         const QString message = process->errorString();
