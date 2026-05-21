@@ -98,6 +98,8 @@ ApplicationWindow {
                 model: hostModel
 
                 delegate: Item {
+                    id: hostTile
+
                     required property string hostId
                     required property string typeLabel
                     required property string name
@@ -108,14 +110,24 @@ ApplicationWindow {
 
                     Layout.preferredWidth: hostGrid.tileWidth
                     Layout.preferredHeight: hostGrid.tileHeight
+                    activeFocusOnTab: true
+
+                    Keys.onReturnPressed: root.connectHost(hostId)
+                    Keys.onEnterPressed: root.connectHost(hostId)
+                    Keys.onPressed: function(event) {
+                        if (event.key === Qt.Key_F2) {
+                            addHostDialog.openForEdit(hostId)
+                            event.accepted = true
+                        }
+                    }
 
                     Rectangle {
                         id: hostCard
 
                         anchors.fill: parent
                         radius: 8
-                        color: hostHover.hovered ? theme.panelHover : theme.panel
-                        border.color: hostHover.hovered ? theme.borderHover : theme.border
+                        color: hostHover.hovered || hostTile.activeFocus ? theme.panelHover : theme.panel
+                        border.color: hostHover.hovered || hostTile.activeFocus ? theme.borderHover : theme.border
                         border.width: 1
 
                         Behavior on color {
@@ -132,12 +144,14 @@ ApplicationWindow {
                         TapHandler {
                             acceptedButtons: Qt.RightButton
                             onTapped: function(eventPoint, button) {
+                                hostTile.forceActiveFocus()
                                 hostMenu.popup(hostCard, eventPoint.position.x, eventPoint.position.y)
                             }
                         }
 
                         TapHandler {
                             acceptedButtons: Qt.LeftButton
+                            onTapped: hostTile.forceActiveFocus()
                             onDoubleTapped: root.connectHost(hostId)
                         }
 
@@ -252,12 +266,16 @@ ApplicationWindow {
 
                 Layout.preferredWidth: hostGrid.tileWidth
                 Layout.preferredHeight: hostGrid.tileHeight
+                activeFocusOnTab: true
+
+                Keys.onReturnPressed: addHostDialog.openFresh()
+                Keys.onEnterPressed: addHostDialog.openFresh()
 
                 Rectangle {
                     anchors.fill: parent
                     radius: 13
                     color: theme.window
-                    opacity: addHostMouse.containsMouse ? 1.0 : 0.86
+                    opacity: addHostMouse.containsMouse || addHostTile.activeFocus ? 1.0 : 0.86
 
                     Shape {
                         id: dashedOutline
@@ -308,7 +326,10 @@ ApplicationWindow {
                         anchors.fill: parent
                         hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
-                        onClicked: addHostDialog.openFresh()
+                        onClicked: {
+                            addHostTile.forceActiveFocus()
+                            addHostDialog.openFresh()
+                        }
                     }
                 }
             }
