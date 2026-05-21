@@ -206,6 +206,9 @@ $configureArgs = @(
     "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"
 )
 
+if ($env:VCPKG_INSTALL_OPTIONS) {
+    $configureArgs += "-DVCPKG_INSTALL_OPTIONS=$env:VCPKG_INSTALL_OPTIONS"
+}
 
 if (-not (Test-Path $cacheFile)) {
     $configureArgs += "-DCMAKE_TOOLCHAIN_FILE=$toolchainFile"
