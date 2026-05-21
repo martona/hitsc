@@ -187,6 +187,35 @@ target_link_libraries(
 
 if(WIN32)
   target_link_libraries(hitsc PRIVATE Crypt32 D3d11 Dbghelp Dwmapi Dxgi Iphlpapi Ws2_32)
+  set_target_properties(hitsc PROPERTIES WIN32_EXECUTABLE TRUE)
+
+  add_executable(
+    hitsc_console_shim
+    src/win32_console_shim.cpp
+  )
+
+  set_target_properties(
+    hitsc_console_shim
+    PROPERTIES
+      OUTPUT_NAME hitsc
+      PDB_NAME hitsc_console_shim
+      SUFFIX ".com"
+  )
+
+  target_compile_definitions(
+    hitsc_console_shim
+    PRIVATE
+      NOMINMAX
+      WIN32_LEAN_AND_MEAN
+      _WIN32_WINNT=0x0A00
+  )
+
+  target_compile_features(hitsc_console_shim PRIVATE cxx_std_20)
+
+  if(MSVC)
+    target_link_options(hitsc PRIVATE /ENTRY:mainCRTStartup)
+    target_compile_options(hitsc_console_shim PRIVATE /W4 /permissive-)
+  endif()
 endif()
 
 include(CTest)
