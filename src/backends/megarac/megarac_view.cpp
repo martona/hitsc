@@ -1,6 +1,6 @@
 #include "megarac_view.hpp"
 
-#include "aspeed_view_renderer.hpp"
+#include "backends/aspeed/aspeed_view_renderer.hpp"
 #include "diagnostics.hpp"
 #include "log.hpp"
 #include "megarac_hid.hpp"

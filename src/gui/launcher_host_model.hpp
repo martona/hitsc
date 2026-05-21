@@ -1,6 +1,6 @@
 #pragma once
 
-#include "launcher_child_process_manager.hpp"
+#include "gui/child/launcher_child_process_manager.hpp"
 #include "launcher_host_store.hpp"
 #include "launcher_reachability_probe.hpp"
 #include "options.hpp"

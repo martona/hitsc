@@ -1,6 +1,6 @@
 #pragma once
 
-#include "aspeed_decoder.hpp"
+#include "backends/aspeed/aspeed_decoder.hpp"
 #include "hardware_cursor.hpp"
 #include "megarac_hid.hpp"
 #include "options.hpp"

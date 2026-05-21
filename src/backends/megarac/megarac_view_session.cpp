@@ -1,6 +1,6 @@
 #include "megarac_view_session.hpp"
 
-#include "aspeed_decoder.hpp"
+#include "backends/aspeed/aspeed_decoder.hpp"
 #include "diagnostics.hpp"
 #include "http_client.hpp"
 #include "log.hpp"

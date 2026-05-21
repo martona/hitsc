@@ -1,5 +1,5 @@
-#include "launcher_host_store.hpp"
-#include "launcher_types.hpp"
+#include "gui/launcher_host_store.hpp"
+#include "gui/launcher_types.hpp"
 
 #include <QByteArray>
 #include <QUuid>

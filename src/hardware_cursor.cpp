@@ -1,6 +1,6 @@
 #include "hardware_cursor.hpp"
 
-#include "megarac_protocol.hpp"
+#include "backends/megarac/megarac_protocol.hpp"
 
 #include <algorithm>
 

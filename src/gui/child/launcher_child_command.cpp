@@ -1,11 +1,11 @@
 #include "launcher_child_command.hpp"
 
-#include "aten_view.hpp"
+#include "backends/aten/aten_view.hpp"
 #include "errors.hpp"
 #include "launcher_child_protocol.hpp"
-#include "megarac_view.hpp"
+#include "backends/megarac/megarac_view.hpp"
 #include "parent_liveness_monitor.hpp"
-#include "pikvm_view.hpp"
+#include "backends/pikvm/pikvm_view.hpp"
 #include "url.hpp"
 
 #include <QByteArray>

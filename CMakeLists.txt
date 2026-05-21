@@ -41,7 +41,7 @@ add_library(
 target_include_directories(
   aspeed_codec
   PRIVATE
-    src/aspeed_compat
+    src/backends/aspeed/compat
     third_party/aspeed_codec/src
 )
 
@@ -53,52 +53,52 @@ endif()
 
 add_executable(
   hitsc
-  src/aten_network.cpp
-  src/aten_protocol.cpp
-  src/aten_session.cpp
-  src/aten_view.cpp
-  src/aspeed_decoder.cpp
-  src/aspeed_presenter.cpp
+  src/backends/aten/aten_network.cpp
+  src/backends/aten/aten_protocol.cpp
+  src/backends/aten/aten_session.cpp
+  src/backends/aten/aten_view.cpp
+  src/backends/aspeed/aspeed_decoder.cpp
+  src/backends/aspeed/aspeed_presenter.cpp
   src/bmc_session.cpp
   src/cli.cpp
   src/console.cpp
   src/cookie_jar.cpp
   src/diagnostics.cpp
   src/http_client.cpp
-  src/launcher_child_command.cpp
-  src/launcher_child_command.hpp
-  src/launcher_child_process_manager.cpp
-  src/launcher_child_process_manager.hpp
-  src/launcher_child_protocol.cpp
-  src/launcher_child_protocol.hpp
-  src/launcher_gui.cpp
-  src/launcher_host_model.cpp
-  src/launcher_host_store.cpp
-  src/launcher_reachability_probe.cpp
-  src/launcher_theme.cpp
-  src/launcher_theme.hpp
-  src/launcher_types.cpp
+  src/gui/child/launcher_child_command.cpp
+  src/gui/child/launcher_child_command.hpp
+  src/gui/child/launcher_child_process_manager.cpp
+  src/gui/child/launcher_child_process_manager.hpp
+  src/gui/child/launcher_child_protocol.cpp
+  src/gui/child/launcher_child_protocol.hpp
+  src/gui/child/parent_liveness_monitor.cpp
+  src/gui/child/parent_liveness_monitor.hpp
+  src/gui/launcher_gui.cpp
+  src/gui/launcher_host_model.cpp
+  src/gui/launcher_host_store.cpp
+  src/gui/launcher_reachability_probe.cpp
+  src/gui/launcher_theme.cpp
+  src/gui/launcher_theme.hpp
+  src/gui/launcher_types.cpp
   src/log.cpp
-  src/parent_liveness_monitor.cpp
-  src/parent_liveness_monitor.hpp
-  src/window_placement.cpp
-  src/window_placement.hpp
-  src/window_prefs_store.cpp
-  src/window_prefs_store.hpp
-  src/megarac_view.cpp
+  src/gui/window_placement.cpp
+  src/gui/window_placement.hpp
+  src/gui/window_prefs_store.cpp
+  src/gui/window_prefs_store.hpp
+  src/backends/megarac/megarac_view.cpp
   src/main.cpp
   src/hardware_cursor.cpp
   src/hardware_cursor_presenter.cpp
-  src/megarac_hid.cpp
-  src/megarac_view_session.cpp
-  src/megarac_protocol.cpp
-  src/megarac_video.cpp
-  src/megarac_session.cpp
-  src/pikvm_events.cpp
-  src/pikvm_input.cpp
-  src/pikvm_session.cpp
-  src/pikvm_video.cpp
-  src/pikvm_view.cpp
+  src/backends/megarac/megarac_hid.cpp
+  src/backends/megarac/megarac_view_session.cpp
+  src/backends/megarac/megarac_protocol.cpp
+  src/backends/megarac/megarac_video.cpp
+  src/backends/megarac/megarac_session.cpp
+  src/backends/pikvm/pikvm_events.cpp
+  src/backends/pikvm/pikvm_input.cpp
+  src/backends/pikvm/pikvm_session.cpp
+  src/backends/pikvm/pikvm_video.cpp
+  src/backends/pikvm/pikvm_view.cpp
   src/text.cpp
   src/tls.cpp
   src/tls_session_cache.cpp
@@ -151,7 +151,13 @@ else()
   message(FATAL_ERROR "Boost headers target was not provided by find_package(Boost).")
 endif()
 
+set(
+  HITSC_PRIVATE_INCLUDE_DIRS
+  src
+)
+
 target_include_directories(hitsc PRIVATE ${FFMPEG_INCLUDE_DIRS})
+target_include_directories(hitsc PRIVATE ${HITSC_PRIVATE_INCLUDE_DIRS})
 target_link_directories(hitsc PRIVATE ${FFMPEG_LIBRARY_DIRS})
 
 target_link_libraries(
@@ -186,14 +192,14 @@ include(CTest)
 if(BUILD_TESTING)
   add_executable(
     hitsc_tests
-    src/launcher_host_store.cpp
-    src/launcher_types.cpp
+    src/gui/launcher_host_store.cpp
+    src/gui/launcher_types.cpp
     src/url.cpp
     tests/launcher_tests.cpp
   )
 
   target_compile_features(hitsc_tests PRIVATE cxx_std_20)
-  target_include_directories(hitsc_tests PRIVATE src)
+  target_include_directories(hitsc_tests PRIVATE ${HITSC_PRIVATE_INCLUDE_DIRS})
   target_link_libraries(hitsc_tests PRIVATE Qt6::Core)
 
   if(WIN32)

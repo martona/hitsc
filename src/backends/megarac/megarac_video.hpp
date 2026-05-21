@@ -1,6 +1,6 @@
 #pragma once
 
-#include "aspeed_decoder.hpp"
+#include "backends/aspeed/aspeed_decoder.hpp"
 
 #include <cstdint>
 #include <optional>

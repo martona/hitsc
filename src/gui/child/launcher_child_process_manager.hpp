@@ -1,6 +1,6 @@
 #pragma once
 
-#include "launcher_types.hpp"
+#include "gui/launcher_types.hpp"
 #include "options.hpp"
 
 #include <QObject>

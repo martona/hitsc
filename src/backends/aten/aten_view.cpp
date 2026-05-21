@@ -1,6 +1,6 @@
 #include "aten_view.hpp"
 
-#include "aspeed_view_renderer.hpp"
+#include "backends/aspeed/aspeed_view_renderer.hpp"
 #include "aten_network.hpp"
 #include "aten_protocol.hpp"
 #include "diagnostics.hpp"
