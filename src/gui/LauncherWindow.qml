@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls.Fusion
 import QtQuick.Layouts
+import QtQuick.Shapes
 
 ApplicationWindow {
     id: root
@@ -244,7 +245,7 @@ ApplicationWindow {
                     color: theme.window
                     opacity: addHostMouse.containsMouse ? 1.0 : 0.86
 
-                    Canvas {
+                    Shape {
                         id: dashedOutline
 
                         anchors.fill: parent
@@ -259,34 +260,21 @@ ApplicationWindow {
                         property real bottomEdge: Math.max(topEdge, height - inset)
                         property real radius: Math.min(cornerRadius, (rightEdge - leftEdge) / 2, (bottomEdge - topEdge) / 2)
 
-                        onPaint: {
-                            const ctx = getContext("2d")
-                            ctx.clearRect(0, 0, width, height)
-                            ctx.strokeStyle = addHostTile.ghostColor
-                            ctx.lineWidth = strokeWidth
-                            ctx.lineCap = "round"
-                            ctx.lineJoin = "round"
-                            ctx.setLineDash([14, 9])
+                        ShapePath {
+                            fillColor: "transparent"
+                            strokeColor: addHostTile.ghostColor
+                            strokeWidth: dashedOutline.strokeWidth
+                            strokeStyle: ShapePath.DashLine
+                            dashPattern: [4, 2.57]
+                            capStyle: ShapePath.RoundCap
+                            joinStyle: ShapePath.RoundJoin
+                            startX: dashedOutline.leftEdge
+                            startY: dashedOutline.topEdge
 
-                            ctx.beginPath()
-                            ctx.roundedRect(
-                                leftEdge,
-                                topEdge,
-                                rightEdge - leftEdge,
-                                bottomEdge - topEdge,
-                                radius,
-                                radius)
-                            ctx.stroke()
-                        }
-
-                        onWidthChanged: requestPaint()
-                        onHeightChanged: requestPaint()
-                        Component.onCompleted: requestPaint()
-
-                        Connections {
-                            target: addHostTile
-                            function onGhostColorChanged() {
-                                dashedOutline.requestPaint()
+                            PathRectangle {
+                                width: dashedOutline.rightEdge - dashedOutline.leftEdge
+                                height: dashedOutline.bottomEdge - dashedOutline.topEdge
+                                radius: dashedOutline.radius
                             }
                         }
                     }
