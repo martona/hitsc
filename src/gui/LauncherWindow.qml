@@ -139,6 +139,9 @@ ApplicationWindow {
 
                         HoverHandler {
                             id: hostHover
+
+                            onHoveredChanged: if (hovered)
+                                hostTile.forceActiveFocus()
                         }
 
                         TapHandler {
@@ -326,6 +329,7 @@ ApplicationWindow {
                         anchors.fill: parent
                         hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
+                        onEntered: addHostTile.forceActiveFocus()
                         onClicked: {
                             addHostTile.forceActiveFocus()
                             addHostDialog.openFresh()
