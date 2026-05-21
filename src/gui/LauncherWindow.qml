@@ -77,7 +77,13 @@ ApplicationWindow {
 
             property int columnCount: Math.max(1, Math.floor(width / 288))
             property real tileWidth: Math.max(220, Math.floor((width - Math.max(0, columns - 1) * columnSpacing) / columns))
-            property int tileHeight: 154
+            property int expandedTileHeight: 154
+            property int compactTileHeight: 68
+            property int tileCount: hostModel.count + 1
+            property int expandedRows: Math.max(1, Math.ceil(tileCount / columnCount))
+            property int expandedContentHeight: expandedRows * expandedTileHeight + Math.max(0, expandedRows - 1) * rowSpacing
+            property bool compactMode: expandedContentHeight > hostScroll.availableHeight - 8
+            property int tileHeight: compactMode ? compactTileHeight : expandedTileHeight
 
             width: hostScroll.availableWidth
             columns: columnCount
@@ -162,17 +168,17 @@ ApplicationWindow {
 
                         ColumnLayout {
                             anchors.fill: parent
-                            anchors.margins: 16
-                            spacing: 8
+                            anchors.margins: hostGrid.compactMode ? 12 : 16
+                            spacing: hostGrid.compactMode ? 4 : 8
 
                             RowLayout {
                                 Layout.fillWidth: true
-                                spacing: 10
+                                spacing: hostGrid.compactMode ? 8 : 10
 
                                 Label {
                                     text: name
                                     color: theme.text
-                                    font.pixelSize: 20
+                                    font.pixelSize: hostGrid.compactMode ? 18 : 20
                                     font.weight: Font.DemiBold
                                     elide: Text.ElideRight
                                     Layout.fillWidth: true
@@ -204,10 +210,12 @@ ApplicationWindow {
                             }
 
                             Item {
+                                visible: !hostGrid.compactMode
                                 Layout.fillHeight: true
                             }
 
                             RowLayout {
+                                visible: !hostGrid.compactMode
                                 Layout.fillWidth: true
 
                                 Label {
@@ -283,7 +291,7 @@ ApplicationWindow {
                         anchors.centerIn: parent
                         text: "Add Host"
                         color: addHostTile.ghostColor
-                        font.pixelSize: 22
+                        font.pixelSize: hostGrid.compactMode ? 18 : 22
                         font.weight: Font.DemiBold
                     }
 
