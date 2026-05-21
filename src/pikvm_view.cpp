@@ -1186,7 +1186,7 @@ void run_pikvm_view(const PikvmViewOptions& options)
         }
         state->frame_event_type.store(frame_event_type);
 
-        window = SDL_CreateWindow("hitsc - PiKVM", 1024, 768, SDL_WINDOW_RESIZABLE);
+        window = SDL_CreateWindow("hitsc", 1024, 768, SDL_WINDOW_RESIZABLE);
         if (window == nullptr) {
             throw_sdl_error("SDL_CreateWindow");
         }

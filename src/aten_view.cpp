@@ -31,7 +31,7 @@ extern std::atomic_bool g_aten_full_framebuffer_refresh_requested;
 
 namespace {
 
-constexpr std::uint64_t kMouseMotionIntervalMilliseconds = 10;
+constexpr std::uint64_t kMouseMotionIntervalMilliseconds = 8;
 using AtenKeyDownState = std::array<bool, 256>;
 
 struct AtenRemoteMousePosition {
@@ -62,7 +62,7 @@ SDL_FRect current_target_rect(SDL_Window* window, int frame_width, int frame_hei
     int window_width = 0;
     int window_height = 0;
     if (!SDL_GetWindowSizeInPixels(window, &window_width, &window_height)) {
-        throw_sdl_error("SDL_GetWindowSizeInPixels");
+        SDL_GetWindowSize(window, &window_width, &window_height);
     }
     return centered_target_rect(window_width, window_height, frame_width, frame_height);
 }
@@ -170,7 +170,7 @@ void run_aten_view(const AtenViewOptions& options)
         }
         state->frame_event_type.store(frame_event_type);
 
-        window = SDL_CreateWindow("hitsc - ATEN", 1024, 768, SDL_WINDOW_RESIZABLE);
+        window = SDL_CreateWindow("hitsc", 1024, 768, SDL_WINDOW_RESIZABLE);
         if (window == nullptr) {
             throw_sdl_error("SDL_CreateWindow");
         }

@@ -45,7 +45,6 @@ namespace {
 using AtenWebSocket = BmcWebSocketStream;
 
 constexpr std::chrono::milliseconds kAtenFramebufferRequestBackoff{33};
-constexpr std::size_t kMaxQueuedInputPackets = 512;
 constexpr std::size_t kMaxAtenMessagesPerReceiveDrain = 8;
 
 struct AtenQueuedWrite {
@@ -901,9 +900,6 @@ private:
             return;
         }
 
-        if (write_queue_.size() >= kMaxQueuedInputPackets) {
-            write_queue_.pop_front();
-        }
         write_queue_.push_back(AtenQueuedWrite{std::move(packet)});
         start_write();
     }
@@ -1068,9 +1064,6 @@ void queue_aten_input_packet(
         std::lock_guard lock(state.control_mutex);
         input_sink = state.input_sink;
         if (!input_sink) {
-            if (state.pending_input.size() >= kMaxQueuedInputPackets) {
-                state.pending_input.pop_front();
-            }
             state.pending_input.push_back(std::move(packet));
             return;
         }

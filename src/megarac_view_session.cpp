@@ -55,9 +55,7 @@ using KvmWebSocket = BmcWebSocketStream;
 
 constexpr auto kBlankRecoveryInterval = std::chrono::seconds(3);
 constexpr auto kMegaracStopGrace = std::chrono::milliseconds(250);
-constexpr std::size_t kMaxQueuedInputPackets = 128;
 
-constexpr std::uint16_t kCmdSendHidPacket = command_value(MegaracCommand::SendHidPacket);
 constexpr std::uint16_t kCmdConnectionAllowed = command_value(MegaracCommand::ConnectionAllowed);
 constexpr std::uint16_t kCmdVideoPackets = command_value(MegaracCommand::VideoPackets);
 constexpr std::uint16_t kCmdActiveClients = command_value(MegaracCommand::ActiveClients);
@@ -418,9 +416,6 @@ bool queue_megarac_view_packet(
         std::lock_guard lock(state.control_mutex);
         input_sink = state.input_sink;
         if (!input_sink) {
-            if (state.pending_input.size() >= kMaxQueuedInputPackets) {
-                state.pending_input.pop_front();
-            }
             state.pending_input.push_back(PendingMegaracInputPacket{type, std::move(packet)});
             return true;
         }
@@ -899,29 +894,6 @@ private:
     {
         if (closed_ || stopping_) {
             return;
-        }
-
-        auto mutable_begin = outgoing_packets_.begin();
-        if (writing_ && mutable_begin != outgoing_packets_.end()) {
-            ++mutable_begin;
-        }
-
-        constexpr std::size_t max_queued_packets = 128;
-        while (outgoing_packets_.size() >= max_queued_packets) {
-            auto removable = std::find_if(
-                mutable_begin,
-                outgoing_packets_.end(),
-                [](const OutgoingPacket& outgoing) {
-                    return outgoing.type == kCmdSendHidPacket;
-                });
-            if (removable == outgoing_packets_.end()) {
-                break;
-            }
-            outgoing_packets_.erase(removable);
-            mutable_begin = outgoing_packets_.begin();
-            if (writing_ && mutable_begin != outgoing_packets_.end()) {
-                ++mutable_begin;
-            }
         }
 
         outgoing_packets_.push_back(OutgoingPacket{type, std::move(packet), {}});
