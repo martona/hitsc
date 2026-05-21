@@ -27,7 +27,7 @@ jobs:
 
     env:
       HITSC_RELEASE_TRIPLET: x64-windows-static
-      VCPKG_ROOT: C:\v
+      VCPKG_ROOT: V:\
       VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}\vcpkg-cache,readwrite
 
     steps:
@@ -47,12 +47,23 @@ jobs:
           "ref=$baseline" >> $env:GITHUB_OUTPUT
 
       - name: Checkout vcpkg
-        run: |
-          git clone --no-tags https://github.com/microsoft/vcpkg.git $env:VCPKG_ROOT
-          git -C $env:VCPKG_ROOT checkout --detach ${{ steps.vcpkg-baseline.outputs.ref }}
+        uses: actions/checkout@v6
+        with:
+          repository: Microsoft/vcpkg
+          ref: ${{ steps.vcpkg-baseline.outputs.ref }}
+          path: vcpkg
+          persist-credentials: false
+
+      - name: Map vcpkg short path
+        run: subst V: "$env:GITHUB_WORKSPACE\vcpkg"
 
       - name: Bootstrap vcpkg
-        run: '& "$env:VCPKG_ROOT\bootstrap-vcpkg.bat" -disableMetrics'
+        run: |
+          if (-not (Test-Path $env:VCPKG_ROOT)) {
+            subst V: "$env:GITHUB_WORKSPACE\vcpkg"
+          }
+          $bootstrap = Join-Path $env:VCPKG_ROOT "bootstrap-vcpkg.bat"
+          & $bootstrap -disableMetrics
 
       - name: Prepare vcpkg binary cache
         run: New-Item -ItemType Directory -Force vcpkg-cache | Out-Null
@@ -66,7 +77,11 @@ jobs:
             ${{ runner.os }}-vcpkg-${{ env.HITSC_RELEASE_TRIPLET }}-
 
       - name: Build Release
-        run: .\scripts\build_windows.ps1 -BuildType Release -Triplet $env:HITSC_RELEASE_TRIPLET
+        run: |
+          if (-not (Test-Path $env:VCPKG_ROOT)) {
+            subst V: "$env:GITHUB_WORKSPACE\vcpkg"
+          }
+          .\scripts\build_windows.ps1 -BuildType Release -Triplet $env:HITSC_RELEASE_TRIPLET
 
       - name: Verify static dependency closure
         run: |
