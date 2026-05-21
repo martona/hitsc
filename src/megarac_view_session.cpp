@@ -4,7 +4,6 @@
 #include "diagnostics.hpp"
 #include "http_client.hpp"
 #include "log.hpp"
-#include "megarac_hid.hpp"
 #include "megarac_protocol.hpp"
 #include "megarac_session.hpp"
 #include "megarac_video.hpp"
@@ -54,8 +53,6 @@ namespace websocket = boost::beast::websocket;
 using tcp = asio::ip::tcp;
 using KvmWebSocket = BmcWebSocketStream;
 
-constexpr int kInitialFramebufferWidth = 800;
-constexpr int kInitialFramebufferHeight = 600;
 constexpr auto kBlankRecoveryInterval = std::chrono::seconds(3);
 constexpr auto kMegaracStopGrace = std::chrono::milliseconds(250);
 constexpr std::size_t kMaxQueuedInputPackets = 128;
@@ -87,8 +84,6 @@ using KvmPacket = MegaracPacket;
 using PacketBuffer = MegaracPacketBuffer;
 using SharedCursor = MegaracHardwareCursor;
 
-constexpr int kRelativeMouseMode = kMegaracRelativeMouseMode;
-constexpr int kOtherMouseMode = kMegaracOtherMouseMode;
 constexpr std::uint8_t kValidateSessionValid = kMegaracValidateSessionValid;
 constexpr std::uint16_t kKvmPrivReqMaster = kMegaracViewPrivReqMaster;
 constexpr std::uint16_t kKvmReqAllowed = kMegaracViewReqAllowed;
@@ -670,11 +665,9 @@ private:
             queue_packet_from_strand(kCmdKeepAlive, make_simple_packet(kCmdKeepAlive), false);
         } else if (packet.type == kCmdUsbMouseMode && !packet.payload.empty()) {
             set_mouse_mode(state_, packet.payload[0]);
-            mouse_mode_seen_ = true;
             if (options_.login.verbose) {
                 log_info() << "mouse mode=" << static_cast<int>(packet.payload[0]);
             }
-            send_initial_wake_hid_if_ready();
         } else if (packet.type == kCmdMediaLicenseStatus) {
             queue_packet_from_strand(
                 kCmdDisplayLockSet,
@@ -716,7 +709,6 @@ private:
     void handle_validation_response(const KvmPacket& packet)
     {
         if (packet.payload.empty()) {
-            validation_failed_ = true;
             set_megarac_exception(state_, std::make_exception_ptr(
                 std::runtime_error("MegaRAC KVM validation failed: empty response")));
             log_error() << "KVM validation failed: empty response";
@@ -726,7 +718,6 @@ private:
 
         const auto response = static_cast<std::uint8_t>(packet.payload[0]);
         if (response != kValidateSessionValid) {
-            validation_failed_ = true;
             const std::string reason = validation_response_name(response);
             set_megarac_exception(state_, std::make_exception_ptr(
                 std::runtime_error("MegaRAC KVM validation failed: " + reason)));
@@ -736,53 +727,7 @@ private:
             return;
         }
 
-        session_validated_ = true;
         state_.view_status.kvm_display_status(true);
-        send_initial_wake_hid_if_ready();
-    }
-
-    void send_initial_wake_hid_if_ready()
-    {
-        if (!session_validated_ || !mouse_mode_seen_ || initial_wake_hid_sent_) {
-            return;
-        }
-
-        initial_wake_hid_sent_ = true;
-        if (deferred_hid_packet_) {
-            outgoing_packets_.push_back(std::move(*deferred_hid_packet_));
-            deferred_hid_packet_.reset();
-            start_write();
-            if (options_.login.verbose) {
-                log_info() << "released deferred HID packet after validation";
-            }
-            return;
-        }
-
-        const int mouse_mode = megarac_view_mouse_mode_snapshot(state_);
-        std::vector<std::uint8_t> packet;
-        if (mouse_mode == kRelativeMouseMode || mouse_mode == kOtherMouseMode) {
-            packet = make_megarac_relative_mouse_packet(
-                MegaracRelativeMouseReport{0, 1, 1, 0},
-                synthetic_mouse_sequence_++);
-        } else {
-            packet = make_megarac_absolute_mouse_packet(
-                MegaracAbsoluteMouseReport{
-                    0,
-                    kInitialFramebufferWidth / 2,
-                    kInitialFramebufferHeight / 2,
-                    kInitialFramebufferWidth,
-                    kInitialFramebufferHeight,
-                    0},
-                synthetic_mouse_sequence_++);
-        }
-
-        queue_packet_from_strand(kCmdSendHidPacket, std::move(packet), false);
-        if (options_.login.verbose) {
-            log_info() << "sent synthetic wake mouse"
-                       << " mode=" << mouse_mode
-                       << " x=" << (kInitialFramebufferWidth / 2)
-                       << " y=" << (kInitialFramebufferHeight / 2);
-        }
     }
 
     void handle_kvm_sharing(const KvmPacket& packet)
@@ -966,19 +911,6 @@ private:
             return;
         }
 
-        if (type == kCmdSendHidPacket && !session_validated_) {
-            if (validation_failed_) {
-                return;
-            }
-
-            deferred_hid_packet_ = OutgoingPacket{type, std::move(packet), {}};
-            if (options_.login.verbose && !deferred_hid_logged_) {
-                deferred_hid_logged_ = true;
-                log_info() << "deferring HID packets until KVM validation succeeds";
-            }
-            return;
-        }
-
         auto mutable_begin = outgoing_packets_.begin();
         if (writing_ && mutable_begin != outgoing_packets_.end()) {
             ++mutable_begin;
@@ -1150,8 +1082,6 @@ private:
     MegaracVideoAssembler video_assembler_;
     std::vector<std::uint16_t> cursor_pattern_;
     std::deque<OutgoingPacket> outgoing_packets_;
-    std::optional<OutgoingPacket> deferred_hid_packet_;
-    std::uint32_t synthetic_mouse_sequence_ = 0;
     int framebuffer_width_ = 0;
     int framebuffer_height_ = 0;
     int packets_seen_ = 0;
@@ -1160,11 +1090,6 @@ private:
     int blank_screen_packets_ = 0;
     int power_status_ = -1;
     bool validation_sent_ = false;
-    bool session_validated_ = false;
-    bool validation_failed_ = false;
-    bool deferred_hid_logged_ = false;
-    bool mouse_mode_seen_ = false;
-    bool initial_wake_hid_sent_ = false;
     bool full_screen_requested_ = false;
     bool fps_reporting_started_ = false;
     bool writing_ = false;
