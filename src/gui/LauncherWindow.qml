@@ -79,11 +79,15 @@ ApplicationWindow {
             property real tileWidth: Math.max(220, Math.floor((width - Math.max(0, columns - 1) * columnSpacing) / columns))
             property int expandedTileHeight: 154
             property int compactTileHeight: 68
+            property int extraCompactTileHeight: 44
             property int tileCount: hostModel.count + 1
             property int expandedRows: Math.max(1, Math.ceil(tileCount / columnCount))
             property int expandedContentHeight: expandedRows * expandedTileHeight + Math.max(0, expandedRows - 1) * rowSpacing
-            property bool compactMode: expandedContentHeight > hostScroll.availableHeight - 8
-            property int tileHeight: compactMode ? compactTileHeight : expandedTileHeight
+            property int compactContentHeight: expandedRows * compactTileHeight + Math.max(0, expandedRows - 1) * rowSpacing
+            property int layoutMode: expandedContentHeight <= hostScroll.availableHeight - 8 ? 0 : compactContentHeight <= hostScroll.availableHeight - 8 ? 1 : 2
+            property bool compactMode: layoutMode === 1
+            property bool extraCompactMode: layoutMode === 2
+            property int tileHeight: extraCompactMode ? extraCompactTileHeight : compactMode ? compactTileHeight : expandedTileHeight
 
             width: hostScroll.availableWidth
             columns: columnCount
@@ -168,18 +172,19 @@ ApplicationWindow {
 
                         ColumnLayout {
                             anchors.fill: parent
-                            anchors.margins: hostGrid.compactMode ? 12 : 16
-                            spacing: hostGrid.compactMode ? 4 : 8
+                            anchors.margins: hostGrid.extraCompactMode ? 10 : hostGrid.compactMode ? 12 : 16
+                            spacing: hostGrid.extraCompactMode ? 0 : hostGrid.compactMode ? 4 : 8
 
                             RowLayout {
                                 Layout.fillWidth: true
-                                spacing: hostGrid.compactMode ? 8 : 10
+                                Layout.alignment: Qt.AlignVCenter
+                                spacing: hostGrid.extraCompactMode ? 8 : hostGrid.compactMode ? 8 : 10
 
                                 Label {
                                     text: name
                                     color: theme.text
-                                    font.pixelSize: hostGrid.compactMode ? 18 : 20
-                                    font.weight: Font.DemiBold
+                                    font.pixelSize: hostGrid.extraCompactMode ? 13 : hostGrid.compactMode ? 18 : 20
+                                    font.weight: hostGrid.extraCompactMode ? Font.Normal : Font.DemiBold
                                     elide: Text.ElideRight
                                     Layout.fillWidth: true
                                 }
@@ -202,6 +207,7 @@ ApplicationWindow {
                             }
 
                             Label {
+                                visible: !hostGrid.extraCompactMode
                                 text: host.length > 0 ? host : url
                                 color: theme.mutedText
                                 font.pixelSize: 13
@@ -210,12 +216,12 @@ ApplicationWindow {
                             }
 
                             Item {
-                                visible: !hostGrid.compactMode
+                                visible: !hostGrid.compactMode && !hostGrid.extraCompactMode
                                 Layout.fillHeight: true
                             }
 
                             RowLayout {
-                                visible: !hostGrid.compactMode
+                                visible: !hostGrid.compactMode && !hostGrid.extraCompactMode
                                 Layout.fillWidth: true
 
                                 Label {
@@ -289,10 +295,11 @@ ApplicationWindow {
 
                     Label {
                         anchors.centerIn: parent
+                        anchors.verticalCenterOffset: hostGrid.extraCompactMode ? -2 : hostGrid.compactMode ? -3 : 0
                         text: "Add Host"
                         color: addHostTile.ghostColor
-                        font.pixelSize: hostGrid.compactMode ? 18 : 22
-                        font.weight: Font.DemiBold
+                        font.pixelSize: hostGrid.extraCompactMode ? 13 : hostGrid.compactMode ? 18 : 22
+                        font.weight: hostGrid.extraCompactMode ? Font.Normal : Font.DemiBold
                     }
 
                     MouseArea {
