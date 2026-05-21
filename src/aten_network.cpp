@@ -737,6 +737,9 @@ private:
             }
 
             if (rect.encoding != 87 || update_rect.payload.empty()) {
+                if (rect.encoding == 87 && update_rect.payload.empty()) {
+                    handle_blank_screen_packet(rect);
+                }
                 continue;
             }
 
@@ -766,6 +769,7 @@ private:
             return;
         }
 
+        blank_screen_packets_ = 0;
         AtenCompressedFrame frame;
         frame.width = rect.width;
         frame.height = rect.height;
@@ -787,6 +791,26 @@ private:
                        << " mode=" << ast.mode
                        << " y-sel=" << ast.y_selector
                        << " uv-sel=" << ast.uv_selector;
+        }
+    }
+
+    void handle_blank_screen_packet(const AtenFramebufferRect& rect)
+    {
+        ++blank_screen_packets_;
+        state_.view_status.kvm_display_status(false);
+        g_aten_full_framebuffer_refresh_requested.store(true);
+
+        if (rect.width > 0) {
+            previous_width_ = rect.width;
+        }
+        if (rect.height > 0) {
+            previous_height_ = rect.height;
+        }
+
+        if (blank_screen_packets_ == 1) {
+            log_warning() << "remote requested ATEN blank screen"
+                          << " size=" << rect.width << 'x' << rect.height
+                          << " mode=" << rect.mode;
         }
     }
 
@@ -1003,6 +1027,7 @@ private:
     int cursor_pattern_width_ = 0;
     int cursor_pattern_height_ = 0;
     int updates_ = 0;
+    int blank_screen_packets_ = 0;
     bool write_in_progress_ = false;
     bool framebuffer_request_pending_ = false;
     bool framebuffer_request_timer_active_ = false;

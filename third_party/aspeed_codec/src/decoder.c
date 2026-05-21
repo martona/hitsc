@@ -22,6 +22,18 @@
 #define FRAME_END_CODE 0x09
 #define JPEG_PASS2_CODE 0x02
 #define JPEG_SKIP_PASS2_CODE 0x0A
+#define VQ_NO_SKIP_1_COLOR_CODE 0x05
+#define VQ_NO_SKIP_2_COLOR_CODE 0x06
+#define VQ_NO_SKIP_4_COLOR_CODE 0x07
+#define VQ_SKIP_1_COLOR_CODE 0x0D
+#define VQ_SKIP_2_COLOR_CODE 0x0E
+#define VQ_SKIP_4_COLOR_CODE 0x0F
+#define VQ_HEADER_MASK 0x01
+#define VQ_NO_UPDATE_HEADER 0x00
+#define VQ_INDEX_MASK 0x03
+#define VQ_COLOR_MASK 0x00FFFFFF
+#define VQ_NO_UPDATE_LENGTH 3
+#define VQ_UPDATE_LENGTH 27
 
 // block length
 #define BLOCK_AST2100_START_LENGTH 0x04
@@ -37,6 +49,11 @@ struct YUV {
     BYTE Y;
     BYTE U;
     BYTE V;
+};
+struct VQState {
+    DWORD Color[4];
+    BYTE Index[4];
+    BYTE BitMapBits;
 };
 
 static long QT[4][64]; // quantization tables, no more than 4 quantization tables (QT[0..3])
@@ -652,6 +669,66 @@ static void YUVToRGBPass2(
     }
 }
 
+static void VQInitialize(struct VQState* vq)
+{
+    BYTE index;
+
+    for (index = 0; index < 4; index++)
+        vq->Index[index] = index;
+
+    vq->Color[0] = 0x008080;
+    vq->Color[1] = 0xFF8000;
+    vq->Color[2] = 0x808080;
+    vq->Color[3] = 0xC08080;
+    vq->BitMapBits = 0;
+}
+
+static void VQColorUpdate(struct VQState* vq, BYTE color_count)
+{
+    BYTE i;
+
+    for (i = 0; i < color_count; i++) {
+        vq->Index[i] = (BYTE)((cur_data >> 29) & VQ_INDEX_MASK);
+        if (((cur_data >> 31) & VQ_HEADER_MASK) == VQ_NO_UPDATE_HEADER) {
+            SkipBits(VQ_NO_UPDATE_LENGTH);
+        } else {
+            vq->Color[vq->Index[i]] = (DWORD)((cur_data >> 5) & VQ_COLOR_MASK);
+            SkipBits(VQ_UPDATE_LENGTH);
+        }
+    }
+}
+
+static int VQDecompress(int mbx, int mby, unsigned char* out_buf, struct VQState* vq)
+{
+    BYTE data;
+    DWORD color;
+    int i;
+    int ptr_index = 0;
+
+    if (vq->BitMapBits == 0) {
+        color = vq->Color[vq->Index[0]];
+        for (i = 0; i < 64; i++) {
+            block_buf[ptr_index + 0] = (BYTE)((color & 0x00FF0000) >> 16);
+            block_buf[ptr_index + 64] = (BYTE)((color & 0x0000FF00) >> 8);
+            block_buf[ptr_index + 128] = (BYTE)(color & 0x000000FF);
+            ptr_index++;
+        }
+    } else {
+        for (i = 0; i < 64; i++) {
+            data = (BYTE)ShowBits(vq->BitMapBits);
+            color = vq->Color[vq->Index[data]];
+            block_buf[ptr_index + 0] = (BYTE)((color & 0x00FF0000) >> 16);
+            block_buf[ptr_index + 64] = (BYTE)((color & 0x0000FF00) >> 8);
+            block_buf[ptr_index + 128] = (BYTE)(color & 0x000000FF);
+            ptr_index++;
+            SkipBits(vq->BitMapBits);
+        }
+    }
+
+    YUVToRGB(mbx, mby, block_buf, yuv_buf, out_buf);
+    return 0;
+}
+
 // baseline
 static void DecodeHuffmanDataUnit(BYTE DC_nr, BYTE AC_nr, SHORT* previous_DC, WORD pos)
 {
@@ -971,6 +1048,9 @@ static void DecodeBuffer(int len, BYTE *out_buf)
     int mbx = 0, mby = 0;
     int iterations = 0;
     int max_iterations = mbwidth * mbheight * 8 + 1024;
+    struct VQState vq;
+
+    VQInitialize(&vq);
 
     do {
         if (++iterations > max_iterations) {
@@ -995,6 +1075,17 @@ static void DecodeBuffer(int len, BYTE *out_buf)
             Decompress(mbx, mby, out_buf, 0);
             MoveBlockIndex(&mbx, &mby);
             break;
+        case LOW_JPEG_NO_SKIP_CODE:
+            SkipBits(BLOCK_AST2100_START_LENGTH);
+            Decompress(mbx, mby, out_buf, 2);
+            MoveBlockIndex(&mbx, &mby);
+            break;
+        case LOW_JPEG_SKIP_CODE:
+            UpdateXY(&mbx, &mby);
+            SkipBits(BLOCK_AST2100_SKIP_LENGTH);
+            Decompress(mbx, mby, out_buf, 2);
+            MoveBlockIndex(&mbx, &mby);
+            break;
         case JPEG_PASS2_CODE:
             //pr_dbg("(%d, %d): pass2\n", mbx, mby);
             SkipBits(BLOCK_AST2100_START_LENGTH);
@@ -1007,6 +1098,51 @@ static void DecodeBuffer(int len, BYTE *out_buf)
 
             SkipBits(BLOCK_AST2100_SKIP_LENGTH);
             DecompressPASS2(mbx, mby, out_buf, 2);
+            MoveBlockIndex(&mbx, &mby);
+            break;
+        case VQ_NO_SKIP_1_COLOR_CODE:
+            SkipBits(BLOCK_AST2100_START_LENGTH);
+            vq.BitMapBits = 0;
+            VQColorUpdate(&vq, 1);
+            VQDecompress(mbx, mby, out_buf, &vq);
+            MoveBlockIndex(&mbx, &mby);
+            break;
+        case VQ_SKIP_1_COLOR_CODE:
+            UpdateXY(&mbx, &mby);
+            SkipBits(BLOCK_AST2100_SKIP_LENGTH);
+            vq.BitMapBits = 0;
+            VQColorUpdate(&vq, 1);
+            VQDecompress(mbx, mby, out_buf, &vq);
+            MoveBlockIndex(&mbx, &mby);
+            break;
+        case VQ_NO_SKIP_2_COLOR_CODE:
+            SkipBits(BLOCK_AST2100_START_LENGTH);
+            vq.BitMapBits = 1;
+            VQColorUpdate(&vq, 2);
+            VQDecompress(mbx, mby, out_buf, &vq);
+            MoveBlockIndex(&mbx, &mby);
+            break;
+        case VQ_SKIP_2_COLOR_CODE:
+            UpdateXY(&mbx, &mby);
+            SkipBits(BLOCK_AST2100_SKIP_LENGTH);
+            vq.BitMapBits = 1;
+            VQColorUpdate(&vq, 2);
+            VQDecompress(mbx, mby, out_buf, &vq);
+            MoveBlockIndex(&mbx, &mby);
+            break;
+        case VQ_NO_SKIP_4_COLOR_CODE:
+            SkipBits(BLOCK_AST2100_START_LENGTH);
+            vq.BitMapBits = 2;
+            VQColorUpdate(&vq, 4);
+            VQDecompress(mbx, mby, out_buf, &vq);
+            MoveBlockIndex(&mbx, &mby);
+            break;
+        case VQ_SKIP_4_COLOR_CODE:
+            UpdateXY(&mbx, &mby);
+            SkipBits(BLOCK_AST2100_SKIP_LENGTH);
+            vq.BitMapBits = 2;
+            VQColorUpdate(&vq, 4);
+            VQDecompress(mbx, mby, out_buf, &vq);
             MoveBlockIndex(&mbx, &mby);
             break;
         default:
