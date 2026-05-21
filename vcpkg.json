@@ -19,7 +19,28 @@
       ]
     },
     "openssl",
-    "qtbase",
+    {
+      "name": "qtbase",
+      "default-features": false,
+      "features": [
+        "brotli",
+        "concurrent",
+        "dnslookup",
+        "doubleconversion",
+        "freetype",
+        "gui",
+        "harfbuzz",
+        "jpeg",
+        "network",
+        "opengl",
+        "pcre2",
+        "png",
+        "sessionmanager",
+        "thread",
+        "widgets",
+        "zstd"
+      ]
+    },
     "qtdeclarative",
     "sdl3",
     "zlib"

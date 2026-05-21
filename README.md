@@ -34,14 +34,22 @@ This is Windows-only for now but 99% portable, Linux/macOS soon.
 
 ### Command
 
+You will need to let `vcpkg` create a `C:\.vcpgk\` directory otherwise `qtdeclarative` won't build due to long paths. You can change the drive (and if you want to risk it, the path).
+
+```powershell
+$env:VCPKG_INSTALL_OPTIONS="--x-buildtrees-root=C:\.vcpkg\b;--x-packages-root=C:\.vcpkg\p"
+```
+
+Then build. Note: QT will take about an hour.
+
 ```powershell
 .\scripts\build_windows.ps1
 ```
 
-The default debug binary is written under:
+The default release binary is written under:
 
 ```text
-build\windows-debug\hitsc.exe
+build\windows-release\hitsc.exe
 ```
 
 ## Usage
@@ -49,19 +57,19 @@ build\windows-debug\hitsc.exe
 Open a MegaRAC iKVM session:
 
 ```powershell
-.\build\windows-debug\hitsc.exe megarac -u USERNAME https://bmc.example.com
+.\build\windows-release\hitsc.exe megarac -u USERNAME https://bmc.example.com
 ```
 
 Open an ATEN/Supermicro iKVM session:
 
 ```powershell
-.\build\windows-debug\hitsc.exe aten -u USERNAME https://bmc.example.com
+.\build\windows-release\hitsc.exe aten -u USERNAME https://bmc.example.com
 ```
 
 Open a PiKVM direct H.264 video and input session:
 
 ```powershell
-.\build\windows-debug\hitsc.exe pikvm -u USERNAME https://pikvm.example.com
+.\build\windows-release\hitsc.exe pikvm -u USERNAME https://pikvm.example.com
 ```
 
 PiKVM video decode defaults to `--video-decode auto`, which tries Windows D3D11 hardware decode when SDL exposes a hardware D3D11 renderer and otherwise uses the software FFmpeg path. Use `--video-decode software` to force software decode or `--video-decode d3d11` to require D3D11.
@@ -87,10 +95,10 @@ Passwords can be passed with `--password`, read from an environment variable wit
 Use `--help` to inspect the command line:
 
 ```powershell
-.\build\windows-debug\hitsc.exe --help
-.\build\windows-debug\hitsc.exe megarac --help
-.\build\windows-debug\hitsc.exe aten --help
-.\build\windows-debug\hitsc.exe pikvm --help
+.\build\windows-release\hitsc.exe --help
+.\build\windows-release\hitsc.exe megarac --help
+.\build\windows-release\hitsc.exe aten --help
+.\build\windows-release\hitsc.exe pikvm --help
 ```
 
 ## Security and Credentials
@@ -102,7 +110,7 @@ The client creates its own BMC web session and keeps session cookies in memory f
 For temporary lab debugging only:
 
 ```powershell
-.\build\windows-debug\hitsc.exe [...] --insecure [...]
+.\build\windows-release\hitsc.exe [...] --insecure [...]
 ```
 
 ## Provider Notes
@@ -132,20 +140,4 @@ MegaRAC video decoding uses a trimmed C subset of [AspeedTech-BMC/aspeed_codec](
 PiKVM direct H.264 video uses FFmpeg through vcpkg with GPL and nonfree features disabled. The FFmpeg components used here are LGPL-2.1-or-later.
 
 Other third-party dependencies are resolved through `vcpkg.json`.
-
-## TODO
-
-This is a work in progress, the current stage not being much more than a sign of life.
-
-- Add Linux and macOS support.
-- Add TLS certificate pinning.
-- Expand PiKVM support beyond video and basic input (WebRTC, etc.)
-- Add Apple RDP support (yeah it's not IPMI but it's a pain point for me)
-- Add UI for connection establishment, making CLI optional
-- Add secure credential store (win32 CryptoAPI, macOS keychain, ...)
-- Add comfort features such as "type-my-clipboard, ocr-screen-into-clipboard"
-- Better indication of "remote display is off"
-- BMC controls for power on/off, reset; indicators for power status
-- Scale to fit, 1:1, etc display options.
-- Keep the UI tight and minimal
 
