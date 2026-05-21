@@ -27,7 +27,7 @@ jobs:
 
     env:
       HITSC_RELEASE_TRIPLET: x64-windows-static
-      VCPKG_ROOT: ${{ github.workspace }}\vcpkg
+      VCPKG_ROOT: C:\v
       VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}\vcpkg-cache,readwrite
 
     steps:
@@ -47,15 +47,12 @@ jobs:
           "ref=$baseline" >> $env:GITHUB_OUTPUT
 
       - name: Checkout vcpkg
-        uses: actions/checkout@v6
-        with:
-          repository: Microsoft/vcpkg
-          ref: ${{ steps.vcpkg-baseline.outputs.ref }}
-          path: vcpkg
-          persist-credentials: false
+        run: |
+          git clone --no-tags https://github.com/microsoft/vcpkg.git $env:VCPKG_ROOT
+          git -C $env:VCPKG_ROOT checkout --detach ${{ steps.vcpkg-baseline.outputs.ref }}
 
       - name: Bootstrap vcpkg
-        run: .\vcpkg\bootstrap-vcpkg.bat -disableMetrics
+        run: '& "$env:VCPKG_ROOT\bootstrap-vcpkg.bat" -disableMetrics'
 
       - name: Prepare vcpkg binary cache
         run: New-Item -ItemType Directory -Force vcpkg-cache | Out-Null
