@@ -53,6 +53,7 @@ endif()
 
 add_executable(
   hitsc
+  src/backends/auto/auto_view.cpp
   src/backends/aten/aten_network.cpp
   src/backends/aten/aten_protocol.cpp
   src/backends/aten/aten_session.cpp

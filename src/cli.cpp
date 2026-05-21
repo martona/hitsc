@@ -1,6 +1,7 @@
 #include "cli.hpp"
 
 #include "app_info.hpp"
+#include "backends/auto/auto_view.hpp"
 #include "backends/aten/aten_view.hpp"
 #include "console.hpp"
 #include "errors.hpp"
@@ -137,6 +138,30 @@ int run_cli(int argc, char* argv[])
     configure_verbosity_options(*gui, process_verbosity.verbose, process_verbosity.vverbose);
     configure_verbosity_options(*child, process_verbosity.verbose, process_verbosity.vverbose);
 
+    AutoViewOptions auto_options;
+    std::string auto_url;
+    std::string auto_password_env_name;
+    std::string auto_pikvm_video_decode = "auto";
+    bool auto_aten_exclusive = false;
+    CLI::App* auto_command =
+        app.add_subcommand("auto", "Auto-detect the KVM type and open an iKVM window.");
+    configure_view_options(
+        *auto_command,
+        auto_options.login,
+        auto_options.idle_timeout_seconds,
+        auto_password_env_name);
+    auto_command->add_flag(
+        "--exclusive",
+        auto_aten_exclusive,
+        "Request an exclusive ATEN RFB session if Auto detects ATEN.");
+    auto_command
+        ->add_option(
+            "--video-decode",
+            auto_pikvm_video_decode,
+            "PiKVM video decoder to use if Auto detects PiKVM: auto, software, or d3d11.")
+        ->check(CLI::IsMember({"auto", "software", "d3d11"}));
+    auto_command->add_option("url", auto_url, "https://host[:port]")->required();
+
     MegaracViewOptions megarac_options;
     std::string megarac_url;
     std::string megarac_password_env_name;
@@ -194,6 +219,7 @@ int run_cli(int argc, char* argv[])
             && command != "megarac"
             && command != "aten"
             && command != "pikvm"
+            && command != "auto"
             && command != "gui"
             && command != "child") {
             std::cerr << "Unknown subcommand: " << command << "\n";
@@ -206,6 +232,18 @@ int run_cli(int argc, char* argv[])
         app.parse(argc, argv);
     } catch (const CLI::ParseError& error) {
         return app.exit(error);
+    }
+
+    if (*auto_command) {
+        normalize_verbosity(auto_options.login);
+        auto_options.login.base_url = parse_https_url(auto_url);
+        auto_options.login.base_url.target = "/";
+        auto_options.aten_shared = !auto_aten_exclusive;
+        auto_options.pikvm_video_decode = parse_pikvm_video_decode_mode(auto_pikvm_video_decode);
+        fill_default_credentials(auto_options.login, auto_password_env_name);
+
+        run_auto_view(auto_options);
+        return EXIT_SUCCESS;
     }
 
     if (*megarac) {

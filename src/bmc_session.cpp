@@ -186,7 +186,8 @@ BmcWebSession::BmcWebSession(const LoginOptions& options)
     : base_url_(options.base_url)
     , insecure_(options.insecure)
     , verbose_(options.verbose)
-    , tls_session_cache_(std::make_unique<TlsSessionCache>(16))
+    , tls_session_cache_(
+          options.tls_session_cache ? options.tls_session_cache : std::make_shared<TlsSessionCache>(16))
     , client_(
           options.base_url,
           options.insecure,

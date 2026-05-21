@@ -1,5 +1,6 @@
 #include "launcher_child_command.hpp"
 
+#include "backends/auto/auto_view.hpp"
 #include "backends/aten/aten_view.hpp"
 #include "errors.hpp"
 #include "launcher_child_protocol.hpp"
@@ -70,6 +71,12 @@ int run_launcher_child(VerbosityOptions verbosity)
     std::cout.flush();
 
     switch (request.type) {
+    case LauncherHostType::Auto: {
+        AutoViewOptions options;
+        options.login = std::move(login);
+        run_auto_view(options);
+        return EXIT_SUCCESS;
+    }
     case LauncherHostType::Megarac: {
         MegaracViewOptions options;
         options.login = std::move(login);

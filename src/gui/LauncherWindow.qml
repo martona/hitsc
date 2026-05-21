@@ -431,6 +431,10 @@ ApplicationWindow {
                     valueRole: "key"
                     model: ListModel {
                         ListElement {
+                            key: "auto"
+                            label: "Auto"
+                        }
+                        ListElement {
                             key: "megarac"
                             label: "MegaRAC"
                         }

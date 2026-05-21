@@ -11,7 +11,7 @@ namespace hitsc {
 
 struct ChildSessionLaunchRequest {
     QString session_id;
-    LauncherHostType type = LauncherHostType::Megarac;
+    LauncherHostType type = LauncherHostType::Auto;
     QString display_name;
     QString url;
     LauncherCredentials credentials;

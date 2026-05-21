@@ -58,6 +58,10 @@ hitsc::SavedHost make_saved_host(const QString& name, const QString& url)
 void test_launcher_types()
 {
     expect(
+        hitsc::launcher_host_type_key(hitsc::LauncherHostType::Auto)
+            == QStringLiteral("auto"),
+        "Auto type key");
+    expect(
         hitsc::launcher_host_type_key(hitsc::LauncherHostType::Megarac)
             == QStringLiteral("megarac"),
         "MegaRAC type key");
@@ -69,6 +73,10 @@ void test_launcher_types()
         hitsc::parse_launcher_host_type(QStringLiteral("pikvm")).value()
             == hitsc::LauncherHostType::Pikvm,
         "parse PiKVM type");
+    expect(
+        hitsc::parse_launcher_host_type(QStringLiteral("auto")).value()
+            == hitsc::LauncherHostType::Auto,
+        "parse Auto type");
     expect(
         !hitsc::parse_launcher_host_type(QStringLiteral("unknown")).has_value(),
         "reject unknown host type");

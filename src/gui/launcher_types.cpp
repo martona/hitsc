@@ -56,6 +56,8 @@ bool LauncherCredentials::empty() const
 QString launcher_host_type_key(LauncherHostType type)
 {
     switch (type) {
+    case LauncherHostType::Auto:
+        return QStringLiteral("auto");
     case LauncherHostType::Megarac:
         return QStringLiteral("megarac");
     case LauncherHostType::Aten:
@@ -64,12 +66,14 @@ QString launcher_host_type_key(LauncherHostType type)
         return QStringLiteral("pikvm");
     }
 
-    return QStringLiteral("megarac");
+    return QStringLiteral("auto");
 }
 
 QString launcher_host_type_label(LauncherHostType type)
 {
     switch (type) {
+    case LauncherHostType::Auto:
+        return QStringLiteral("Auto");
     case LauncherHostType::Megarac:
         return QStringLiteral("MegaRAC");
     case LauncherHostType::Aten:
@@ -78,12 +82,15 @@ QString launcher_host_type_label(LauncherHostType type)
         return QStringLiteral("PiKVM");
     }
 
-    return QStringLiteral("MegaRAC");
+    return QStringLiteral("Auto");
 }
 
 std::optional<LauncherHostType> parse_launcher_host_type(const QString& value)
 {
     const QString normalized = value.trimmed().toLower();
+    if (normalized == QStringLiteral("auto")) {
+        return LauncherHostType::Auto;
+    }
     if (normalized == QStringLiteral("megarac")) {
         return LauncherHostType::Megarac;
     }

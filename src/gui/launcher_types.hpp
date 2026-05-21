@@ -7,6 +7,7 @@
 namespace hitsc {
 
 enum class LauncherHostType {
+    Auto,
     Megarac,
     Aten,
     Pikvm,
@@ -28,7 +29,7 @@ struct LauncherCredentials {
 
 struct SavedHost {
     QString id;
-    LauncherHostType type = LauncherHostType::Megarac;
+    LauncherHostType type = LauncherHostType::Auto;
     QString name;
     QString url;
     std::optional<LauncherCredentials> credentials;

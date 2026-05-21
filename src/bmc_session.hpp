@@ -129,7 +129,7 @@ private:
     bool verbose_ = false;
     CookieJar cookies_;
     std::string session_token_;
-    std::unique_ptr<TlsSessionCache> tls_session_cache_;
+    std::shared_ptr<TlsSessionCache> tls_session_cache_;
     HttpsClient client_;
     struct WebSocketRegistry;
     std::unique_ptr<WebSocketRegistry> websockets_;

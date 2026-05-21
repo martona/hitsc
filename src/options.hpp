@@ -2,9 +2,12 @@
 
 #include "url.hpp"
 
+#include <memory>
 #include <string>
 
 namespace hitsc {
+
+class TlsSessionCache;
 
 struct VerbosityOptions {
     bool verbose = false;
@@ -19,6 +22,7 @@ struct LoginOptions {
     bool vverbose = false;
     bool insecure = false;
     bool debug_disable_http_keepalive = false;
+    std::shared_ptr<TlsSessionCache> tls_session_cache;
 };
 
 struct MegaracViewOptions {
@@ -42,6 +46,13 @@ struct PikvmViewOptions {
     LoginOptions login;
     int idle_timeout_seconds = 0;
     PikvmVideoDecodeMode video_decode = PikvmVideoDecodeMode::auto_select;
+};
+
+struct AutoViewOptions {
+    LoginOptions login;
+    int idle_timeout_seconds = 0;
+    bool aten_shared = true;
+    PikvmVideoDecodeMode pikvm_video_decode = PikvmVideoDecodeMode::auto_select;
 };
 
 } // namespace hitsc
