@@ -31,11 +31,6 @@ struct AtenCompressedFrame {
     std::size_t websocket_bytes = 0;
 };
 
-struct PendingAtenInputPacket {
-    std::vector<std::uint8_t> packet;
-    bool coalesce_mouse_motion = false;
-};
-
 struct AtenViewState {
     std::mutex frame_mutex;
     std::mutex control_mutex;
@@ -46,8 +41,8 @@ struct AtenViewState {
     ViewStatus view_status;
     std::exception_ptr exception;
     std::function<void()> force_close;
-    std::function<void(std::vector<std::uint8_t>, bool)> input_sink;
-    std::deque<PendingAtenInputPacket> pending_input;
+    std::function<void(std::vector<std::uint8_t>)> input_sink;
+    std::deque<std::vector<std::uint8_t>> pending_input;
     std::uint64_t frame_sequence = 0;
     std::uint64_t cursor_sequence = 0;
     bool has_cursor = false;
@@ -78,8 +73,7 @@ std::optional<HardwareCursor> take_latest_aten_cursor(
 
 void queue_aten_input_packet(
     AtenViewState& state,
-    std::vector<std::uint8_t> packet,
-    bool coalesce_mouse_motion);
+    std::vector<std::uint8_t> packet);
 
 void queue_aten_key_event(
     AtenViewState& state,
@@ -92,7 +86,6 @@ void queue_aten_pointer_event(
     int x,
     int y,
     std::uint8_t mask,
-    bool coalesce,
     bool verbose);
 
 } // namespace hitsc

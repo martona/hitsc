@@ -446,17 +446,17 @@ void publish_aten_cursor(AtenViewState& state, HardwareCursor cursor)
 
 void install_aten_input_sink(
     AtenViewState& state,
-    std::function<void(std::vector<std::uint8_t>, bool)> input_sink)
+    std::function<void(std::vector<std::uint8_t>)> input_sink)
 {
-    std::deque<PendingAtenInputPacket> pending;
+    std::deque<std::vector<std::uint8_t>> pending;
     {
         std::lock_guard lock(state.control_mutex);
         state.input_sink = input_sink;
         pending.swap(state.pending_input);
     }
 
-    for (PendingAtenInputPacket& packet : pending) {
-        input_sink(std::move(packet.packet), packet.coalesce_mouse_motion);
+    for (std::vector<std::uint8_t>& packet : pending) {
+        input_sink(std::move(packet));
     }
 }
 
@@ -492,9 +492,9 @@ public:
         auto weak = weak_from_this();
         install_aten_input_sink(
             state_,
-            [weak](std::vector<std::uint8_t> packet, bool coalesce_mouse_motion) mutable {
+            [weak](std::vector<std::uint8_t> packet) mutable {
                 if (auto self = weak.lock()) {
-                    self->send_packet(std::move(packet), coalesce_mouse_motion);
+                    self->send_packet(std::move(packet));
                 }
             });
 
@@ -515,14 +515,14 @@ public:
         });
     }
 
-    void send_packet(std::vector<std::uint8_t> packet, bool coalesce_mouse_motion)
+    void send_packet(std::vector<std::uint8_t> packet)
     {
         auto self = shared_from_this();
-        asio::post(strand_, [self, packet = std::move(packet), coalesce_mouse_motion]() mutable {
+        asio::post(strand_, [self, packet = std::move(packet)]() mutable {
             if (self->closed_ || self->stop_requested_.load()) {
                 return;
             }
-            self->queue_write(std::move(packet), coalesce_mouse_motion);
+            self->queue_write(std::move(packet));
         });
     }
 
@@ -892,25 +892,19 @@ private:
         framebuffer_request_pending_ = true;
         queue_write(make_framebuffer_update_request(request_width,
                         request_height, 
-                        !g_aten_full_framebuffer_refresh_requested.exchange(false)),
-                    false);
+                        !g_aten_full_framebuffer_refresh_requested.exchange(false)));
     }
 
-    void queue_write(std::vector<std::uint8_t> packet, bool coalesce_mouse_motion)
+    void queue_write(std::vector<std::uint8_t> packet)
     {
         if (closed_) {
             return;
         }
 
-        if (coalesce_mouse_motion && !write_queue_.empty() &&
-            is_coalescible_aten_mouse_motion(write_queue_.back().packet)) {
-            write_queue_.back() = AtenQueuedWrite{std::move(packet)};
-        } else {
-            if (write_queue_.size() >= kMaxQueuedInputPackets) {
-                write_queue_.pop_front();
-            }
-            write_queue_.push_back(AtenQueuedWrite{std::move(packet)});
+        if (write_queue_.size() >= kMaxQueuedInputPackets) {
+            write_queue_.pop_front();
         }
+        write_queue_.push_back(AtenQueuedWrite{std::move(packet)});
         start_write();
     }
 
@@ -1067,29 +1061,22 @@ std::optional<HardwareCursor> take_latest_aten_cursor(
 
 void queue_aten_input_packet(
     AtenViewState& state,
-    std::vector<std::uint8_t> packet,
-    bool coalesce_mouse_motion)
+    std::vector<std::uint8_t> packet)
 {
-    std::function<void(std::vector<std::uint8_t>, bool)> input_sink;
+    std::function<void(std::vector<std::uint8_t>)> input_sink;
     {
         std::lock_guard lock(state.control_mutex);
         input_sink = state.input_sink;
-        if (!input_sink && coalesce_mouse_motion &&
-            !state.pending_input.empty() &&
-            is_coalescible_aten_mouse_motion(state.pending_input.back().packet)) {
-            state.pending_input.back() = PendingAtenInputPacket{std::move(packet), coalesce_mouse_motion};
-            return;
-        }
         if (!input_sink) {
             if (state.pending_input.size() >= kMaxQueuedInputPackets) {
                 state.pending_input.pop_front();
             }
-            state.pending_input.push_back(PendingAtenInputPacket{std::move(packet), coalesce_mouse_motion});
+            state.pending_input.push_back(std::move(packet));
             return;
         }
     }
 
-    input_sink(std::move(packet), coalesce_mouse_motion);
+    input_sink(std::move(packet));
 }
 
 void queue_aten_key_event(
@@ -1099,7 +1086,7 @@ void queue_aten_key_event(
     bool verbose)
 {
     (void)verbose;
-    queue_aten_input_packet(state, make_aten_key_event(usage, down), false);
+    queue_aten_input_packet(state, make_aten_key_event(usage, down));
 }
 
 void queue_aten_pointer_event(
@@ -1107,11 +1094,10 @@ void queue_aten_pointer_event(
     int x,
     int y,
     std::uint8_t mask,
-    bool coalesce,
     bool verbose)
 {
     (void)verbose;
-    queue_aten_input_packet(state, make_aten_pointer_event(x, y, mask), coalesce);
+    queue_aten_input_packet(state, make_aten_pointer_event(x, y, mask));
 }
 
 void stop_aten_network(

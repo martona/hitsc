@@ -37,7 +37,6 @@ struct MegaracCompressedFrame {
 struct PendingMegaracInputPacket {
     std::uint16_t type = 0;
     std::vector<std::uint8_t> packet;
-    bool coalesce = false;
 };
 
 struct MegaracViewSessionState {
@@ -52,7 +51,7 @@ struct MegaracViewSessionState {
     ViewStatus view_status;
     std::exception_ptr exception;
     std::function<void()> force_close;
-    std::function<void(std::uint16_t, std::vector<std::uint8_t>, bool)> input_sink;
+    std::function<void(std::uint16_t, std::vector<std::uint8_t>)> input_sink;
     std::deque<PendingMegaracInputPacket> pending_input;
     std::uint64_t frame_sequence = 0;
     std::uint64_t cursor_sequence = 0;
@@ -76,8 +75,7 @@ std::exception_ptr take_megarac_exception(MegaracViewSessionState& state);
 bool queue_megarac_view_packet(
     MegaracViewSessionState& state,
     std::uint16_t type,
-    std::vector<std::uint8_t> packet,
-    bool coalesce);
+    std::vector<std::uint8_t> packet);
 
 int megarac_view_mouse_mode_snapshot(MegaracViewSessionState& state);
 

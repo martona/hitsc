@@ -531,11 +531,6 @@ std::vector<std::uint8_t> make_aten_mouse_sync_request()
     return packet;
 }
 
-bool is_coalescible_aten_mouse_motion(const std::vector<std::uint8_t>& packet)
-{
-    return packet.size() >= 3 && packet[0] == 5 && packet[2] == 0;
-}
-
 AtenAstPayloadHeader read_ast_payload_header(const std::vector<std::uint8_t>& payload)
 {
     if (payload.size() < 4) {

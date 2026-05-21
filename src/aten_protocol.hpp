@@ -139,7 +139,6 @@ std::vector<std::uint8_t> make_aten_key_event(std::uint32_t usage, bool down);
 std::vector<std::uint8_t> make_aten_pointer_event(int x, int y, std::uint8_t mask);
 std::vector<std::uint8_t> make_aten_cursor_position_request();
 std::vector<std::uint8_t> make_aten_mouse_sync_request();
-bool is_coalescible_aten_mouse_motion(const std::vector<std::uint8_t>& packet);
 
 AtenAstPayloadHeader read_ast_payload_header(const std::vector<std::uint8_t>& payload);
 bool ast_payload_is_frame_end_only(const std::vector<std::uint8_t>& payload);

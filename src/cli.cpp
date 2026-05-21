@@ -89,10 +89,6 @@ void configure_login_options(CLI::App& command, LoginOptions& options, std::stri
         "--debug-disable-http-keepalive",
         options.debug_disable_http_keepalive,
         "Close BMC HTTP TLS connections after each response to exercise TLS session resumption.");
-    command.add_flag(
-        "--debug-disable-input-coalescing",
-        options.debug_disable_input_coalescing,
-        "Send every input motion packet instead of replacing queued motion packets.");
     command.add_option("-u,--username", options.username, "Username for the BMC web login.");
     command.add_option("-p,--password", options.password, "Password for the BMC web login.");
     command.add_option("--password-env", password_env_name, "Read the password from an environment variable.");

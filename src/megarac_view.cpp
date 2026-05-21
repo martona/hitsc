@@ -200,7 +200,7 @@ void send_keyboard_report(
 {
     std::vector<std::uint8_t> packet =
         make_megarac_keyboard_packet(MegaracKeyboardReport{modifiers, keys}, sequence++);
-    const bool accepted = queue_megarac_view_packet(state, kCmdSendHidPacket, std::move(packet), false);
+    const bool accepted = queue_megarac_view_packet(state, kCmdSendHidPacket, std::move(packet));
     if (verbose && accepted) {
         LogLine line = log_info();
         line << "queued keyboard"
@@ -234,7 +234,6 @@ void send_mouse_report(
     int wheel,
     std::optional<RemoteMousePosition>& last_relative_position,
     std::uint32_t& sequence,
-    bool disable_input_coalescing,
     bool verbose)
 {
     const int mouse_mode = megarac_view_mouse_mode_snapshot(state);
@@ -252,8 +251,7 @@ void send_mouse_report(
     }
 
     last_relative_position = position;
-    const bool coalesce = !disable_input_coalescing && buttons == 0 && wheel == 0;
-    const bool accepted = queue_megarac_view_packet(state, kCmdSendHidPacket, std::move(packet), coalesce);
+    const bool accepted = queue_megarac_view_packet(state, kCmdSendHidPacket, std::move(packet));
     if (verbose && accepted) {
         log_info() << "queued mouse"
                    << " mode=" << mouse_mode
@@ -388,8 +386,7 @@ void run_megarac_view(const MegaracViewOptions& options)
                     queue_megarac_view_packet(
                         *state,
                         kCmdGetFullScreen,
-                        make_simple_packet(kCmdGetFullScreen, 1),
-                        false);
+                        make_simple_packet(kCmdGetFullScreen, 1));
                     render_needed = true;
                     last_status_tick = 0;
                     SDL_SetWindowTitle(window, state->view_status.title(options.login.base_url.host).c_str());
@@ -476,7 +473,6 @@ void run_megarac_view(const MegaracViewOptions& options)
                                 0,
                                 last_relative_mouse_position,
                                 mouse_sequence,
-                                options.login.debug_disable_input_coalescing,
                                 options.login.vverbose);
                         }
                     }
@@ -504,7 +500,6 @@ void run_megarac_view(const MegaracViewOptions& options)
                                 0,
                                 last_relative_mouse_position,
                                 mouse_sequence,
-                                options.login.debug_disable_input_coalescing,
                                 options.login.vverbose);
                             last_mouse_motion_ticks = ticks;
                         }
@@ -531,7 +526,6 @@ void run_megarac_view(const MegaracViewOptions& options)
                             wheel,
                             last_relative_mouse_position,
                             mouse_sequence,
-                            options.login.debug_disable_input_coalescing,
                             options.login.vverbose);
                     }
                 }

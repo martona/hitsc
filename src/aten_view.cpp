@@ -299,7 +299,6 @@ void run_aten_view(const AtenViewOptions& options)
                                 position->x,
                                 position->y,
                                 mouse_buttons,
-                                false,
                                 options.login.vverbose);
                         }
                     }
@@ -323,7 +322,6 @@ void run_aten_view(const AtenViewOptions& options)
                                 position->x,
                                 position->y,
                                 mouse_buttons,
-                                !options.login.debug_disable_input_coalescing && mouse_buttons == 0,
                                 options.login.vverbose);
                             last_mouse_motion_ticks = ticks;
                         }
@@ -348,14 +346,12 @@ void run_aten_view(const AtenViewOptions& options)
                                 position->x,
                                 position->y,
                                 wheel_mask,
-                                false,
                                 options.login.vverbose);
                             queue_aten_pointer_event(
                                 *state,
                                 position->x,
                                 position->y,
                                 0,
-                                false,
                                 options.login.vverbose);
                         }
                     }

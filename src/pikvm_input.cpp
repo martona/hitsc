@@ -374,9 +374,4 @@ std::vector<std::uint8_t> make_pikvm_mouse_wheel_packet(
     return packet;
 }
 
-bool is_pikvm_mouse_move_packet(const std::vector<std::uint8_t>& packet)
-{
-    return !packet.empty() && packet[0] == 3;
-}
-
 } // namespace hitsc

@@ -596,12 +596,10 @@ void set_pikvm_force_close(PikvmViewState& state, std::function<void()> force_cl
 bool queue_pikvm_input_packet(
     PikvmViewState& state,
     std::vector<std::uint8_t> packet,
-    bool coalesce_mouse_motion,
     PikvmClock::time_point ui_event_at = PikvmClock::now())
 {
     PikvmInputWork work;
     work.packet = std::move(packet);
-    work.coalesce_mouse_motion = coalesce_mouse_motion;
     work.timing.ui_event_at = ui_event_at;
     work.timing.enqueued_at = PikvmClock::now();
 
@@ -609,12 +607,6 @@ bool queue_pikvm_input_packet(
     {
         std::lock_guard lock(state.control_mutex);
         input_sink = state.input_sink;
-        if (!input_sink && coalesce_mouse_motion &&
-            !state.pending_input.empty() &&
-            is_pikvm_mouse_move_packet(state.pending_input.back().packet)) {
-            state.pending_input.back() = std::move(work);
-            return true;
-        }
         if (!input_sink) {
             state.pending_input.push_back(std::move(work));
             return true;
@@ -656,7 +648,7 @@ void queue_pikvm_key_event(
     PikvmClock::time_point ui_event_at = PikvmClock::now())
 {
     (void)verbose;
-    queue_pikvm_input_packet(state, make_pikvm_key_packet(code, pressed), false, ui_event_at);
+    queue_pikvm_input_packet(state, make_pikvm_key_packet(code, pressed), ui_event_at);
 }
 
 void queue_pikvm_mouse_button_event(
@@ -667,19 +659,17 @@ void queue_pikvm_mouse_button_event(
     PikvmClock::time_point ui_event_at = PikvmClock::now())
 {
     (void)verbose;
-    queue_pikvm_input_packet(state, make_pikvm_mouse_button_packet(button, pressed), false, ui_event_at);
+    queue_pikvm_input_packet(state, make_pikvm_mouse_button_packet(button, pressed), ui_event_at);
 }
 
 void queue_pikvm_mouse_move_event(
     PikvmViewState& state,
     const PikvmAbsoluteMousePosition& position,
-    bool coalesce_mouse_motion,
     PikvmClock::time_point ui_event_at = PikvmClock::now())
 {
     queue_pikvm_input_packet(
         state,
         make_pikvm_mouse_move_packet(position),
-        coalesce_mouse_motion,
         ui_event_at);
 }
 
@@ -694,7 +684,6 @@ void queue_pikvm_mouse_wheel_event(
     queue_pikvm_input_packet(
         state,
         make_pikvm_mouse_wheel_packet(delta_x, delta_y),
-        false,
         ui_event_at);
 }
 
@@ -1332,7 +1321,7 @@ void run_pikvm_view(const PikvmViewOptions& options)
                             continue;
                         }
                         if (position) {
-                            queue_pikvm_mouse_move_event(*state, *position, false, ui_event_at);
+                            queue_pikvm_mouse_move_event(*state, *position, ui_event_at);
                         }
 
                         if (mouse_down[button_slot] != down) {
@@ -1367,7 +1356,6 @@ void run_pikvm_view(const PikvmViewOptions& options)
                             queue_pikvm_mouse_move_event(
                                 *state,
                                 *position,
-                                !options.login.debug_disable_input_coalescing && !drag_active,
                                 ui_event_at);
                             last_mouse_motion_ticks = ticks;
                         }
@@ -1381,7 +1369,7 @@ void run_pikvm_view(const PikvmViewOptions& options)
                         target,
                         any_pikvm_mouse_button_down(mouse_down));
                     if (position) {
-                        queue_pikvm_mouse_move_event(*state, *position, false, ui_event_at);
+                        queue_pikvm_mouse_move_event(*state, *position, ui_event_at);
                         const float x = event.wheel.direction == SDL_MOUSEWHEEL_FLIPPED
                             ? -event.wheel.x
                             : event.wheel.x;

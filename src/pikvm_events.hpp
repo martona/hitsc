@@ -34,7 +34,6 @@ struct PikvmInputTiming {
 
 struct PikvmInputWork {
     std::vector<std::uint8_t> packet;
-    bool coalesce_mouse_motion = false;
     PikvmInputTiming timing;
 };
 

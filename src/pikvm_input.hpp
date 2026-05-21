@@ -35,6 +35,4 @@ std::vector<std::uint8_t> make_pikvm_mouse_wheel_packet(
     int delta_y,
     bool squash = false);
 
-bool is_pikvm_mouse_move_packet(const std::vector<std::uint8_t>& packet);
-
 } // namespace hitsc

@@ -19,7 +19,6 @@ struct LoginOptions {
     bool vverbose = false;
     bool insecure = false;
     bool debug_disable_http_keepalive = false;
-    bool debug_disable_input_coalescing = false;
 };
 
 struct MegaracViewOptions {

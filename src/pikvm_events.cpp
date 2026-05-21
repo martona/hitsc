@@ -285,15 +285,7 @@ private:
             return;
         }
 
-        const std::size_t writable_queue_offset = write_in_progress_ ? 1U : 0U;
-        if (work.coalesce_mouse_motion
-            && write_queue_.size() > writable_queue_offset
-            && !write_queue_.empty()
-            && is_pikvm_mouse_move_packet(write_queue_.back().work.packet)) {
-            write_queue_.back().work = std::move(work);
-        } else {
-            write_queue_.push_back(QueuedPikvmWrite{std::move(work), {}});
-        }
+        write_queue_.push_back(QueuedPikvmWrite{std::move(work), {}});
 
         if (!write_in_progress_) {
             start_write();

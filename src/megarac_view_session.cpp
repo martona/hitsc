@@ -351,7 +351,7 @@ void clear_megarac_input_sink(MegaracViewSessionState& state)
 
 void install_megarac_input_sink(
     MegaracViewSessionState& state,
-    std::function<void(std::uint16_t, std::vector<std::uint8_t>, bool)> input_sink)
+    std::function<void(std::uint16_t, std::vector<std::uint8_t>)> input_sink)
 {
     std::deque<PendingMegaracInputPacket> pending;
     {
@@ -361,7 +361,7 @@ void install_megarac_input_sink(
     }
 
     for (PendingMegaracInputPacket& packet : pending) {
-        input_sink(packet.type, std::move(packet.packet), packet.coalesce);
+        input_sink(packet.type, std::move(packet.packet));
     }
 }
 
@@ -411,28 +411,22 @@ int megarac_view_mouse_mode_snapshot(MegaracViewSessionState& state)
 bool queue_megarac_view_packet(
     MegaracViewSessionState& state,
     std::uint16_t type,
-    std::vector<std::uint8_t> packet,
-    bool coalesce)
+    std::vector<std::uint8_t> packet)
 {
-    std::function<void(std::uint16_t, std::vector<std::uint8_t>, bool)> input_sink;
+    std::function<void(std::uint16_t, std::vector<std::uint8_t>)> input_sink;
     {
         std::lock_guard lock(state.control_mutex);
         input_sink = state.input_sink;
-        if (!input_sink && coalesce && !state.pending_input.empty() &&
-            state.pending_input.back().type == type) {
-            state.pending_input.back() = PendingMegaracInputPacket{type, std::move(packet), coalesce};
-            return true;
-        }
         if (!input_sink) {
             if (state.pending_input.size() >= kMaxQueuedInputPackets) {
                 state.pending_input.pop_front();
             }
-            state.pending_input.push_back(PendingMegaracInputPacket{type, std::move(packet), coalesce});
+            state.pending_input.push_back(PendingMegaracInputPacket{type, std::move(packet)});
             return true;
         }
     }
 
-    input_sink(type, std::move(packet), coalesce);
+    input_sink(type, std::move(packet));
     return true;
 }
 
@@ -530,11 +524,11 @@ public:
         });
     }
 
-    void send_packet(std::uint16_t type, std::vector<std::uint8_t> packet, bool coalesce)
+    void send_packet(std::uint16_t type, std::vector<std::uint8_t> packet)
     {
         auto self = shared_from_this();
-        asio::post(strand_, [self, type, packet = std::move(packet), coalesce]() mutable {
-            self->queue_packet_from_strand(type, std::move(packet), coalesce);
+        asio::post(strand_, [self, type, packet = std::move(packet)]() mutable {
+            self->queue_packet_from_strand(type, std::move(packet));
         });
     }
 
@@ -655,14 +649,13 @@ private:
         if (packet.type == kCmdConnectionAllowed && !validation_sent_) {
             queue_packet_from_strand(
                 kCmdValidateVideoSession,
-                make_validate_video_session_packet(config_, options_.login.username),
-                false);
+                make_validate_video_session_packet(config_, options_.login.username));
             validation_sent_ = true;
             log_info() << "sent KVM validation packet";
         } else if (packet.type == kCmdValidatedVideoSession) {
             handle_validation_response(packet);
         } else if (packet.type == kCmdKeepAlive) {
-            queue_packet_from_strand(kCmdKeepAlive, make_simple_packet(kCmdKeepAlive), false);
+            queue_packet_from_strand(kCmdKeepAlive, make_simple_packet(kCmdKeepAlive));
         } else if (packet.type == kCmdUsbMouseMode && !packet.payload.empty()) {
             set_mouse_mode(state_, packet.payload[0]);
             if (options_.login.verbose) {
@@ -671,15 +664,14 @@ private:
         } else if (packet.type == kCmdMediaLicenseStatus) {
             queue_packet_from_strand(
                 kCmdDisplayLockSet,
-                make_payload_packet(kCmdDisplayLockSet, 0, std::vector<std::uint8_t>{2}),
-                false);
-            queue_packet_from_strand(kCmdGetUserMacro, make_simple_packet(kCmdGetUserMacro), false);
+                make_payload_packet(kCmdDisplayLockSet, 0, std::vector<std::uint8_t>{2}));
+            queue_packet_from_strand(kCmdGetUserMacro, make_simple_packet(kCmdGetUserMacro));
 
             if (!config_.session.empty()) {
-                queue_packet_from_strand(kCmdGetWebToken, make_web_token_packet(config_.session), false);
+                queue_packet_from_strand(kCmdGetWebToken, make_web_token_packet(config_.session));
             }
         } else if (packet.type == kCmdActiveClients && !full_screen_requested_) {
-            queue_packet_from_strand(kCmdGetFullScreen, make_simple_packet(kCmdGetFullScreen, 1), false);
+            queue_packet_from_strand(kCmdGetFullScreen, make_simple_packet(kCmdGetFullScreen, 1));
             full_screen_requested_ = true;
             log_info() << "requested full screen";
         } else if (packet.type == kCmdKvmSharing) {
@@ -742,12 +734,10 @@ private:
         // TODO: prompt before granting KVM sharing once the UI has policy controls.
         queue_packet_from_strand(
             kCmdKvmSharing,
-            make_payload_packet(kCmdKvmSharing, allowed_status, packet.payload),
-            false);
+            make_payload_packet(kCmdKvmSharing, allowed_status, packet.payload));
         queue_packet_from_strand(
             kCmdSetNextMaster,
-            make_payload_packet(kCmdSetNextMaster, allowed_status, packet.payload),
-            false);
+            make_payload_packet(kCmdSetNextMaster, allowed_status, packet.payload));
 
         log_info() << "granted KVM sharing request"
                    << " payload=" << packet.payload.size();
@@ -755,7 +745,7 @@ private:
 
     void query_power_status(std::string_view reason)
     {
-        queue_packet_from_strand(kCmdPowerStatus, make_simple_packet(kCmdPowerStatus), false);
+        queue_packet_from_strand(kCmdPowerStatus, make_simple_packet(kCmdPowerStatus));
         if (options_.login.verbose) {
             log_info() << "requested power status"
                        << " reason=" << reason;
@@ -764,7 +754,7 @@ private:
 
     void request_full_screen_retry(std::string_view reason)
     {
-        queue_packet_from_strand(kCmdGetFullScreen, make_simple_packet(kCmdGetFullScreen, 1), false);
+        queue_packet_from_strand(kCmdGetFullScreen, make_simple_packet(kCmdGetFullScreen, 1));
         if (options_.login.verbose) {
             log_info() << "requested full screen"
                        << " reason=" << reason;
@@ -899,13 +889,13 @@ private:
         const int frames_presented_since_report =
             static_cast<int>(frames_presented - last_frames_presented_for_report_);
         const int diff = std::abs(frames_received_since_report_ - frames_presented_since_report);
-        queue_packet_from_strand(kCmdFpsDiff, make_simple_packet(kCmdFpsDiff, static_cast<std::uint16_t>(diff)), false);
+        queue_packet_from_strand(kCmdFpsDiff, make_simple_packet(kCmdFpsDiff, static_cast<std::uint16_t>(diff)));
         frames_received_since_report_ = 0;
         last_frames_presented_for_report_ = frames_presented;
         last_fps_report_ = now;
     }
 
-    void queue_packet_from_strand(std::uint16_t type, std::vector<std::uint8_t> packet, bool coalesce)
+    void queue_packet_from_strand(std::uint16_t type, std::vector<std::uint8_t> packet)
     {
         if (closed_ || stopping_) {
             return;
@@ -914,17 +904,6 @@ private:
         auto mutable_begin = outgoing_packets_.begin();
         if (writing_ && mutable_begin != outgoing_packets_.end()) {
             ++mutable_begin;
-        }
-
-        if (coalesce) {
-            for (auto it = outgoing_packets_.end(); it != mutable_begin;) {
-                --it;
-                if (it->type == type) {
-                    it->bytes = std::move(packet);
-                    it->encoded_text.clear();
-                    return;
-                }
-            }
         }
 
         constexpr std::size_t max_queued_packets = 128;
@@ -1189,9 +1168,9 @@ void run_megarac_view_session(const MegaracViewOptions& options, MegaracViewSess
         std::weak_ptr<KvmAsyncSession> weak_session = async_session;
         install_megarac_input_sink(
             state,
-            [weak_session](std::uint16_t type, std::vector<std::uint8_t> packet, bool coalesce) mutable {
+            [weak_session](std::uint16_t type, std::vector<std::uint8_t> packet) mutable {
                 if (auto session = weak_session.lock()) {
-                    session->send_packet(type, std::move(packet), coalesce);
+                    session->send_packet(type, std::move(packet));
                 }
             });
         set_megarac_force_close(state, [weak_session] {
