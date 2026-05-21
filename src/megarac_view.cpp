@@ -296,6 +296,12 @@ void run_megarac_view(const MegaracViewOptions& options)
         SDL_Quit();
     };
 
+    auto hide_window_for_teardown = [&] {
+        if (window != nullptr) {
+            SDL_HideWindow(window);
+        }
+    };
+
     try {
         const Uint32 frame_event_type = SDL_RegisterEvents(1);
         if (frame_event_type == 0) {
@@ -629,6 +635,7 @@ void run_megarac_view(const MegaracViewOptions& options)
         throw;
     }
 
+    hide_window_for_teardown();
     stop_megarac_network(*state, *stop_requested, network_thread, options.login.verbose);
     cleanup();
 }

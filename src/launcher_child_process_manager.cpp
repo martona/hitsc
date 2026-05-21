@@ -80,12 +80,26 @@ bool activate_process_window(qint64 process_id)
     return true;
 }
 
+bool process_has_window(qint64 process_id)
+{
+    WindowSearch search;
+    search.process_id = static_cast<DWORD>(process_id);
+    EnumWindows(&find_process_window, reinterpret_cast<LPARAM>(&search));
+    return search.window != nullptr;
+}
+
 #else
 
 bool activate_process_window(qint64 process_id)
 {
     (void)process_id;
     return false;
+}
+
+bool process_has_window(qint64 process_id)
+{
+    (void)process_id;
+    return true;
 }
 
 #endif
@@ -117,15 +131,17 @@ QVariantMap ChildProcessManager::launch_host(const SavedHost& host)
 
 QVariantMap ChildProcessManager::activate_or_launch(const SavedHost& host)
 {
-    if (auto it = sessions_.find(host.id); it != sessions_.end()) {
-        Session* session = it.value();
+    const QList<Session*> existing_sessions = sessions_.values(host.id);
+    for (Session* session : existing_sessions) {
         if (session != nullptr
             && session->process != nullptr
             && session->process->state() != QProcess::NotRunning) {
-            activate_process_window(session->process->processId());
-            return ok_result();
+            const qint64 process_id = session->process->processId();
+            if (process_has_window(process_id)) {
+                activate_process_window(process_id);
+                return ok_result();
+            }
         }
-        sessions_.erase(it);
     }
 
     if (!host.credentials || host.credentials->username.trimmed().isEmpty()
@@ -185,7 +201,7 @@ QVariantMap ChildProcessManager::activate_or_launch(const SavedHost& host)
                           << ": child exited with code " << exit_code << "\n";
             }
 
-            sessions_.remove(raw_session->host_id);
+            sessions_.remove(raw_session->host_id, raw_session);
             raw_session->process->deleteLater();
             delete raw_session;
         });
@@ -198,7 +214,7 @@ QVariantMap ChildProcessManager::activate_or_launch(const SavedHost& host)
 
     process->start(QCoreApplication::applicationFilePath(), QStringList{QStringLiteral("child")});
     if (!process->waitForStarted(3000)) {
-        sessions_.remove(host.id);
+        sessions_.remove(host.id, raw_session);
         const QString message = process->errorString();
         process->disconnect(this);
         process->deleteLater();
@@ -269,8 +285,8 @@ void ChildProcessManager::flush_stderr_line(Session& session, QByteArray line)
 
 void ChildProcessManager::detach_running_children()
 {
-    for (auto it = sessions_.begin(); it != sessions_.end(); ++it) {
-        Session* session = it.value();
+    const QList<Session*> existing_sessions = sessions_.values();
+    for (Session* session : existing_sessions) {
         if (session == nullptr) {
             continue;
         }

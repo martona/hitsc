@@ -1184,6 +1184,12 @@ void run_pikvm_view(const PikvmViewOptions& options)
         SDL_Quit();
     };
 
+    auto hide_window_for_teardown = [&] {
+        if (window != nullptr) {
+            SDL_HideWindow(window);
+        }
+    };
+
     try {
         const Uint32 frame_event_type = SDL_RegisterEvents(1);
         if (frame_event_type == 0) {
@@ -1566,6 +1572,7 @@ void run_pikvm_view(const PikvmViewOptions& options)
     }
 
     clear_pikvm_local_mouse_capture(mouse_down);
+    hide_window_for_teardown();
     stop_pikvm_network(*state, *stop_requested, network_thread, options.login.verbose);
 
     clear_pikvm_frame(*state);

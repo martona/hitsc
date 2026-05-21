@@ -157,6 +157,12 @@ void run_aten_view(const AtenViewOptions& options)
         SDL_Quit();
     };
 
+    auto hide_window_for_teardown = [&] {
+        if (window != nullptr) {
+            SDL_HideWindow(window);
+        }
+    };
+
     try {
         const Uint32 frame_event_type = SDL_RegisterEvents(1);
         if (frame_event_type == 0) {
@@ -455,6 +461,7 @@ void run_aten_view(const AtenViewOptions& options)
         throw;
     }
 
+    hide_window_for_teardown();
     stop_aten_network(*state, *stop_requested, network_thread, options.login.verbose);
     cleanup();
 }

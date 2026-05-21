@@ -3,7 +3,7 @@
 #include "launcher_types.hpp"
 
 #include <QObject>
-#include <QHash>
+#include <QMultiHash>
 #include <QVariantMap>
 
 class QProcess;
@@ -28,7 +28,7 @@ private:
     void flush_stderr_line(Session& session, QByteArray line);
     void detach_running_children();
 
-    QHash<QString, Session*> sessions_;
+    QMultiHash<QString, Session*> sessions_;
 };
 
 } // namespace hitsc
