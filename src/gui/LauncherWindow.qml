@@ -10,7 +10,7 @@ ApplicationWindow {
     height: 680
     minimumWidth: 300
     minimumHeight: 420
-    visible: true
+    visible: false
     title: "hitsc"
 
     SystemPalette {

@@ -11,6 +11,7 @@
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
 #include <QQuickStyle>
+#include <QQuickWindow>
 #include <QStyleHints>
 #include <QUrl>
 #include <QWindow>
@@ -74,6 +75,14 @@ void apply_application_theme(QGuiApplication& app, const QPalette& light_palette
     const bool dark = launcher_should_use_dark_theme(color_scheme);
     app.styleHints()->setColorScheme(dark ? Qt::ColorScheme::Dark : Qt::ColorScheme::Light);
     app.setPalette(dark ? make_dark_palette() : light_palette);
+}
+
+void apply_window_clear_color(QWindow* window, const QColor& color)
+{
+    auto* quick_window = qobject_cast<QQuickWindow*>(window);
+    if (quick_window != nullptr) {
+        quick_window->setColor(color);
+    }
 }
 
 #ifdef _WIN32
@@ -174,6 +183,8 @@ int run_launcher_gui(int argc, char* argv[], VerbosityOptions verbosity)
     }
 
     auto* root_window = qobject_cast<QWindow*>(engine.rootObjects().first());
+    apply_window_clear_color(root_window, app.palette().color(QPalette::Window));
+
     WindowPlacementController window_placement(
         root_window,
         WindowPrefsStore{},
@@ -194,6 +205,7 @@ int run_launcher_gui(int argc, char* argv[], VerbosityOptions verbosity)
             Qt::ColorScheme color_scheme) {
             apply_application_theme(app, light_palette, color_scheme);
             launcher_theme.setColorScheme(color_scheme);
+            apply_window_clear_color(root_window, app.palette().color(QPalette::Window));
             background_erase_filter.set_color(app.palette().color(QPalette::Window));
             apply_title_bar_theme(root_window, color_scheme);
         });
@@ -202,13 +214,16 @@ int run_launcher_gui(int argc, char* argv[], VerbosityOptions verbosity)
         app.styleHints(),
         &QStyleHints::colorSchemeChanged,
         &app,
-        [&app, light_palette, &launcher_theme](Qt::ColorScheme color_scheme) {
+        [&app, light_palette, root_window, &launcher_theme](Qt::ColorScheme color_scheme) {
             apply_application_theme(app, light_palette, color_scheme);
             launcher_theme.setColorScheme(color_scheme);
+            apply_window_clear_color(root_window, app.palette().color(QPalette::Window));
         });
 #endif
 
-    return app.exec();;
+    root_window->show();
+
+    return app.exec();
 }
 
 } // namespace hitsc
