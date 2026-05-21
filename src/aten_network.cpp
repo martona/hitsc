@@ -1124,10 +1124,7 @@ void stop_aten_network(
     std::thread& network_thread,
     bool verbose)
 {
-    const auto started_at = std::chrono::steady_clock::now();
-    if (verbose) {
-        log_debug() << "aten network stop begin";
-    }
+    (void)verbose;
     stop_requested.store(true);
 
     std::function<void()> force_close;
@@ -1136,36 +1133,11 @@ void stop_aten_network(
         force_close = state.force_close;
     }
     if (force_close) {
-        if (verbose) {
-            log_debug() << "aten network force-close begin";
-        }
         force_close();
-        if (verbose) {
-            log_debug() << "aten network force-close returned";
-        }
-    } else if (verbose) {
-        log_debug() << "aten network force-close missing";
     }
-    const auto force_closed_at = std::chrono::steady_clock::now();
 
     if (network_thread.joinable()) {
-        if (verbose) {
-            log_debug() << "aten network join begin";
-        }
         network_thread.join();
-        if (verbose) {
-            log_debug() << "aten network join returned";
-        }
-    }
-    const auto stopped_at = std::chrono::steady_clock::now();
-    const auto stop_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-        stopped_at - started_at).count();
-    if (stop_ms > 250) {
-        const auto force_close_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-            force_closed_at - started_at).count();
-        log_warning() << "aten network stop waited"
-                      << " total-ms=" << stop_ms
-                      << " force-close-ms=" << force_close_ms;
     }
 }
 
@@ -1274,16 +1246,7 @@ void run_aten_network_session(
     });
 
     network_session->start(rfb.take_queued_bytes());
-    const auto io_started_at = std::chrono::steady_clock::now();
-    if (options.login.verbose) {
-        log_debug() << "aten network io running";
-    }
     io.run();
-    if (options.login.verbose) {
-        const auto io_elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - io_started_at).count();
-        log_debug() << "aten network io stopped duration-ms=" << io_elapsed_ms;
-    }
 
     clear_aten_input_sink(state);
     set_aten_force_close(state, {});

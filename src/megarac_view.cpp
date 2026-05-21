@@ -90,20 +90,27 @@ std::optional<RemoteMousePosition> remote_mouse_position(
     float window_y,
     const SDL_FRect& target,
     int frame_width,
-    int frame_height)
+    int frame_height,
+    bool clamp_to_target)
 {
     if (frame_width <= 0 || frame_height <= 0 || target.w <= 0.0f || target.h <= 0.0f) {
         return std::nullopt;
     }
-    if (window_x < target.x || window_y < target.y ||
-        window_x > target.x + target.w || window_y > target.y + target.h) {
+    const bool inside =
+        window_x >= target.x
+        && window_y >= target.y
+        && window_x <= target.x + target.w
+        && window_y <= target.y + target.h;
+    if (!inside && !clamp_to_target) {
         return std::nullopt;
     }
 
+    const float clamped_x = std::clamp(window_x, target.x, target.x + target.w);
+    const float clamped_y = std::clamp(window_y, target.y, target.y + target.h);
     const double normalized_x =
-        (static_cast<double>(window_x) - static_cast<double>(target.x)) / static_cast<double>(target.w);
+        (static_cast<double>(clamped_x) - static_cast<double>(target.x)) / static_cast<double>(target.w);
     const double normalized_y =
-        (static_cast<double>(window_y) - static_cast<double>(target.y)) / static_cast<double>(target.h);
+        (static_cast<double>(clamped_y) - static_cast<double>(target.y)) / static_cast<double>(target.h);
     return RemoteMousePosition{
         std::clamp(static_cast<int>(std::floor(normalized_x * frame_width + 0.5)), 0, frame_width),
         std::clamp(static_cast<int>(std::floor(normalized_y * frame_height + 0.5)), 0, frame_height),
@@ -281,6 +288,7 @@ void run_megarac_view(const MegaracViewOptions& options)
     HardwareCursorPresenter cursor_presenter;
 
     auto cleanup = [&] {
+        SDL_CaptureMouse(false);
         presenter.destroy();
         cursor_presenter.destroy();
         if (renderer != nullptr) {
@@ -376,6 +384,7 @@ void run_megarac_view(const MegaracViewOptions& options)
                     presenter.destroy();
                     cursor_presenter.destroy();
                     last_sequence = 0;
+                    last_cursor_sequence = 0;
                     last_status_tick = 0;
                     SDL_SetWindowTitle(window, state->view_status.title(options.login.base_url.host).c_str());
                 } else if (event.type == SDL_EVENT_WINDOW_RESTORED ||
@@ -410,13 +419,6 @@ void run_megarac_view(const MegaracViewOptions& options)
                     }
                 } else if (event.type == SDL_EVENT_KEY_DOWN ||
                            event.type == SDL_EVENT_KEY_UP) {
-                    if (options.login.vverbose) {
-                        log_info() << "key "
-                                   << (event.type == SDL_EVENT_KEY_DOWN ? "down" : "up")
-                                   << " scancode=" << event.key.scancode
-                                   << " key=" << event.key.key;
-                    }
-
                     if (!(event.type == SDL_EVENT_KEY_DOWN && event.key.repeat)) {
                         const bool pressed = event.type == SDL_EVENT_KEY_DOWN;
                         const std::optional<std::uint8_t> modifier = keyboard_modifier_bit(event.key.scancode);
@@ -449,21 +451,23 @@ void run_megarac_view(const MegaracViewOptions& options)
                     const AspeedPresentationSlot& active = *presenter.active_slot();
                     const std::uint8_t mask = button_mask_for_sdl_button(event.button.button);
                     if (mask != 0) {
-                        if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
-                            mouse_buttons |= mask;
-                        } else {
-                            mouse_buttons &= static_cast<std::uint8_t>(~mask);
-                        }
-                        SDL_CaptureMouse(mouse_buttons != 0);
-
                         const SDL_FRect target = current_target_rect(window, active.width, active.height);
+                        const bool down = event.type == SDL_EVENT_MOUSE_BUTTON_DOWN;
+                        const bool drag_active = mouse_buttons != 0;
                         const std::optional<RemoteMousePosition> position = remote_mouse_position(
                             event.button.x,
                             event.button.y,
                             target,
                             active.width,
-                            active.height);
+                            active.height,
+                            drag_active || !down);
                         if (position) {
+                            if (down) {
+                                mouse_buttons |= mask;
+                            } else {
+                                mouse_buttons &= static_cast<std::uint8_t>(~mask);
+                            }
+                            SDL_CaptureMouse(mouse_buttons != 0);
                             send_mouse_report(
                                 *state,
                                 mouse_buttons,
@@ -489,7 +493,8 @@ void run_megarac_view(const MegaracViewOptions& options)
                             event.motion.y,
                             target,
                             active.width,
-                            active.height);
+                            active.height,
+                            mouse_buttons != 0);
                         if (position) {
                             send_mouse_report(
                                 *state,
@@ -512,7 +517,8 @@ void run_megarac_view(const MegaracViewOptions& options)
                         event.wheel.mouse_y,
                         target,
                         active.width,
-                        active.height);
+                        active.height,
+                        mouse_buttons != 0);
                     if (position) {
                         const int wheel = event.wheel.direction == SDL_MOUSEWHEEL_FLIPPED
                             ? static_cast<int>(-event.wheel.y)
@@ -532,15 +538,16 @@ void run_megarac_view(const MegaracViewOptions& options)
                 have_event = SDL_PollEvent(&event);
             }
 
-            bool cursor_texture_dirty = false;
-            if (std::optional<SharedCursor> cursor = take_latest_megarac_view_cursor(*state, last_cursor_sequence)) {
-                hardware_cursor = std::move(*cursor);
-                last_cursor_sequence = hardware_cursor.sequence;
-                has_hardware_cursor = true;
-                cursor_texture_dirty = true;
-            }
-
             if (visible) {
+                bool cursor_texture_dirty = false;
+                if (std::optional<SharedCursor> cursor =
+                        take_latest_megarac_view_cursor(*state, last_cursor_sequence)) {
+                    hardware_cursor = std::move(*cursor);
+                    last_cursor_sequence = hardware_cursor.sequence;
+                    has_hardware_cursor = true;
+                    cursor_texture_dirty = true;
+                }
+
                 const std::shared_ptr<const MegaracCompressedFrame> frame =
                     take_latest_megarac_view_frame(*state, last_sequence);
                 if (frame) {
@@ -602,7 +609,6 @@ void run_megarac_view(const MegaracViewOptions& options)
                         const AspeedPresentationSlot* active = presenter.active_slot();
                         if (active != nullptr) {
                             state->view_status.frame_presented(active->width, active->height);
-                            state->frames_presented.fetch_add(1);
                         }
                     }
                     first_render = false;

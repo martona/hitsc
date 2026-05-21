@@ -595,13 +595,10 @@ void set_pikvm_force_close(PikvmViewState& state, std::function<void()> force_cl
 
 bool queue_pikvm_input_packet(
     PikvmViewState& state,
-    std::vector<std::uint8_t> packet,
-    PikvmClock::time_point ui_event_at = PikvmClock::now())
+    std::vector<std::uint8_t> packet)
 {
     PikvmInputWork work;
     work.packet = std::move(packet);
-    work.timing.ui_event_at = ui_event_at;
-    work.timing.enqueued_at = PikvmClock::now();
 
     std::function<void(PikvmInputWork)> input_sink;
     {
@@ -644,47 +641,41 @@ void queue_pikvm_key_event(
     PikvmViewState& state,
     std::string_view code,
     bool pressed,
-    bool verbose,
-    PikvmClock::time_point ui_event_at = PikvmClock::now())
+    bool verbose)
 {
     (void)verbose;
-    queue_pikvm_input_packet(state, make_pikvm_key_packet(code, pressed), ui_event_at);
+    queue_pikvm_input_packet(state, make_pikvm_key_packet(code, pressed));
 }
 
 void queue_pikvm_mouse_button_event(
     PikvmViewState& state,
     std::string_view button,
     bool pressed,
-    bool verbose,
-    PikvmClock::time_point ui_event_at = PikvmClock::now())
+    bool verbose)
 {
     (void)verbose;
-    queue_pikvm_input_packet(state, make_pikvm_mouse_button_packet(button, pressed), ui_event_at);
+    queue_pikvm_input_packet(state, make_pikvm_mouse_button_packet(button, pressed));
 }
 
 void queue_pikvm_mouse_move_event(
     PikvmViewState& state,
-    const PikvmAbsoluteMousePosition& position,
-    PikvmClock::time_point ui_event_at = PikvmClock::now())
+    const PikvmAbsoluteMousePosition& position)
 {
     queue_pikvm_input_packet(
         state,
-        make_pikvm_mouse_move_packet(position),
-        ui_event_at);
+        make_pikvm_mouse_move_packet(position));
 }
 
 void queue_pikvm_mouse_wheel_event(
     PikvmViewState& state,
     int delta_x,
     int delta_y,
-    bool verbose,
-    PikvmClock::time_point ui_event_at = PikvmClock::now())
+    bool verbose)
 {
     (void)verbose;
     queue_pikvm_input_packet(
         state,
-        make_pikvm_mouse_wheel_packet(delta_x, delta_y),
-        ui_event_at);
+        make_pikvm_mouse_wheel_packet(delta_x, delta_y));
 }
 
 bool any_pikvm_mouse_button_down(const PikvmMouseButtonDownState& mouse_down)
@@ -1117,10 +1108,7 @@ void stop_pikvm_network(
     std::thread& network_thread,
     bool verbose)
 {
-    if (verbose) {
-        log_debug() << "pikvm network stop begin";
-    }
-
+    (void)verbose;
     stop_requested.store(true);
     std::function<void()> force_close;
     {
@@ -1133,10 +1121,6 @@ void stop_pikvm_network(
 
     if (network_thread.joinable()) {
         network_thread.join();
-    }
-
-    if (verbose) {
-        log_debug() << "pikvm network stop end";
     }
 }
 
@@ -1232,7 +1216,6 @@ void run_pikvm_view(const PikvmViewOptions& options)
             SDL_Event event{};
             bool have_event = SDL_WaitEventTimeout(&event, 16);
             while (have_event) {
-                const auto ui_event_at = PikvmClock::now();
                 if (event.type == SDL_EVENT_QUIT ||
                     event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED) {
                     if (!close_event_logged) {
@@ -1295,8 +1278,7 @@ void run_pikvm_view(const PikvmViewOptions& options)
                                     *state,
                                     *code,
                                     down,
-                                    options.login.vverbose,
-                                    ui_event_at);
+                                    options.login.vverbose);
                             }
                         }
                     }
@@ -1321,7 +1303,7 @@ void run_pikvm_view(const PikvmViewOptions& options)
                             continue;
                         }
                         if (position) {
-                            queue_pikvm_mouse_move_event(*state, *position, ui_event_at);
+                            queue_pikvm_mouse_move_event(*state, *position);
                         }
 
                         if (mouse_down[button_slot] != down) {
@@ -1330,8 +1312,7 @@ void run_pikvm_view(const PikvmViewOptions& options)
                                 *state,
                                 *button,
                                 down,
-                                options.login.vverbose,
-                                ui_event_at);
+                                options.login.vverbose);
                         }
                         SDL_CaptureMouse(any_pikvm_mouse_button_down(mouse_down));
                     } else if (options.login.vverbose) {
@@ -1355,8 +1336,7 @@ void run_pikvm_view(const PikvmViewOptions& options)
                         if (position) {
                             queue_pikvm_mouse_move_event(
                                 *state,
-                                *position,
-                                ui_event_at);
+                                *position);
                             last_mouse_motion_ticks = ticks;
                         }
                     }
@@ -1369,7 +1349,7 @@ void run_pikvm_view(const PikvmViewOptions& options)
                         target,
                         any_pikvm_mouse_button_down(mouse_down));
                     if (position) {
-                        queue_pikvm_mouse_move_event(*state, *position, ui_event_at);
+                        queue_pikvm_mouse_move_event(*state, *position);
                         const float x = event.wheel.direction == SDL_MOUSEWHEEL_FLIPPED
                             ? -event.wheel.x
                             : event.wheel.x;
@@ -1383,8 +1363,7 @@ void run_pikvm_view(const PikvmViewOptions& options)
                                 *state,
                                 delta_x,
                                 delta_y,
-                                options.login.vverbose,
-                                ui_event_at);
+                                options.login.vverbose);
                         }
                     }
                 }

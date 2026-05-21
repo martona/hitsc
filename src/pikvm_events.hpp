@@ -27,14 +27,8 @@ void force_close_pikvm_websocket(PikvmWebSocket& ws);
 
 class PikvmEventSession;
 
-struct PikvmInputTiming {
-    std::chrono::steady_clock::time_point ui_event_at;
-    std::chrono::steady_clock::time_point enqueued_at;
-};
-
 struct PikvmInputWork {
     std::vector<std::uint8_t> packet;
-    PikvmInputTiming timing;
 };
 
 std::shared_ptr<PikvmEventSession> start_pikvm_event_session(

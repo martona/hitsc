@@ -47,7 +47,6 @@ struct MegaracViewSessionState {
     std::atomic_uint32_t frame_event_type{0};
     std::atomic_bool frame_event_pending{false};
     std::atomic_int mouse_mode{kMegaracAbsoluteMouseMode};
-    std::atomic_uint64_t frames_presented{0};
     ViewStatus view_status;
     std::exception_ptr exception;
     std::function<void()> force_close;

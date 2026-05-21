@@ -72,22 +72,31 @@ std::optional<AtenRemoteMousePosition> remote_mouse_position(
     float window_y,
     const SDL_FRect& target,
     int frame_width,
-    int frame_height)
+    int frame_height,
+    bool clamp_to_target)
 {
-    if (target.w <= 0.0f || target.h <= 0.0f) {
+    if (frame_width <= 0 || frame_height <= 0 || target.w <= 0.0f || target.h <= 0.0f) {
         return std::nullopt;
     }
 
-    const float relative_x = (window_x - target.x) / target.w;
-    const float relative_y = (window_y - target.y) / target.h;
-    if (relative_x < 0.0f || relative_x > 1.0f ||
-        relative_y < 0.0f || relative_y > 1.0f) {
+    const bool inside =
+        window_x >= target.x
+        && window_y >= target.y
+        && window_x <= target.x + target.w
+        && window_y <= target.y + target.h;
+    if (!inside && !clamp_to_target) {
         return std::nullopt;
     }
 
+    const float clamped_x = std::clamp(window_x, target.x, target.x + target.w);
+    const float clamped_y = std::clamp(window_y, target.y, target.y + target.h);
+    const double relative_x =
+        (static_cast<double>(clamped_x) - static_cast<double>(target.x)) / static_cast<double>(target.w);
+    const double relative_y =
+        (static_cast<double>(clamped_y) - static_cast<double>(target.y)) / static_cast<double>(target.h);
     return AtenRemoteMousePosition{
-        std::clamp(static_cast<int>(std::lround(relative_x * static_cast<float>(frame_width))), 0, frame_width),
-        std::clamp(static_cast<int>(std::lround(relative_y * static_cast<float>(frame_height))), 0, frame_height)};
+        std::clamp(static_cast<int>(std::floor(relative_x * frame_width + 0.5)), 0, frame_width),
+        std::clamp(static_cast<int>(std::floor(relative_y * frame_height + 0.5)), 0, frame_height)};
 }
 
 std::uint8_t button_mask_for_sdl_button(std::uint8_t button)
@@ -144,6 +153,7 @@ void run_aten_view(const AtenViewOptions& options)
     HardwareCursorPresenter cursor_presenter;
 
     auto cleanup = [&] {
+        SDL_CaptureMouse(false);
         presenter.destroy();
         cursor_presenter.destroy();
         if (renderer != nullptr) {
@@ -278,22 +288,24 @@ void run_aten_view(const AtenViewOptions& options)
                             event.type == SDL_EVENT_MOUSE_BUTTON_UP)) {
                     const std::uint8_t mask = button_mask_for_sdl_button(event.button.button);
                     if (mask != 0) {
-                        if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
-                            mouse_buttons |= mask;
-                        } else {
-                            mouse_buttons &= static_cast<std::uint8_t>(~mask);
-                        }
-                        SDL_CaptureMouse(mouse_buttons != 0);
-
                         const AspeedPresentationSlot& active = *presenter.active_slot();
                         const SDL_FRect target = current_target_rect(window, active.width, active.height);
+                        const bool down = event.type == SDL_EVENT_MOUSE_BUTTON_DOWN;
+                        const bool drag_active = mouse_buttons != 0;
                         const std::optional<AtenRemoteMousePosition> position = remote_mouse_position(
                             event.button.x,
                             event.button.y,
                             target,
                             active.width,
-                            active.height);
+                            active.height,
+                            drag_active || !down);
                         if (position) {
+                            if (down) {
+                                mouse_buttons |= mask;
+                            } else {
+                                mouse_buttons &= static_cast<std::uint8_t>(~mask);
+                            }
+                            SDL_CaptureMouse(mouse_buttons != 0);
                             queue_aten_pointer_event(
                                 *state,
                                 position->x,
@@ -315,7 +327,8 @@ void run_aten_view(const AtenViewOptions& options)
                             event.motion.y,
                             target,
                             active.width,
-                            active.height);
+                            active.height,
+                            mouse_buttons != 0);
                         if (position) {
                             queue_aten_pointer_event(
                                 *state,
@@ -334,7 +347,8 @@ void run_aten_view(const AtenViewOptions& options)
                         event.wheel.mouse_y,
                         target,
                         active.width,
-                        active.height);
+                        active.height,
+                        mouse_buttons != 0);
                     if (position) {
                         const float y = event.wheel.direction == SDL_MOUSEWHEEL_FLIPPED
                             ? -event.wheel.y

@@ -27,7 +27,6 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
-#include <cstdlib>
 #include <cstdint>
 #include <deque>
 #include <exception>
@@ -74,7 +73,6 @@ constexpr std::uint16_t kCmdSetNextMaster = command_value(MegaracCommand::SetNex
 constexpr std::uint16_t kCmdPowerStatus = command_value(MegaracCommand::PowerStatus);
 constexpr std::uint16_t kCmdDisplayLockSet = command_value(MegaracCommand::DisplayLockSet);
 constexpr std::uint16_t kCmdMediaLicenseStatus = command_value(MegaracCommand::MediaLicenseStatus);
-constexpr std::uint16_t kCmdFpsDiff = command_value(MegaracCommand::FpsDiff);
 constexpr std::uint16_t kIvtpHwCursor = command_value(MegaracCommand::IvtpHwCursor);
 
 using KvmConfig = MegaracViewConfig;
@@ -302,15 +300,8 @@ std::string selected_subprotocol(const websocket::response_type& response)
     return protocol.empty() ? "base64" : protocol;
 }
 
-void publish_frame(MegaracViewSessionState& state, MegaracCompressedFrame frame)
+void push_render_event(MegaracViewSessionState& state)
 {
-    frame.published_at = std::chrono::steady_clock::now();
-    {
-        std::lock_guard lock(state.frame_mutex);
-        frame.sequence = ++state.frame_sequence;
-        state.frame = std::make_shared<MegaracCompressedFrame>(std::move(frame));
-    }
-
     const auto frame_event_type = static_cast<Uint32>(state.frame_event_type.load());
     if (frame_event_type != 0 && !state.frame_event_pending.exchange(true)) {
         SDL_Event event{};
@@ -321,12 +312,28 @@ void publish_frame(MegaracViewSessionState& state, MegaracCompressedFrame frame)
     }
 }
 
+void publish_frame(MegaracViewSessionState& state, MegaracCompressedFrame frame)
+{
+    frame.published_at = std::chrono::steady_clock::now();
+    {
+        std::lock_guard lock(state.frame_mutex);
+        frame.sequence = ++state.frame_sequence;
+        state.frame = std::make_shared<MegaracCompressedFrame>(std::move(frame));
+    }
+
+    push_render_event(state);
+}
+
 void publish_cursor(MegaracViewSessionState& state, SharedCursor cursor)
 {
-    std::lock_guard lock(state.frame_mutex);
-    cursor.sequence = ++state.cursor_sequence;
-    state.cursor = std::move(cursor);
-    state.has_cursor = true;
+    {
+        std::lock_guard lock(state.frame_mutex);
+        cursor.sequence = ++state.cursor_sequence;
+        state.cursor = std::move(cursor);
+        state.has_cursor = true;
+    }
+
+    push_render_event(state);
 }
 
 void set_mouse_mode(MegaracViewSessionState& state, int mouse_mode)
@@ -690,7 +697,6 @@ private:
             handle_video_packet(packet);
         }
 
-        send_fps_report_if_due();
     }
 
     void handle_validation_response(const KvmPacket& packet)
@@ -835,13 +841,9 @@ private:
                           << " compression=" << static_cast<int>(frame->compression_mode)
                           << " rc4=" << static_cast<int>(frame->rc4_enable)
                           << " first-block=0x" << std::hex << static_cast<int>(block_header) << std::dec;
-            ++frames_received_since_report_;
-            fps_reporting_started_ = true;
             return;
         }
 
-        ++frames_received_since_report_;
-        fps_reporting_started_ = true;
         blank_screen_packets_ = 0;
         const int next_frame_number = frames_seen_ + 1;
         if (options_.login.vverbose && (next_frame_number <= 20 || next_frame_number % 60 == 0)) {
@@ -871,23 +873,6 @@ private:
         state_.view_status.kvm_display_status(true);
         publish_frame(state_, std::move(compressed_frame));
         ++frames_seen_;
-    }
-
-    void send_fps_report_if_due()
-    {
-        const auto now = std::chrono::steady_clock::now();
-        if (!fps_reporting_started_ || now - last_fps_report_ < std::chrono::milliseconds(100)) {
-            return;
-        }
-
-        const std::uint64_t frames_presented = state_.frames_presented.load();
-        const int frames_presented_since_report =
-            static_cast<int>(frames_presented - last_frames_presented_for_report_);
-        const int diff = std::abs(frames_received_since_report_ - frames_presented_since_report);
-        queue_packet_from_strand(kCmdFpsDiff, make_simple_packet(kCmdFpsDiff, static_cast<std::uint16_t>(diff)));
-        frames_received_since_report_ = 0;
-        last_frames_presented_for_report_ = frames_presented;
-        last_fps_report_ = now;
     }
 
     void queue_packet_from_strand(std::uint16_t type, std::vector<std::uint8_t> packet)
@@ -990,13 +975,7 @@ private:
                 if (error == boost::asio::error::operation_aborted || self->closed_) {
                     return;
                 }
-                if (error) {
-                    log_warning() << "megarac stop timer error=" << error.message();
-                    self->close_socket();
-                    return;
-                }
-                if (self->stopping_) {
-                    log_warning() << "forcing MegaRAC websocket closed after stop grace";
+                if (error || self->stopping_) {
                     self->close_socket();
                 }
             }));
@@ -1042,14 +1021,10 @@ private:
     int power_status_ = -1;
     bool validation_sent_ = false;
     bool full_screen_requested_ = false;
-    bool fps_reporting_started_ = false;
     bool writing_ = false;
     bool stopping_ = false;
     bool closed_ = false;
-    int frames_received_since_report_ = 0;
-    std::uint64_t last_frames_presented_for_report_ = 0;
     std::size_t last_websocket_message_bytes_ = 0;
-    std::chrono::steady_clock::time_point last_fps_report_ = std::chrono::steady_clock::now();
     std::chrono::steady_clock::time_point last_blank_recovery_;
 };
 
@@ -1059,10 +1034,7 @@ void stop_megarac_network(
     std::thread& network_thread,
     bool verbose)
 {
-    const auto started_at = std::chrono::steady_clock::now();
-    if (verbose) {
-        log_debug() << "megarac network stop begin";
-    }
+    (void)verbose;
     stop_requested.store(true);
 
     std::function<void()> force_close;
@@ -1072,21 +1044,10 @@ void stop_megarac_network(
     }
     if (force_close) {
         force_close();
-    } else if (verbose) {
-        log_debug() << "megarac network force-close missing";
     }
 
     if (network_thread.joinable()) {
         network_thread.join();
-    }
-
-    const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - started_at).count();
-    if (elapsed_ms > 250) {
-        log_warning() << "megarac network stop waited"
-                      << " total-ms=" << elapsed_ms;
-    } else if (verbose) {
-        log_debug() << "megarac network stop end";
     }
 }
 
