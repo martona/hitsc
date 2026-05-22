@@ -32,7 +32,6 @@
         "harfbuzz",
         "jpeg",
         "network",
-        "opengl",
         "pcre2",
         "png",
         "sessionmanager",
