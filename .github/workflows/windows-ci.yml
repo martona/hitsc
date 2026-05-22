@@ -18,7 +18,7 @@ concurrency:
 
 jobs:
   build:
-    name: Build and smoke test
+    name: Windows build test
     runs-on: windows-latest
 
     defaults:
@@ -98,7 +98,7 @@ jobs:
             throw "Release exe imports non-system runtime/dependency DLLs: $($blocked -join '; ')"
           }
 
-      - name: Smoke test CLI help
+      - name: Test CLI help
         run: |
           $exe = ".\build\windows-release\hitsc.exe"
           & $exe --help
