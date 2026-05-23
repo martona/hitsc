@@ -86,6 +86,7 @@ add_executable(
   src/gui/window_placement.hpp
   src/gui/window_prefs_store.cpp
   src/gui/window_prefs_store.hpp
+  src/resources/hitsc_icons.qrc
   src/backends/megarac/megarac_view.cpp
   src/main.cpp
   src/hardware_cursor.cpp

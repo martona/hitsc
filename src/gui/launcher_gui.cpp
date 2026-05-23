@@ -7,11 +7,13 @@
 
 #include <QColor>
 #include <QGuiApplication>
+#include <QIcon>
 #include <QPalette>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
 #include <QQuickStyle>
 #include <QQuickWindow>
+#include <QSize>
 #include <QStyleHints>
 #include <QUrl>
 #include <QWindow>
@@ -68,6 +70,20 @@ QPalette make_dark_palette()
     palette.setColor(QPalette::Disabled, QPalette::HighlightedText, disabled_text);
 
     return palette;
+}
+
+QIcon make_application_icon()
+{
+    QIcon icon;
+    icon.addFile(QStringLiteral(":/icons/hitsc-16.png"), QSize(16, 16));
+    icon.addFile(QStringLiteral(":/icons/hitsc-24.png"), QSize(24, 24));
+    icon.addFile(QStringLiteral(":/icons/hitsc-32.png"), QSize(32, 32));
+    icon.addFile(QStringLiteral(":/icons/hitsc-48.png"), QSize(48, 48));
+    icon.addFile(QStringLiteral(":/icons/hitsc-64.png"), QSize(64, 64));
+    icon.addFile(QStringLiteral(":/icons/hitsc-128.png"), QSize(128, 128));
+    icon.addFile(QStringLiteral(":/icons/hitsc-256.png"), QSize(256, 256));
+    icon.addFile(QStringLiteral(":/icons/hitsc-512.png"), QSize(512, 512));
+    return icon;
 }
 
 void apply_application_theme(QGuiApplication& app, const QPalette& light_palette, Qt::ColorScheme color_scheme)
@@ -166,6 +182,7 @@ int run_launcher_gui(int argc, char* argv[], VerbosityOptions verbosity)
     QGuiApplication app(argc, argv);
     QGuiApplication::setOrganizationName(QStringLiteral("hitsc"));
     QGuiApplication::setApplicationName(QStringLiteral("hitsc"));
+    QGuiApplication::setWindowIcon(make_application_icon());
 
     const QPalette light_palette = app.palette();
     QQuickStyle::setStyle(QStringLiteral("Fusion"));
@@ -183,6 +200,9 @@ int run_launcher_gui(int argc, char* argv[], VerbosityOptions verbosity)
     }
 
     auto* root_window = qobject_cast<QWindow*>(engine.rootObjects().first());
+    if (root_window != nullptr) {
+        root_window->setIcon(QGuiApplication::windowIcon());
+    }
     apply_window_clear_color(root_window, app.palette().color(QPalette::Window));
 
     WindowPlacementController window_placement(

@@ -1,0 +1,12 @@
+<RCC>
+  <qresource prefix="/icons">
+    <file alias="hitsc-16.png">hitsc-png/hitsc-16.png</file>
+    <file alias="hitsc-24.png">hitsc-png/hitsc-24.png</file>
+    <file alias="hitsc-32.png">hitsc-png/hitsc-32.png</file>
+    <file alias="hitsc-48.png">hitsc-png/hitsc-48.png</file>
+    <file alias="hitsc-64.png">hitsc-png/hitsc-64.png</file>
+    <file alias="hitsc-128.png">hitsc-png/hitsc-128.png</file>
+    <file alias="hitsc-256.png">hitsc-png/hitsc-256.png</file>
+    <file alias="hitsc-512.png">hitsc-png/hitsc-512.png</file>
+  </qresource>
+</RCC>
