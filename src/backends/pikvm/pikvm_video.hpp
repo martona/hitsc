@@ -15,22 +15,15 @@
 #include <span>
 #include <vector>
 
-struct ID3D11Device;
-struct ID3D11DeviceContext;
-struct ID3D11Texture2D;
-
 namespace hitsc {
+
+class PikvmVideoHardware;
 
 enum class PikvmVideoPixelFormat {
     rgba32,
     i420,
     nv12,
-    d3d11_nv12,
-};
-
-struct PikvmD3D11Context {
-    ID3D11Device* device = nullptr;
-    std::shared_ptr<std::recursive_mutex> lock;
+    hardware_nv12,
 };
 
 struct PikvmVideoFrameTiming {
@@ -48,9 +41,6 @@ struct PikvmVideoFrame {
     std::array<const std::uint8_t*, 4> planes{};
     std::array<int, 4> pitches{};
     std::vector<std::uint8_t> rgba;
-    ID3D11Texture2D* d3d11_texture = nullptr;
-    int d3d11_array_slice = 0;
-    std::shared_ptr<std::recursive_mutex> d3d11_lock;
     std::shared_ptr<void> owner;
 };
 
@@ -62,7 +52,7 @@ public:
     PikvmH264Decoder();
     PikvmH264Decoder(
         PikvmVideoDecodeMode decode_mode,
-        std::shared_ptr<PikvmD3D11Context> d3d11_context);
+        std::shared_ptr<PikvmVideoHardware> hardware);
     ~PikvmH264Decoder();
 
     PikvmH264Decoder(const PikvmH264Decoder&) = delete;
@@ -79,7 +69,7 @@ private:
 void start_pikvm_video_stream(
     std::shared_ptr<PikvmWebSocket> ws,
     PikvmViewOptions options,
-    std::shared_ptr<PikvmD3D11Context> d3d11_context,
+    std::shared_ptr<PikvmVideoHardware> hardware,
     const std::atomic_bool& stop_requested,
     const std::atomic_bool& video_decode_paused,
     std::function<void(std::size_t)> on_data,

@@ -100,6 +100,7 @@ add_executable(
   src/backends/pikvm/pikvm_input.cpp
   src/backends/pikvm/pikvm_session.cpp
   src/backends/pikvm/pikvm_video.cpp
+  src/backends/pikvm/pikvm_video_hardware.cpp
   src/backends/pikvm/pikvm_view.cpp
   src/text.cpp
   src/tls.cpp

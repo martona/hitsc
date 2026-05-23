@@ -7,20 +7,16 @@
 #include "pikvm_input.hpp"
 #include "pikvm_session.hpp"
 #include "pikvm_video.hpp"
+#include "pikvm_video_hardware.hpp"
 #include "view_base.hpp"
 
 #include <SDL3/SDL.h>
-
-#include <d3d11.h>
-#include <dxgi.h>
-#include <wrl/client.h>
 
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
-#include <cwchar>
 #include <cstdint>
 #include <exception>
 #include <functional>
@@ -38,7 +34,6 @@
 #include <vector>
 
 namespace hitsc {
-using Microsoft::WRL::ComPtr;
 
 namespace {
 
@@ -139,7 +134,7 @@ struct PikvmNetworkStopHandles {
 
 struct PikvmRendererSetup {
     SDL_Renderer* renderer = nullptr;
-    std::shared_ptr<PikvmD3D11Context> d3d11_context;
+    std::shared_ptr<PikvmVideoHardware> hardware;
 };
 
 using PikvmKeyDownState = std::array<bool, SDL_SCANCODE_COUNT>;
@@ -157,167 +152,13 @@ std::string format_ms(double value)
     return out.str();
 }
 
-std::string wide_to_utf8(const wchar_t* value)
-{
-    if (value == nullptr || value[0] == L'\0') {
-        return {};
-    }
-
-    const int wide_length = static_cast<int>(std::wcslen(value));
-    const int length = WideCharToMultiByte(
-        CP_UTF8,
-        0,
-        value,
-        wide_length,
-        nullptr,
-        0,
-        nullptr,
-        nullptr);
-    if (length <= 0) {
-        return {};
-    }
-
-    std::string result(static_cast<std::size_t>(length), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, value, wide_length, result.data(), length, nullptr, nullptr);
-    return result;
-}
-
-bool d3d11_device_is_software_adapter(ID3D11Device* device, std::string& description)
-{
-    if (device == nullptr) {
-        return false;
-    }
-
-    ComPtr<IDXGIDevice> dxgi_device;
-    if (FAILED(device->QueryInterface(IID_PPV_ARGS(&dxgi_device)))) {
-        return false;
-    }
-
-    ComPtr<IDXGIAdapter> adapter;
-    if (FAILED(dxgi_device->GetAdapter(&adapter))) {
-        return false;
-    }
-
-    ComPtr<IDXGIAdapter1> adapter1;
-    if (FAILED(adapter.As(&adapter1))) {
-        return false;
-    }
-
-    DXGI_ADAPTER_DESC1 desc{};
-    if (FAILED(adapter1->GetDesc1(&desc))) {
-        return false;
-    }
-    description = wide_to_utf8(desc.Description);
-    return (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0;
-}
-
-SDL_Renderer* try_create_named_renderer(
-    SDL_Window* window,
-    const char* name,
-    std::string& error)
-{
-    SDL_PropertiesID props = SDL_CreateProperties();
-    if (props == 0) {
-        error = SDL_GetError();
-        return nullptr;
-    }
-
-    if (!SDL_SetPointerProperty(props, SDL_PROP_RENDERER_CREATE_WINDOW_POINTER, window)
-        || !SDL_SetStringProperty(props, SDL_PROP_RENDERER_CREATE_NAME_STRING, name)) {
-        error = SDL_GetError();
-        SDL_DestroyProperties(props);
-        return nullptr;
-    }
-
-    SDL_Renderer* renderer = SDL_CreateRendererWithProperties(props);
-    if (renderer == nullptr) {
-        error = SDL_GetError();
-    }
-    SDL_DestroyProperties(props);
-    return renderer;
-}
-
-std::shared_ptr<PikvmD3D11Context> query_renderer_d3d11_context(SDL_Renderer* renderer)
-{
-    SDL_PropertiesID props = SDL_GetRendererProperties(renderer);
-    if (props == 0) {
-        return {};
-    }
-
-    auto* device = static_cast<ID3D11Device*>(
-        SDL_GetPointerProperty(props, SDL_PROP_RENDERER_D3D11_DEVICE_POINTER, nullptr));
-    if (device == nullptr) {
-        return {};
-    }
-
-    auto context = std::make_shared<PikvmD3D11Context>();
-    context->device = device;
-    context->lock = std::make_shared<std::recursive_mutex>();
-    return context;
-}
-
-ComPtr<ID3D11DeviceContext> get_immediate_d3d11_context(
-    const std::shared_ptr<PikvmD3D11Context>& d3d11_context)
-{
-    ComPtr<ID3D11DeviceContext> immediate_context;
-    if (d3d11_context && d3d11_context->device != nullptr) {
-        d3d11_context->device->GetImmediateContext(&immediate_context);
-    }
-    return immediate_context;
-}
-
 PikvmRendererSetup create_pikvm_renderer(SDL_Window* window, const PikvmViewOptions& options)
 {
-    const bool allow_d3d11 = options.video_decode != PikvmVideoDecodeMode::software;
-    if (allow_d3d11) {
-        std::string d3d11_error;
-        SDL_Renderer* renderer = try_create_named_renderer(window, "direct3d11", d3d11_error);
-        if (renderer != nullptr) {
-            std::shared_ptr<PikvmD3D11Context> d3d11_context =
-                query_renderer_d3d11_context(renderer);
-            std::string adapter_description;
-            const bool software_adapter =
-                d3d11_context
-                && d3d11_device_is_software_adapter(d3d11_context->device, adapter_description);
-
-            if (d3d11_context && !software_adapter) {
-                if (options.login.verbose) {
-                    log_info() << "SDL renderer selected for PiKVM"
-                               << " name=" << SDL_GetRendererName(renderer)
-                               << " d3d11=yes"
-                               << " adapter=\"" << adapter_description << "\"";
-                }
-                return {renderer, d3d11_context};
-            }
-
-            if (options.video_decode == PikvmVideoDecodeMode::d3d11) {
-                SDL_DestroyRenderer(renderer);
-                if (software_adapter) {
-                    throw UserError(
-                        "SDL direct3d11 renderer is using a software adapter"
-                        + (adapter_description.empty() ? std::string{} : ": " + adapter_description));
-                }
-                throw UserError("SDL direct3d11 renderer did not expose a D3D11 device");
-            }
-
-            if (options.login.verbose) {
-                if (software_adapter) {
-                    log_warning() << "D3D11 hardware decode disabled for software adapter"
-                                  << (adapter_description.empty() ? "" : ": ")
-                                  << adapter_description;
-                } else {
-                    log_warning() << "D3D11 hardware decode disabled; renderer did not expose a D3D11 device";
-                }
-            }
-            return {renderer, {}};
-        }
-
-        if (options.video_decode == PikvmVideoDecodeMode::d3d11) {
-            throw UserError("failed to create SDL direct3d11 renderer: " + d3d11_error);
-        }
-        if (options.login.verbose) {
-            log_warning() << "failed to create SDL direct3d11 renderer; using default renderer: "
-                          << d3d11_error;
+    if (options.video_decode != PikvmVideoDecodeMode::software) {
+        PikvmVideoHardwareRenderer setup =
+            try_create_pikvm_video_hardware_renderer(window, options.login.verbose);
+        if (setup.renderer != nullptr && setup.hardware) {
+            return {setup.renderer, std::move(setup.hardware)};
         }
     }
 
@@ -328,7 +169,7 @@ PikvmRendererSetup create_pikvm_renderer(SDL_Window* window, const PikvmViewOpti
     if (options.login.verbose) {
         log_info() << "SDL renderer selected for PiKVM"
                    << " name=" << SDL_GetRendererName(renderer)
-                   << " d3d11=no";
+                   << " hardware=no";
     }
     return {renderer, {}};
 }
@@ -370,7 +211,7 @@ SDL_PixelFormat sdl_pixel_format_for_frame(PikvmVideoPixelFormat format)
         return SDL_PIXELFORMAT_IYUV;
     case PikvmVideoPixelFormat::nv12:
         return SDL_PIXELFORMAT_NV12;
-    case PikvmVideoPixelFormat::d3d11_nv12:
+    case PikvmVideoPixelFormat::hardware_nv12:
         return SDL_PIXELFORMAT_NV12;
     }
     return SDL_PIXELFORMAT_RGBA32;
@@ -408,129 +249,9 @@ void update_pikvm_texture(SDL_Texture* texture, const PikvmVideoFrame& frame)
             throw_sdl_error("SDL_UpdateNVTexture");
         }
         return;
-    case PikvmVideoPixelFormat::d3d11_nv12:
-        throw std::runtime_error("D3D11 PiKVM frames must be uploaded with the D3D11 path");
+    case PikvmVideoPixelFormat::hardware_nv12:
+        throw std::runtime_error("hardware PiKVM frames must be uploaded with the hardware path");
     }
-}
-
-bool d3d11_frame_can_wrap_direct(const PikvmVideoFrame& frame)
-{
-    if (frame.format != PikvmVideoPixelFormat::d3d11_nv12 || frame.d3d11_texture == nullptr) {
-        return false;
-    }
-
-    D3D11_TEXTURE2D_DESC desc{};
-    frame.d3d11_texture->GetDesc(&desc);
-    return desc.ArraySize == 1
-        && frame.d3d11_array_slice == 0
-        && desc.Format == DXGI_FORMAT_NV12
-        && (desc.BindFlags & D3D11_BIND_SHADER_RESOURCE) != 0;
-}
-
-SDL_Texture* try_create_wrapped_d3d11_texture(
-    SDL_Renderer* renderer,
-    const PikvmVideoFrame& frame,
-    std::string& error)
-{
-    SDL_PropertiesID props = SDL_CreateProperties();
-    if (props == 0) {
-        error = SDL_GetError();
-        return nullptr;
-    }
-
-    const bool ok =
-        SDL_SetNumberProperty(
-            props,
-            SDL_PROP_TEXTURE_CREATE_FORMAT_NUMBER,
-            static_cast<Sint64>(SDL_PIXELFORMAT_NV12))
-        && SDL_SetNumberProperty(
-            props,
-            SDL_PROP_TEXTURE_CREATE_ACCESS_NUMBER,
-            static_cast<Sint64>(SDL_TEXTUREACCESS_STATIC))
-        && SDL_SetNumberProperty(
-            props,
-            SDL_PROP_TEXTURE_CREATE_WIDTH_NUMBER,
-            frame.width)
-        && SDL_SetNumberProperty(
-            props,
-            SDL_PROP_TEXTURE_CREATE_HEIGHT_NUMBER,
-            frame.height)
-        && SDL_SetPointerProperty(
-            props,
-            SDL_PROP_TEXTURE_CREATE_D3D11_TEXTURE_POINTER,
-            frame.d3d11_texture);
-    if (!ok) {
-        error = SDL_GetError();
-        SDL_DestroyProperties(props);
-        return nullptr;
-    }
-
-    SDL_Texture* texture = SDL_CreateTextureWithProperties(renderer, props);
-    if (texture == nullptr) {
-        error = SDL_GetError();
-    }
-    SDL_DestroyProperties(props);
-    return texture;
-}
-
-ID3D11Texture2D* sdl_texture_d3d11_resource(SDL_Texture* texture)
-{
-    SDL_PropertiesID props = SDL_GetTextureProperties(texture);
-    if (props == 0) {
-        return nullptr;
-    }
-    return static_cast<ID3D11Texture2D*>(
-        SDL_GetPointerProperty(props, SDL_PROP_TEXTURE_D3D11_TEXTURE_POINTER, nullptr));
-}
-
-void copy_d3d11_frame_to_texture(
-    SDL_Texture* texture,
-    const PikvmVideoFrame& frame,
-    const std::shared_ptr<PikvmD3D11Context>& d3d11_context)
-{
-    if (!d3d11_context || d3d11_context->device == nullptr || !d3d11_context->lock) {
-        throw std::runtime_error("D3D11 PiKVM frame received without a D3D11 renderer context");
-    }
-    if (frame.d3d11_texture == nullptr) {
-        throw std::runtime_error("D3D11 PiKVM frame is missing its source texture");
-    }
-
-    ID3D11Texture2D* destination = sdl_texture_d3d11_resource(texture);
-    if (destination == nullptr) {
-        throw std::runtime_error("SDL texture did not expose a D3D11 texture");
-    }
-
-    D3D11_TEXTURE2D_DESC source_desc{};
-    D3D11_TEXTURE2D_DESC destination_desc{};
-    frame.d3d11_texture->GetDesc(&source_desc);
-    destination->GetDesc(&destination_desc);
-    if (source_desc.Format != DXGI_FORMAT_NV12 || destination_desc.Format != DXGI_FORMAT_NV12) {
-        throw std::runtime_error("D3D11 PiKVM texture copy requires NV12 textures");
-    }
-    if (frame.d3d11_array_slice < 0
-        || static_cast<UINT>(frame.d3d11_array_slice) >= source_desc.ArraySize) {
-        throw std::runtime_error("D3D11 PiKVM frame has an invalid texture array slice");
-    }
-
-    const UINT source_subresource = D3D11CalcSubresource(
-        0,
-        static_cast<UINT>(frame.d3d11_array_slice),
-        source_desc.MipLevels);
-
-    std::lock_guard lock(*d3d11_context->lock);
-    ComPtr<ID3D11DeviceContext> immediate_context = get_immediate_d3d11_context(d3d11_context);
-    if (!immediate_context) {
-        throw std::runtime_error("failed to get D3D11 immediate context");
-    }
-    immediate_context->CopySubresourceRegion(
-        destination,
-        0,
-        0,
-        0,
-        0,
-        frame.d3d11_texture,
-        source_subresource,
-        nullptr);
 }
 
 void set_pikvm_status(PikvmViewState& state, std::string status)
@@ -612,12 +333,14 @@ void store_pikvm_frame(PikvmViewState& state, PikvmVideoFrame frame)
     state.push_render_event();
 }
 
-void release_pikvm_latest_frame(PikvmViewState& state)
+void release_pikvm_latest_frame(
+    PikvmViewState& state,
+    const std::shared_ptr<PikvmVideoHardware>& hardware)
 {
     std::shared_ptr<const PikvmVideoFrame> frame = state.frames.clear();
 
-    if (frame && frame->d3d11_lock) {
-        std::lock_guard lock(*frame->d3d11_lock);
+    if (frame && hardware && frame->format == PikvmVideoPixelFormat::hardware_nv12) {
+        auto lock = hardware->lock();
         frame.reset();
     }
 }
@@ -680,15 +403,15 @@ void maybe_log_pikvm_frame_latency(
 
 void destroy_pikvm_texture(
     SDL_Texture*& texture,
-    const std::shared_ptr<PikvmD3D11Context>& d3d11_context)
+    const std::shared_ptr<PikvmVideoHardware>& hardware)
 {
     if (texture == nullptr) {
         return;
     }
 
-    std::unique_lock<std::recursive_mutex> d3d11_lock;
-    if (d3d11_context && d3d11_context->lock) {
-        d3d11_lock = std::unique_lock<std::recursive_mutex>(*d3d11_context->lock);
+    std::unique_lock<std::recursive_mutex> hardware_lock;
+    if (hardware) {
+        hardware_lock = hardware->lock();
     }
     SDL_DestroyTexture(texture);
     texture = nullptr;
@@ -699,29 +422,29 @@ void reset_pikvm_texture_state(
     int& texture_width,
     int& texture_height,
     PikvmVideoPixelFormat& texture_format,
-    bool& texture_wraps_d3d11_source,
-    ID3D11Texture2D*& texture_wrapped_d3d11_source,
-    const std::shared_ptr<PikvmD3D11Context>& d3d11_context)
+    bool& texture_wraps_hardware_source,
+    const void*& texture_wrapped_hardware_source,
+    const std::shared_ptr<PikvmVideoHardware>& hardware)
 {
-    destroy_pikvm_texture(texture, d3d11_context);
+    destroy_pikvm_texture(texture, hardware);
     texture_width = 0;
     texture_height = 0;
     texture_format = PikvmVideoPixelFormat::rgba32;
-    texture_wraps_d3d11_source = false;
-    texture_wrapped_d3d11_source = nullptr;
+    texture_wraps_hardware_source = false;
+    texture_wrapped_hardware_source = nullptr;
 }
 
 void destroy_pikvm_renderer(
     SDL_Renderer*& renderer,
-    const std::shared_ptr<PikvmD3D11Context>& d3d11_context)
+    const std::shared_ptr<PikvmVideoHardware>& hardware)
 {
     if (renderer == nullptr) {
         return;
     }
 
-    std::unique_lock<std::recursive_mutex> d3d11_lock;
-    if (d3d11_context && d3d11_context->lock) {
-        d3d11_lock = std::unique_lock<std::recursive_mutex>(*d3d11_context->lock);
+    std::unique_lock<std::recursive_mutex> hardware_lock;
+    if (hardware) {
+        hardware_lock = hardware->lock();
     }
     SDL_DestroyRenderer(renderer);
     renderer = nullptr;
@@ -810,7 +533,7 @@ void run_pikvm_control_worker(
 void run_pikvm_video_worker(
     PikvmViewOptions options,
     BmcWebSocketConnectionPtr websocket,
-    std::shared_ptr<PikvmD3D11Context> d3d11_context,
+    std::shared_ptr<PikvmVideoHardware> hardware,
     PikvmViewState& state,
     std::atomic_bool& stop_requested,
     std::shared_ptr<PikvmVideoStopState> stop_state,
@@ -829,7 +552,7 @@ void run_pikvm_video_worker(
         start_pikvm_video_stream(
             video_ws,
             options,
-            std::move(d3d11_context),
+            std::move(hardware),
             stop_requested,
             state.video_decode_paused,
             [&](std::size_t bytes) {
@@ -852,7 +575,7 @@ void run_pikvm_video_worker(
 
 void run_pikvm_network_session(
     const PikvmViewOptions& options,
-    std::shared_ptr<PikvmD3D11Context> d3d11_context,
+    std::shared_ptr<PikvmVideoHardware> hardware,
     PikvmViewState& state,
     std::atomic_bool& stop_requested)
 {
@@ -936,7 +659,7 @@ void run_pikvm_network_session(
             run_pikvm_video_worker,
             options,
             video_websocket.connection,
-            std::move(d3d11_context),
+            std::move(hardware),
             std::ref(state),
             std::ref(stop_requested),
             video_stop_state,
@@ -987,8 +710,8 @@ private:
     SDL_Renderer* create_renderer(SDL_Window* window) override
     {
         PikvmRendererSetup renderer_setup = create_pikvm_renderer(window, options_);
-        d3d11_context_ = renderer_setup.d3d11_context;
-        if (!d3d11_context_ && network_options_.video_decode == PikvmVideoDecodeMode::auto_select) {
+        hardware_ = renderer_setup.hardware;
+        if (!hardware_ && network_options_.video_decode == PikvmVideoDecodeMode::auto_select) {
             network_options_.video_decode = PikvmVideoDecodeMode::software;
         }
         return renderer_setup.renderer;
@@ -997,17 +720,17 @@ private:
     void destroy_renderer(SDL_Renderer* renderer) override
     {
         SDL_Renderer* renderer_to_destroy = renderer;
-        destroy_pikvm_renderer(renderer_to_destroy, d3d11_context_);
-        d3d11_context_.reset();
+        destroy_pikvm_renderer(renderer_to_destroy, hardware_);
+        hardware_.reset();
     }
 
     void start_network(KvmNetworkWorker& network) override
     {
         PikvmViewOptions network_options = network_options_;
         std::shared_ptr<PikvmViewState> state = state_;
-        network.start([network_options, d3d11_context = d3d11_context_, state](
+        network.start([network_options, hardware = hardware_, state](
                           std::atomic_bool& stop_requested) {
-            run_pikvm_network_session(network_options, d3d11_context, *state, stop_requested);
+            run_pikvm_network_session(network_options, hardware, *state, stop_requested);
         });
     }
 
@@ -1018,8 +741,8 @@ private:
             maybe_log_pikvm_frame_latency(frame_latency_, last_frame_latency_log_, true);
         }
         pending_present_latency_frame_.reset();
-        release_pikvm_latest_frame(*state_);
-        destroy_pikvm_texture(texture_, d3d11_context_);
+        release_pikvm_latest_frame(*state_, hardware_);
+        destroy_pikvm_texture(texture_, hardware_);
     }
 
     void on_close() override
@@ -1031,15 +754,15 @@ private:
     {
         state_->video_decode_paused.store(true);
         pending_present_latency_frame_.reset();
-        release_pikvm_latest_frame(*state_);
+        release_pikvm_latest_frame(*state_, hardware_);
         reset_pikvm_texture_state(
             texture_,
             texture_width_,
             texture_height_,
             texture_format_,
-            texture_wraps_d3d11_source_,
-            texture_wrapped_d3d11_source_,
-            d3d11_context_);
+            texture_wraps_hardware_source_,
+            texture_wrapped_hardware_source_,
+            hardware_);
         last_sequence_ = 0;
     }
 
@@ -1077,9 +800,9 @@ private:
             return;
         }
 
-        std::unique_lock<std::recursive_mutex> d3d11_render_lock;
-        if (d3d11_context_ && d3d11_context_->lock) {
-            d3d11_render_lock = std::unique_lock<std::recursive_mutex>(*d3d11_context_->lock);
+        std::unique_lock<std::recursive_mutex> hardware_render_lock;
+        if (hardware_) {
+            hardware_render_lock = hardware_->lock();
         }
 
         clear_background();
@@ -1226,14 +949,14 @@ private:
             return;
         }
 
-        std::unique_lock<std::recursive_mutex> d3d11_render_lock;
-        if (d3d11_context_ && d3d11_context_->lock) {
-            d3d11_render_lock = std::unique_lock<std::recursive_mutex>(*d3d11_context_->lock);
+        std::unique_lock<std::recursive_mutex> hardware_render_lock;
+        if (hardware_) {
+            hardware_render_lock = hardware_->lock();
         }
 
         last_sequence_ = frame->sequence;
-        if (frame->format == PikvmVideoPixelFormat::d3d11_nv12) {
-            upload_d3d11_frame(*frame);
+        if (frame->format == PikvmVideoPixelFormat::hardware_nv12) {
+            upload_hardware_frame(*frame);
         } else {
             upload_software_frame(*frame);
         }
@@ -1242,28 +965,33 @@ private:
         render_needed = true;
     }
 
-    void upload_d3d11_frame(const PikvmVideoFrame& frame)
+    void upload_hardware_frame(const PikvmVideoFrame& frame)
     {
-        const bool direct_wrap =
-            !d3d11_direct_wrap_disabled_ && d3d11_frame_can_wrap_direct(frame);
-        if (direct_wrap) {
-            try_wrap_d3d11_frame(frame);
+        if (!hardware_) {
+            throw std::runtime_error("hardware PiKVM frame received without a hardware video backend");
         }
 
-        if (texture_ == nullptr || !texture_wraps_d3d11_source_) {
-            ensure_d3d11_copy_texture(frame);
-            copy_d3d11_frame_to_texture(texture_, frame, d3d11_context_);
+        const bool direct_wrap =
+            !hardware_direct_wrap_disabled_ && hardware_->frame_can_wrap_direct(frame);
+        if (direct_wrap) {
+            try_wrap_hardware_frame(frame);
+        }
+
+        if (texture_ == nullptr || !texture_wraps_hardware_source_) {
+            ensure_hardware_copy_texture(frame);
+            hardware_->copy_frame_to_texture(texture_, frame);
         }
     }
 
-    void try_wrap_d3d11_frame(const PikvmVideoFrame& frame)
+    void try_wrap_hardware_frame(const PikvmVideoFrame& frame)
     {
+        const void* source_id = hardware_->frame_source_id(frame);
         if (texture_ != nullptr
             && texture_width_ == frame.width
             && texture_height_ == frame.height
             && texture_format_ == frame.format
-            && texture_wraps_d3d11_source_
-            && texture_wrapped_d3d11_source_ == frame.d3d11_texture) {
+            && texture_wraps_hardware_source_
+            && texture_wrapped_hardware_source_ == source_id) {
             return;
         }
 
@@ -1273,38 +1001,40 @@ private:
         }
 
         std::string wrap_error;
-        texture_ = try_create_wrapped_d3d11_texture(renderer(), frame, wrap_error);
+        texture_ = hardware_->try_create_wrapped_texture(renderer(), frame, wrap_error);
         if (texture_ != nullptr) {
             texture_width_ = frame.width;
             texture_height_ = frame.height;
             texture_format_ = frame.format;
-            texture_wraps_d3d11_source_ = true;
-            texture_wrapped_d3d11_source_ = frame.d3d11_texture;
+            texture_wraps_hardware_source_ = true;
+            texture_wrapped_hardware_source_ = source_id;
             if (options_.login.verbose) {
-                log_info() << "wrapped PiKVM D3D11 video texture directly";
+                log_info() << "wrapped PiKVM hardware video texture directly"
+                           << " backend=" << hardware_->name();
             }
             return;
         }
 
-        d3d11_direct_wrap_disabled_ = true;
+        hardware_direct_wrap_disabled_ = true;
         texture_width_ = 0;
         texture_height_ = 0;
         texture_format_ = PikvmVideoPixelFormat::rgba32;
-        texture_wraps_d3d11_source_ = false;
-        texture_wrapped_d3d11_source_ = nullptr;
+        texture_wraps_hardware_source_ = false;
+        texture_wrapped_hardware_source_ = nullptr;
         if (options_.login.verbose) {
-            log_warning() << "direct D3D11 texture wrap failed; using GPU copy: "
-                          << wrap_error;
+            log_warning() << "direct hardware texture wrap failed; using GPU copy"
+                          << " backend=" << hardware_->name()
+                          << " error=" << wrap_error;
         }
     }
 
-    void ensure_d3d11_copy_texture(const PikvmVideoFrame& frame)
+    void ensure_hardware_copy_texture(const PikvmVideoFrame& frame)
     {
         if (texture_ != nullptr
             && texture_width_ == frame.width
             && texture_height_ == frame.height
             && texture_format_ == frame.format
-            && !texture_wraps_d3d11_source_) {
+            && !texture_wraps_hardware_source_) {
             return;
         }
 
@@ -1318,16 +1048,16 @@ private:
             frame.width,
             frame.height);
         if (texture_ == nullptr) {
-            throw_sdl_error("SDL_CreateTexture(D3D11 NV12)");
+            throw_sdl_error("SDL_CreateTexture(hardware NV12)");
         }
-        if (sdl_texture_d3d11_resource(texture_) == nullptr) {
-            throw std::runtime_error("SDL NV12 texture did not expose a D3D11 resource");
+        if (!hardware_->texture_can_receive_copy(texture_)) {
+            throw std::runtime_error("SDL NV12 texture did not expose a hardware video resource");
         }
         texture_width_ = frame.width;
         texture_height_ = frame.height;
         texture_format_ = frame.format;
-        texture_wraps_d3d11_source_ = false;
-        texture_wrapped_d3d11_source_ = nullptr;
+        texture_wraps_hardware_source_ = false;
+        texture_wrapped_hardware_source_ = nullptr;
     }
 
     void upload_software_frame(const PikvmVideoFrame& frame)
@@ -1336,7 +1066,7 @@ private:
             || texture_width_ != frame.width
             || texture_height_ != frame.height
             || texture_format_ != frame.format
-            || texture_wraps_d3d11_source_) {
+            || texture_wraps_hardware_source_) {
             if (texture_ != nullptr) {
                 SDL_DestroyTexture(texture_);
             }
@@ -1352,8 +1082,8 @@ private:
             texture_width_ = frame.width;
             texture_height_ = frame.height;
             texture_format_ = frame.format;
-            texture_wraps_d3d11_source_ = false;
-            texture_wrapped_d3d11_source_ = nullptr;
+            texture_wraps_hardware_source_ = false;
+            texture_wrapped_hardware_source_ = nullptr;
         }
 
         update_pikvm_texture(texture_, frame);
@@ -1365,13 +1095,13 @@ private:
     PikvmKeyDownState key_down_{};
     PikvmMouseButtonDownState mouse_down_{};
     SDL_Texture* texture_ = nullptr;
-    std::shared_ptr<PikvmD3D11Context> d3d11_context_;
+    std::shared_ptr<PikvmVideoHardware> hardware_;
     int texture_width_ = 0;
     int texture_height_ = 0;
     PikvmVideoPixelFormat texture_format_ = PikvmVideoPixelFormat::rgba32;
-    bool texture_wraps_d3d11_source_ = false;
-    bool d3d11_direct_wrap_disabled_ = false;
-    ID3D11Texture2D* texture_wrapped_d3d11_source_ = nullptr;
+    bool texture_wraps_hardware_source_ = false;
+    bool hardware_direct_wrap_disabled_ = false;
+    const void* texture_wrapped_hardware_source_ = nullptr;
     PikvmFrameLatencyBatch frame_latency_;
     PikvmClock::time_point last_frame_latency_log_ = PikvmClock::now();
     std::shared_ptr<const PikvmVideoFrame> pending_present_latency_frame_;

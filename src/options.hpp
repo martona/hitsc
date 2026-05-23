@@ -39,7 +39,6 @@ struct AtenViewOptions {
 enum class PikvmVideoDecodeMode {
     auto_select,
     software,
-    d3d11,
 };
 
 struct PikvmViewOptions {
