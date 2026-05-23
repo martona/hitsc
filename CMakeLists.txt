@@ -186,6 +186,9 @@ target_link_libraries(
 )
 
 if(WIN32)
+  enable_language(RC)
+  target_sources(hitsc PRIVATE src/resources/hitsc.rc)
+
   target_link_libraries(hitsc PRIVATE Crypt32 D3d11 Dbghelp Dwmapi Dxgi Iphlpapi Ws2_32)
   set_target_properties(hitsc PROPERTIES WIN32_EXECUTABLE TRUE)
 
