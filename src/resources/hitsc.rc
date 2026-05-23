@@ -21,7 +21,7 @@ BEGIN
     BEGIN
       VALUE "Author", "Marton Anka\0"
       VALUE "CompanyName", "Marton Anka\0"
-      VALUE "FileDescription", "HTTPS IPMI terminal services client\0"
+      VALUE "FileDescription", "HTTPS IPMI iKVM native client\0"
       VALUE "FileVersion", "1.0.0.1\0"
       VALUE "InternalName", "hitsc\0"
       VALUE "LegalCopyright", "Copyright (C) 2026 Marton Anka\0"
