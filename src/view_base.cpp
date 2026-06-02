@@ -1,10 +1,12 @@
 #include "view_base.hpp"
 
 #include "log.hpp"
+#include "view_console.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
+#include <string>
 
 namespace hitsc {
 namespace {
@@ -12,6 +14,20 @@ namespace {
 void throw_view_sdl_error(const char* context)
 {
     throw std::runtime_error(std::string(context) + ": " + SDL_GetError());
+}
+
+std::string message_from_exception(std::exception_ptr exception)
+{
+    if (!exception) {
+        return {};
+    }
+    try {
+        std::rethrow_exception(exception);
+    } catch (const std::exception& error) {
+        return error.what();
+    } catch (...) {
+        return "Unknown error";
+    }
 }
 
 } // namespace
@@ -28,6 +44,12 @@ std::exception_ptr ViewStateBase::take_exception()
 {
     std::lock_guard lock(control_mutex);
     return exception_;
+}
+
+void ViewStateBase::clear_exception()
+{
+    std::lock_guard lock(control_mutex);
+    exception_ = nullptr;
 }
 
 void ViewStateBase::set_force_close(std::function<void()> force_close)
@@ -229,6 +251,10 @@ void KvmViewBase::initialize_sdl()
     refresh_title();
 
     renderer_ = create_renderer(window_);
+
+    // Called synchronously during the OS modal move/resize loop (when the main
+    // event loop is blocked), so the view reflows live as the window is dragged.
+    SDL_AddEventWatch(on_event_watch, this);
 }
 
 void KvmViewBase::cleanup_sdl()
@@ -237,6 +263,7 @@ void KvmViewBase::cleanup_sdl()
         return;
     }
 
+    SDL_RemoveEventWatch(on_event_watch, this);
     SDL_CaptureMouse(false);
     before_sdl_cleanup();
 
@@ -258,12 +285,14 @@ void KvmViewBase::event_loop()
 {
     bool running = true;
     bool visible = true;
-    bool first_render = true;
     bool close_event_logged = false;
     std::uint64_t last_status_tick = 0;
 
     while (running) {
-        bool render_needed = first_render;
+        const ViewRenderState render_state = state_.view_status.render_state();
+        bool render_needed = false;
+        bool retry_requested = false;
+
         SDL_Event event{};
         bool have_event = SDL_WaitEventTimeout(&event, 16);
         while (have_event) {
@@ -300,29 +329,135 @@ void KvmViewBase::event_loop()
                 render_needed = true;
             } else if (event.type == SDL_EVENT_WINDOW_FOCUS_LOST) {
                 on_focus_lost();
-            } else {
+            } else if (session_ended_) {
+                // Error/disconnected console: only the retry and close keys.
+                if (event.type == SDL_EVENT_KEY_DOWN) {
+                    if (event.key.scancode == SDL_SCANCODE_R) {
+                        retry_requested = true;
+                    } else if (event.key.scancode == SDL_SCANCODE_ESCAPE) {
+                        running = false;
+                    }
+                }
+            } else if (render_state.connected) {
+                // Live session — input flows even when there's no video (so the
+                // user can wake a sleeping host display).
                 handle_event(event, render_needed);
+            } else if (event.type == SDL_EVENT_KEY_DOWN &&
+                       event.key.scancode == SDL_SCANCODE_ESCAPE) {
+                // Connecting console: Esc cancels.
+                running = false;
             }
             have_event = SDL_PollEvent(&event);
         }
 
-        if (visible) {
-            render_visible(render_needed, first_render);
+        if (retry_requested) {
+            do_retry();
+            first_render_ = true;
+            continue;
         }
 
         const std::uint64_t ticks = SDL_GetTicks();
+
+        if (visible) {
+            render_frame(render_needed);
+        }
+
         if (ticks - last_status_tick >= 1000) {
             last_status_tick = ticks;
             refresh_title();
         }
 
-        if (network_.done()) {
-            if (std::exception_ptr exception = state_.take_exception()) {
-                std::rethrow_exception(exception);
+        if (network_.done() && !session_ended_) {
+            session_ended_ = true;
+            const std::exception_ptr exception = state_.take_exception();
+            had_error_ = static_cast<bool>(exception);
+            error_message_ = message_from_exception(exception);
+            if (had_error_) {
+                log_error() << log_name_ << " session ended with error: " << error_message_;
+            } else {
+                log_info() << log_name_ << " session ended";
             }
-            running = false;
         }
     }
+}
+
+void KvmViewBase::render_frame(bool force)
+{
+    if (window_ == nullptr || renderer_ == nullptr) {
+        return;
+    }
+    if ((SDL_GetWindowFlags(window_) & (SDL_WINDOW_MINIMIZED | SDL_WINDOW_HIDDEN)) != 0) {
+        return;
+    }
+
+    const ViewRenderState render_state = state_.view_status.render_state();
+    ConsoleScreen screen;
+    if (build_console_screen(render_state, screen)) {
+        const std::uint64_t ticks = SDL_GetTicks();
+        if (force || last_console_render_ == 0 || ticks - last_console_render_ >= 150) {
+            last_console_render_ = ticks;
+            render_view_console(renderer_, window_, screen);
+        }
+    } else {
+        bool render_needed = force || first_render_;
+        render_visible(render_needed, first_render_);
+    }
+}
+
+bool KvmViewBase::build_console_screen(const ViewRenderState& render_state, ConsoleScreen& screen) const
+{
+    if (session_ended_) {
+        if (had_error_) {
+            screen.severity = ConsoleSeverity::Error;
+            screen.headline = "Connection failed";
+            screen.detail = error_message_;
+        } else {
+            screen.severity = ConsoleSeverity::Info;
+            screen.headline = "Disconnected";
+            screen.detail = "The session ended.";
+        }
+        screen.hint = "Press R to reconnect      Esc to close";
+        return true;
+    }
+    if (!render_state.connected) {
+        screen.severity = ConsoleSeverity::Info;
+        screen.headline = "Connecting to " + host_ + "...";
+        screen.hint = "Esc to cancel";
+        return true;
+    }
+    if (render_state.display_online.has_value() && !render_state.display_online.value()) {
+        screen.severity = ConsoleSeverity::Info;
+        screen.headline = "No video signal";
+        screen.detail = "The host display may be off or asleep.";
+        return true;
+    }
+    return false;
+}
+
+bool SDLCALL KvmViewBase::on_event_watch(void* userdata, SDL_Event* event)
+{
+    if (event != nullptr &&
+        (event->type == SDL_EVENT_WINDOW_RESIZED ||
+         event->type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED ||
+         event->type == SDL_EVENT_WINDOW_EXPOSED)) {
+        static_cast<KvmViewBase*>(userdata)->render_frame(true);
+    }
+    return true;
+}
+
+void KvmViewBase::do_retry()
+{
+    log_info() << log_name_ << " reconnect requested";
+    network_.stop();
+    network_started_ = false;
+    state_.clear_exception();
+    reset_for_reconnect();
+    state_.view_status.kvm_connection(false);
+    session_ended_ = false;
+    had_error_ = false;
+    error_message_.clear();
+    start_network(network_);
+    network_started_ = true;
 }
 
 } // namespace hitsc

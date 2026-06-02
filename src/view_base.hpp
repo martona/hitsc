@@ -1,5 +1,6 @@
 #pragma once
 
+#include "view_console.hpp"
 #include "view_status.hpp"
 
 #include <SDL3/SDL.h>
@@ -21,6 +22,7 @@ class ViewStateBase {
 public:
     void set_exception(std::exception_ptr exception);
     std::exception_ptr take_exception();
+    void clear_exception();
 
     void set_force_close(std::function<void()> force_close);
     std::function<void()> force_close_snapshot();
@@ -197,6 +199,11 @@ protected:
     virtual void on_minimized() = 0;
     virtual void on_restored() = 0;
     virtual void on_focus_lost() = 0;
+
+    // Drop any stale per-session state (frames, decoder, queues) so a
+    // user-initiated reconnect starts clean. Default is a no-op.
+    virtual void reset_for_reconnect() {}
+
     virtual void handle_event(const SDL_Event& event, bool& render_needed) = 0;
     virtual void render_visible(bool& render_needed, bool& first_render) = 0;
 
@@ -204,6 +211,10 @@ private:
     void initialize_sdl();
     void cleanup_sdl();
     void event_loop();
+    void do_retry();
+    void render_frame(bool force);
+    bool build_console_screen(const ViewRenderState& render_state, ConsoleScreen& screen) const;
+    static bool SDLCALL on_event_watch(void* userdata, SDL_Event* event);
 
     ViewStateBase& state_;
     KvmNetworkWorker network_;
@@ -213,6 +224,11 @@ private:
     SDL_Renderer* renderer_ = nullptr;
     bool sdl_initialized_ = false;
     bool network_started_ = false;
+    bool first_render_ = true;
+    bool session_ended_ = false;
+    bool had_error_ = false;
+    std::string error_message_;
+    std::uint64_t last_console_render_ = 0;
 };
 
 } // namespace hitsc

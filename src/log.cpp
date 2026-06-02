@@ -9,6 +9,9 @@
 #include <boost/log/utility/setup/common_attributes.hpp>
 #include <boost/log/utility/setup/console.hpp>
 
+#include <algorithm>
+#include <cstddef>
+#include <deque>
 #include <iomanip>
 #include <mutex>
 
@@ -25,6 +28,36 @@ using Logger = logging::sources::severity_logger_mt<trivial::severity_level>;
 Logger& logger()
 {
     static Logger instance;
+    return instance;
+}
+
+class LogRing {
+public:
+    void push(trivial::severity_level severity, std::string text)
+    {
+        std::lock_guard lock(mutex_);
+        entries_.push_back(LogEntry{severity, std::move(text)});
+        while (entries_.size() > kCapacity) {
+            entries_.pop_front();
+        }
+    }
+
+    std::vector<LogEntry> snapshot(std::size_t max_lines) const
+    {
+        std::lock_guard lock(mutex_);
+        const std::size_t count = std::min(max_lines, entries_.size());
+        return std::vector<LogEntry>(entries_.end() - static_cast<std::ptrdiff_t>(count), entries_.end());
+    }
+
+private:
+    static constexpr std::size_t kCapacity = 500;
+    mutable std::mutex mutex_;
+    std::deque<LogEntry> entries_;
+};
+
+LogRing& log_ring()
+{
+    static LogRing instance;
     return instance;
 }
 
@@ -79,12 +112,18 @@ void write_log(trivial::severity_level severity, std::string_view message)
             : message.substr(start, end - start);
         if (!line.empty()) {
             BOOST_LOG_SEV(logger(), severity) << line;
+            log_ring().push(severity, std::string(line));
         }
         if (end == std::string_view::npos) {
             break;
         }
         start = end + 1;
     }
+}
+
+std::vector<LogEntry> recent_log_lines(std::size_t max_lines)
+{
+    return log_ring().snapshot(max_lines);
 }
 
 LogLine::LogLine(trivial::severity_level severity)

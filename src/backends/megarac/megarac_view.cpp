@@ -196,6 +196,16 @@ private:
         aspeed_.destroy();
     }
 
+    void reset_for_reconnect() override
+    {
+        state_->frames.clear();
+        state_->cursors.clear();
+        state_->input.clear();
+        aspeed_.destroy();
+        aspeed_.reset_sequences();
+        input_.reset();
+    }
+
     void on_minimized() override
     {
         state_->frames.clear();

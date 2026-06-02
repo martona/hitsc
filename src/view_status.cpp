@@ -55,6 +55,12 @@ void ViewStatus::minimize()
     fps_ = 0.0;
 }
 
+ViewRenderState ViewStatus::render_state()
+{
+    std::lock_guard lock(mutex_);
+    return ViewRenderState{connected_, display_online_, frame_ready_};
+}
+
 std::string ViewStatus::title(std::string_view hostname)
 {
     std::lock_guard lock(mutex_);

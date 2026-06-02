@@ -721,6 +721,23 @@ private:
         destroy_pikvm_texture(texture_, hardware_);
     }
 
+    void reset_for_reconnect() override
+    {
+        input_.reset();
+        pending_present_latency_frame_.reset();
+        release_pikvm_latest_frame(*state_, hardware_);
+        reset_pikvm_texture_state(
+            texture_,
+            texture_width_,
+            texture_height_,
+            texture_format_,
+            texture_wraps_hardware_source_,
+            texture_wrapped_hardware_source_,
+            hardware_);
+        last_sequence_ = 0;
+        state_->video_decode_paused.store(false);
+    }
+
     void on_close() override
     {
         input_.reset();

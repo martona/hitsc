@@ -10,6 +10,14 @@
 
 namespace hitsc {
 
+// Snapshot of the fields the viewer needs to decide whether to draw video or the
+// on-window console (and which console state).
+struct ViewRenderState {
+    bool connected = false;
+    std::optional<bool> display_online;
+    bool frame_ready = false;
+};
+
 class ViewStatus {
 public:
     void data_received(std::size_t bytes);
@@ -17,6 +25,8 @@ public:
     void kvm_display_status(bool online);
     void kvm_connection(bool connected);
     void minimize();
+
+    ViewRenderState render_state();
 
     std::string title(std::string_view hostname);
 
