@@ -235,8 +235,8 @@ ApplicationWindow {
 
                         anchors.fill: parent
                         radius: 8
-                        color: hostTile.selected ? theme.panelHover : theme.panel
-                        border.color: hostTile.selected ? theme.borderHover : theme.border
+                        color: hostHover.hovered || hostTile.selected ? theme.panelHover : theme.panel
+                        border.color: hostHover.hovered || hostTile.selected ? theme.borderHover : theme.border
                         border.width: 1
 
                         Behavior on color {
@@ -248,9 +248,6 @@ ApplicationWindow {
 
                         HoverHandler {
                             id: hostHover
-
-                            onHoveredChanged: if (hovered)
-                                hostGrid.selectIndex(hostTile.index)
                         }
 
                         TapHandler {
@@ -443,7 +440,7 @@ ApplicationWindow {
                     anchors.fill: parent
                     radius: 13
                     color: theme.window
-                    opacity: addHostTile.selected ? 1.0 : 0.86
+                    opacity: addHostMouse.containsMouse || addHostTile.selected ? 1.0 : 0.86
 
                     Shape {
                         id: dashedOutline
@@ -494,7 +491,6 @@ ApplicationWindow {
                         anchors.fill: parent
                         hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
-                        onEntered: hostGrid.selectIndex(hostModel.count)
                         onClicked: {
                             hostGrid.selectIndex(hostModel.count)
                             Qt.callLater(addHostDialog.openFresh)
