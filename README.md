@@ -37,7 +37,7 @@ This is Windows-only for now but 99% portable, Linux/macOS soon.
 You will need to let `vcpkg` create a `C:\.vcpgk\` directory otherwise `qtdeclarative` won't build due to long paths. You can change the drive (and if you want to risk it, the path).
 
 ```powershell
-$env:VCPKG_INSTALL_OPTIONS="--x-buildtrees-root=C:\.vcpkg\b;--x-packages-root=C:\.vcpkg\p"
+[System.Environment]::SetEnvironmentVariable("VCPKG_INSTALL_OPTIONS", "--x-buildtrees-root=C:\.vcpkg\b;--x-packages-root=C:\.vcpkg\p;--clean-buildtrees-after-build;--clean-packages-after-build", "User")
 ```
 
 Then build. Note: QT will take about an hour.

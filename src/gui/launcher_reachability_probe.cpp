@@ -18,6 +18,8 @@
 #include <ws2tcpip.h>
 #include <iphlpapi.h>
 #include <icmpapi.h>
+
+#include "qt_win_string.hpp"
 #endif
 
 namespace hitsc {
@@ -64,13 +66,6 @@ bool ensure_winsock()
         initialized = WSAStartup(MAKEWORD(2, 2), &data) == 0;
     });
     return initialized;
-}
-
-std::wstring to_wide(const QString& value)
-{
-    return std::wstring(
-        reinterpret_cast<const wchar_t*>(value.utf16()),
-        static_cast<std::size_t>(value.size()));
 }
 
 std::size_t reply_buffer_size()

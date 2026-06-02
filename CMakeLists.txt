@@ -86,6 +86,9 @@ add_executable(
   src/gui/window_placement.hpp
   src/gui/window_prefs_store.cpp
   src/gui/window_prefs_store.hpp
+  src/gui/qt_win_string.hpp
+  src/gui/windows_registry.cpp
+  src/gui/windows_registry.hpp
   src/resources/hitsc_icons.qrc
   src/backends/megarac/megarac_view.cpp
   src/main.cpp
@@ -229,6 +232,7 @@ if(BUILD_TESTING)
     hitsc_tests
     src/gui/launcher_host_store.cpp
     src/gui/launcher_types.cpp
+    src/gui/windows_registry.cpp
     src/url.cpp
     tests/launcher_tests.cpp
   )
