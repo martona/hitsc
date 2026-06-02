@@ -4,6 +4,8 @@
 
 namespace hitsc {
 
-void run_aten_view(const AtenViewOptions& options);
+struct ViewWindow;
+
+void run_aten_view(const AtenViewOptions& options, const ViewWindow* handoff = nullptr);
 
 } // namespace hitsc

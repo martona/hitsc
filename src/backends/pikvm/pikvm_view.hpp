@@ -4,6 +4,8 @@
 
 namespace hitsc {
 
-void run_pikvm_view(const PikvmViewOptions& options);
+struct ViewWindow;
+
+void run_pikvm_view(const PikvmViewOptions& options, const ViewWindow* handoff = nullptr);
 
 } // namespace hitsc

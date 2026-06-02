@@ -32,6 +32,29 @@ std::string message_from_exception(std::exception_ptr exception)
 
 } // namespace
 
+ViewWindow make_view_window()
+{
+    if (!SDL_Init(SDL_INIT_VIDEO)) {
+        throw_view_sdl_error("SDL_Init");
+    }
+
+    const Uint32 frame_event_type = SDL_RegisterEvents(1);
+    if (frame_event_type == 0) {
+        std::string error = std::string("SDL_RegisterEvents: ") + SDL_GetError();
+        SDL_Quit();
+        throw std::runtime_error(std::move(error));
+    }
+
+    SDL_Window* window = SDL_CreateWindow("hitsc", 1024, 768, SDL_WINDOW_RESIZABLE);
+    if (window == nullptr) {
+        std::string error = std::string("SDL_CreateWindow: ") + SDL_GetError();
+        SDL_Quit();
+        throw std::runtime_error(std::move(error));
+    }
+
+    return ViewWindow{window, frame_event_type};
+}
+
 void ViewStateBase::set_exception(std::exception_ptr exception)
 {
     std::lock_guard lock(control_mutex);
@@ -231,23 +254,26 @@ void KvmViewBase::destroy_renderer(SDL_Renderer* renderer)
     SDL_DestroyRenderer(renderer);
 }
 
+void KvmViewBase::adopt_sdl(const ViewWindow& view_window)
+{
+    adopted_ = true;
+    adopted_window_ = view_window.window;
+    adopted_frame_event_type_ = view_window.frame_event_type;
+}
+
 void KvmViewBase::initialize_sdl()
 {
-    if (!SDL_Init(SDL_INIT_VIDEO)) {
-        throw_view_sdl_error("SDL_Init");
+    if (adopted_) {
+        window_ = adopted_window_;
+        sdl_initialized_ = true; // we own SDL teardown now
+        state_.set_frame_event_type(adopted_frame_event_type_);
+    } else {
+        const ViewWindow created = make_view_window();
+        sdl_initialized_ = true;
+        window_ = created.window;
+        state_.set_frame_event_type(created.frame_event_type);
     }
-    sdl_initialized_ = true;
 
-    const Uint32 frame_event_type = SDL_RegisterEvents(1);
-    if (frame_event_type == 0) {
-        throw_view_sdl_error("SDL_RegisterEvents");
-    }
-    state_.set_frame_event_type(frame_event_type);
-
-    window_ = SDL_CreateWindow("hitsc", 1024, 768, SDL_WINDOW_RESIZABLE);
-    if (window_ == nullptr) {
-        throw_view_sdl_error("SDL_CreateWindow");
-    }
     refresh_title();
 
     renderer_ = create_renderer(window_);

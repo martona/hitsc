@@ -271,10 +271,13 @@ private:
 
 } // namespace
 
-void run_megarac_view(const MegaracViewOptions& options)
+void run_megarac_view(const MegaracViewOptions& options, const ViewWindow* handoff)
 {
     try {
         MegaracView view(options);
+        if (handoff != nullptr) {
+            view.adopt_sdl(*handoff);
+        }
         view.run();
     } catch (...) {
         print_current_exception_with_stack(std::cerr, "megarac view ui thread");

@@ -219,10 +219,13 @@ private:
 
 } // namespace
 
-void run_aten_view(const AtenViewOptions& options)
+void run_aten_view(const AtenViewOptions& options, const ViewWindow* handoff)
 {
     try {
         AtenView view(options);
+        if (handoff != nullptr) {
+            view.adopt_sdl(*handoff);
+        }
         view.run();
     } catch (...) {
         print_current_exception_with_stack(std::cerr, "aten view ui thread");

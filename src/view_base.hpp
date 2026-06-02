@@ -18,6 +18,15 @@
 
 namespace hitsc {
 
+struct ViewWindow {
+    SDL_Window* window = nullptr;
+    Uint32 frame_event_type = 0;
+};
+
+// Initialize SDL video, register the per-frame event, and create the view
+// window. Throws on failure (tearing SDL back down if it had been initialized).
+ViewWindow make_view_window();
+
 class ViewStateBase {
 public:
     void set_exception(std::exception_ptr exception);
@@ -172,6 +181,11 @@ public:
 
     void run();
 
+    // Adopt a pre-created window/SDL context (the auto-detect bootstrap creates
+    // the window before the backend is known) instead of creating one. The view
+    // then owns SDL teardown. Call before run().
+    void adopt_sdl(const ViewWindow& view_window);
+
 protected:
     SDL_Window* window() const;
     SDL_Renderer* renderer() const;
@@ -224,6 +238,9 @@ private:
     SDL_Renderer* renderer_ = nullptr;
     bool sdl_initialized_ = false;
     bool network_started_ = false;
+    bool adopted_ = false;
+    SDL_Window* adopted_window_ = nullptr;
+    Uint32 adopted_frame_event_type_ = 0;
     bool first_render_ = true;
     bool session_ended_ = false;
     bool had_error_ = false;

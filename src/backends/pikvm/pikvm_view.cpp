@@ -981,10 +981,13 @@ private:
 
 } // namespace
 
-void run_pikvm_view(const PikvmViewOptions& options)
+void run_pikvm_view(const PikvmViewOptions& options, const ViewWindow* handoff)
 {
     try {
         PikvmView view(options);
+        if (handoff != nullptr) {
+            view.adopt_sdl(*handoff);
+        }
         view.run();
     } catch (const UserError&) {
         throw;

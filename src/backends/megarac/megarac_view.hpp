@@ -4,6 +4,8 @@
 
 namespace hitsc {
 
-void run_megarac_view(const MegaracViewOptions& options);
+struct ViewWindow;
+
+void run_megarac_view(const MegaracViewOptions& options, const ViewWindow* handoff = nullptr);
 
 } // namespace hitsc
