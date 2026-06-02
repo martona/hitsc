@@ -63,6 +63,72 @@ ApplicationWindow {
     palette.highlightedText: theme.highlightedText
     palette.placeholderText: theme.mutedText
 
+    header: ToolBar {
+        palette: root.palette
+
+        background: Rectangle {
+            color: theme.window
+
+            Rectangle {
+                anchors.bottom: parent.bottom
+                width: parent.width
+                height: 1
+                color: theme.border
+            }
+        }
+
+        RowLayout {
+            anchors.fill: parent
+            anchors.leftMargin: 10
+            anchors.rightMargin: 10
+
+            ToolButton {
+                id: menuButton
+
+                Layout.preferredWidth: 40
+                Layout.preferredHeight: 32
+                Layout.alignment: Qt.AlignVCenter
+                palette: root.palette
+
+                onClicked: appMenu.popup(menuButton, 0, menuButton.height + 4)
+
+                contentItem: Item {
+                    Column {
+                        anchors.centerIn: parent
+                        spacing: 4
+
+                        Repeater {
+                            model: 3
+
+                            delegate: Rectangle {
+                                width: 18
+                                height: 2
+                                radius: 1
+                                color: theme.text
+                            }
+                        }
+                    }
+                }
+            }
+
+            Item {
+                Layout.fillWidth: true
+            }
+        }
+
+        Menu {
+            id: appMenu
+
+            palette: root.palette
+
+            MenuItem {
+                text: "Add Host…"
+                palette: root.palette
+                onTriggered: addHostDialog.openFresh()
+            }
+        }
+    }
+
     ScrollView {
         id: hostScroll
 
@@ -80,7 +146,7 @@ ApplicationWindow {
             property int expandedTileHeight: 154
             property int compactTileHeight: 68
             property int extraCompactTileHeight: 44
-            property int tileCount: hostModel.count + 1
+            property int tileCount: hostModel.count
             property int expandedRows: Math.max(1, Math.ceil(tileCount / columnCount))
             property int expandedContentHeight: expandedRows * expandedTileHeight + Math.max(0, expandedRows - 1) * rowSpacing
             property int compactContentHeight: expandedRows * compactTileHeight + Math.max(0, expandedRows - 1) * rowSpacing
@@ -95,7 +161,7 @@ ApplicationWindow {
                 if (i < 0 || i >= tileCount)
                     return
                 currentIndex = i
-                const item = i < hostModel.count ? hostRepeater.itemAt(i) : addHostTile
+                const item = hostRepeater.itemAt(i)
                 if (item)
                     item.forceActiveFocus()
             }
@@ -414,90 +480,39 @@ ApplicationWindow {
                     }
                 }
             }
+        }
+    }
 
-            Item {
-                id: addHostTile
+    ColumnLayout {
+        id: emptyState
 
-                property color ghostColor: Qt.rgba(theme.text.r, theme.text.g, theme.text.b, theme.darkMode ? 0.46 : 0.42)
+        anchors.centerIn: parent
+        width: Math.min(parent.width - 80, 380)
+        visible: hostModel.count === 0
+        spacing: 8
 
-                Layout.preferredWidth: hostGrid.tileWidth
-                Layout.preferredHeight: hostGrid.tileHeight
-                activeFocusOnTab: true
+        Label {
+            text: "↖"
+            color: theme.mutedText
+            font.pixelSize: 40
+            Layout.alignment: Qt.AlignHCenter
+        }
 
-                readonly property bool selected: hostGrid.currentIndex === hostModel.count
+        Label {
+            text: "No hosts yet"
+            color: theme.text
+            font.pixelSize: 22
+            font.weight: Font.DemiBold
+            Layout.alignment: Qt.AlignHCenter
+        }
 
-                onActiveFocusChanged: if (activeFocus)
-                    hostGrid.currentIndex = hostModel.count
-
-                Keys.onReturnPressed: Qt.callLater(addHostDialog.openFresh)
-                Keys.onEnterPressed: Qt.callLater(addHostDialog.openFresh)
-                Keys.onPressed: function(event) {
-                    if (hostGrid.moveSelection(hostModel.count, event.key))
-                        event.accepted = true
-                }
-
-                Rectangle {
-                    anchors.fill: parent
-                    radius: 13
-                    color: theme.window
-                    opacity: addHostMouse.containsMouse || addHostTile.selected ? 1.0 : 0.86
-
-                    Shape {
-                        id: dashedOutline
-
-                        anchors.fill: parent
-                        anchors.margins: 4
-
-                        property real strokeWidth: 3.5
-                        property real cornerRadius: 13
-                        property real inset: strokeWidth / 2
-                        property real leftEdge: inset
-                        property real topEdge: inset
-                        property real rightEdge: Math.max(leftEdge, width - inset)
-                        property real bottomEdge: Math.max(topEdge, height - inset)
-                        property real radius: Math.min(cornerRadius, (rightEdge - leftEdge) / 2, (bottomEdge - topEdge) / 2)
-
-                        ShapePath {
-                            fillColor: "transparent"
-                            strokeColor: addHostTile.ghostColor
-                            strokeWidth: dashedOutline.strokeWidth
-                            strokeStyle: ShapePath.DashLine
-                            dashPattern: [4, 2.57]
-                            capStyle: ShapePath.RoundCap
-                            joinStyle: ShapePath.RoundJoin
-                            startX: dashedOutline.leftEdge
-                            startY: dashedOutline.topEdge
-
-                            PathRectangle {
-                                width: dashedOutline.rightEdge - dashedOutline.leftEdge
-                                height: dashedOutline.bottomEdge - dashedOutline.topEdge
-                                radius: dashedOutline.radius
-                            }
-                        }
-                    }
-
-                    Label {
-                        anchors.centerIn: parent
-                        anchors.verticalCenterOffset: hostGrid.extraCompactMode ? -2 : hostGrid.compactMode ? -3 : 0
-                        text: "Add Host"
-                        color: addHostTile.ghostColor
-                        font.pixelSize: hostGrid.extraCompactMode ? 13 : hostGrid.compactMode ? 18 : 22
-                        font.weight: hostGrid.extraCompactMode ? Font.Normal : Font.DemiBold
-                    }
-
-                    MouseArea {
-                        id: addHostMouse
-
-                        anchors.fill: parent
-                        hoverEnabled: true
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: {
-                            hostGrid.selectIndex(hostModel.count)
-                            Qt.callLater(addHostDialog.openFresh)
-                        }
-                    }
-                }
-            }
+        Label {
+            text: "Open the menu in the top-left corner to add your first host."
+            color: theme.mutedText
+            font.pixelSize: 14
+            horizontalAlignment: Text.AlignHCenter
+            wrapMode: Text.WordWrap
+            Layout.fillWidth: true
         }
     }
 
