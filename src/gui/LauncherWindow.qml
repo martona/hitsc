@@ -89,6 +89,36 @@ ApplicationWindow {
             property bool extraCompactMode: layoutMode === 2
             property int tileHeight: extraCompactMode ? extraCompactTileHeight : compactMode ? compactTileHeight : expandedTileHeight
             property int deleteDelayMs: 5000
+            property int currentIndex: -1
+
+            function selectIndex(i) {
+                if (i < 0 || i >= tileCount)
+                    return
+                currentIndex = i
+                const item = i < hostModel.count ? hostRepeater.itemAt(i) : addHostTile
+                if (item)
+                    item.forceActiveFocus()
+            }
+
+            function moveSelection(fromIndex, key) {
+                let target = fromIndex
+                if (key === Qt.Key_Right)
+                    target = fromIndex + 1
+                else if (key === Qt.Key_Left)
+                    target = fromIndex - 1
+                else if (key === Qt.Key_Down)
+                    target = fromIndex + columnCount
+                else if (key === Qt.Key_Up)
+                    target = fromIndex - columnCount
+                else
+                    return false
+                if (target >= 0 && target < tileCount)
+                    selectIndex(target)
+                return true
+            }
+
+            onTileCountChanged: if (currentIndex >= tileCount)
+                currentIndex = tileCount - 1
 
             width: hostScroll.availableWidth
             columns: columnCount
@@ -96,6 +126,8 @@ ApplicationWindow {
             columnSpacing: 14
 
             Repeater {
+                id: hostRepeater
+
                 model: hostModel
 
                 delegate: Item {
@@ -108,6 +140,7 @@ ApplicationWindow {
                     required property string host
                     required property string status
                     required property string statusLabel
+                    required property int index
 
                     property bool pendingDelete: false
                     property real deleteProgress: 0
@@ -115,6 +148,11 @@ ApplicationWindow {
                     Layout.preferredWidth: hostGrid.tileWidth
                     Layout.preferredHeight: hostGrid.tileHeight
                     activeFocusOnTab: true
+
+                    readonly property bool selected: hostGrid.currentIndex === index
+
+                    onActiveFocusChanged: if (activeFocus)
+                        hostGrid.currentIndex = index
 
                     function beginPendingDelete() {
                         forceActiveFocus()
@@ -156,17 +194,19 @@ ApplicationWindow {
                         addHostDialog.openForEdit(hostId)
                     }
 
-                    Keys.onReturnPressed: activateConnect()
-                    Keys.onEnterPressed: activateConnect()
+                    Keys.onReturnPressed: Qt.callLater(hostTile.activateConnect)
+                    Keys.onEnterPressed: Qt.callLater(hostTile.activateConnect)
                     Keys.onPressed: function(event) {
                         if (event.key === Qt.Key_F2) {
-                            activateEdit()
+                            Qt.callLater(hostTile.activateEdit)
                             event.accepted = true
                         } else if (event.key === Qt.Key_Delete) {
                             if (pendingDelete)
                                 confirmPendingDelete()
                             else
                                 beginPendingDelete()
+                            event.accepted = true
+                        } else if (hostGrid.moveSelection(hostTile.index, event.key)) {
                             event.accepted = true
                         }
                     }
@@ -195,8 +235,8 @@ ApplicationWindow {
 
                         anchors.fill: parent
                         radius: 8
-                        color: hostHover.hovered || hostTile.activeFocus ? theme.panelHover : theme.panel
-                        border.color: hostHover.hovered || hostTile.activeFocus ? theme.borderHover : theme.border
+                        color: hostTile.selected ? theme.panelHover : theme.panel
+                        border.color: hostTile.selected ? theme.borderHover : theme.border
                         border.width: 1
 
                         Behavior on color {
@@ -210,28 +250,30 @@ ApplicationWindow {
                             id: hostHover
 
                             onHoveredChanged: if (hovered)
-                                hostTile.forceActiveFocus()
+                                hostGrid.selectIndex(hostTile.index)
                         }
 
                         TapHandler {
                             acceptedButtons: Qt.RightButton
                             onTapped: function(eventPoint, button) {
-                                hostTile.forceActiveFocus()
+                                hostGrid.selectIndex(hostTile.index)
                                 if (hostTile.cancelPendingDelete())
                                     return
-                                hostMenu.popup(hostCard, eventPoint.position.x, eventPoint.position.y)
+                                const px = eventPoint.position.x
+                                const py = eventPoint.position.y
+                                Qt.callLater(() => hostMenu.popup(hostCard, px, py))
                             }
                         }
 
                         TapHandler {
                             acceptedButtons: Qt.LeftButton
                             onSingleTapped: {
-                                hostTile.forceActiveFocus()
+                                hostGrid.selectIndex(hostTile.index)
                                 hostTile.cancelPendingDelete()
                             }
                             onDoubleTapped: {
-                                hostTile.forceActiveFocus()
-                                hostTile.activateConnect()
+                                hostGrid.selectIndex(hostTile.index)
+                                Qt.callLater(hostTile.activateConnect)
                             }
                         }
 
@@ -385,14 +427,23 @@ ApplicationWindow {
                 Layout.preferredHeight: hostGrid.tileHeight
                 activeFocusOnTab: true
 
-                Keys.onReturnPressed: addHostDialog.openFresh()
-                Keys.onEnterPressed: addHostDialog.openFresh()
+                readonly property bool selected: hostGrid.currentIndex === hostModel.count
+
+                onActiveFocusChanged: if (activeFocus)
+                    hostGrid.currentIndex = hostModel.count
+
+                Keys.onReturnPressed: Qt.callLater(addHostDialog.openFresh)
+                Keys.onEnterPressed: Qt.callLater(addHostDialog.openFresh)
+                Keys.onPressed: function(event) {
+                    if (hostGrid.moveSelection(hostModel.count, event.key))
+                        event.accepted = true
+                }
 
                 Rectangle {
                     anchors.fill: parent
                     radius: 13
                     color: theme.window
-                    opacity: addHostMouse.containsMouse || addHostTile.activeFocus ? 1.0 : 0.86
+                    opacity: addHostTile.selected ? 1.0 : 0.86
 
                     Shape {
                         id: dashedOutline
@@ -443,10 +494,10 @@ ApplicationWindow {
                         anchors.fill: parent
                         hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
-                        onEntered: addHostTile.forceActiveFocus()
+                        onEntered: hostGrid.selectIndex(hostModel.count)
                         onClicked: {
-                            addHostTile.forceActiveFocus()
-                            addHostDialog.openFresh()
+                            hostGrid.selectIndex(hostModel.count)
+                            Qt.callLater(addHostDialog.openFresh)
                         }
                     }
                 }
