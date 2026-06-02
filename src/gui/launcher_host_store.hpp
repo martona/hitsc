@@ -22,6 +22,9 @@ public:
     void save_host(const SavedHost& host) const;
     void delete_host(const QString& id) const;
 
+    void save_last_connected(const QString& host_id) const;
+    QString load_last_connected() const;
+
     const QString& root_path() const;
 
 private:

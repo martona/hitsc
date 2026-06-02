@@ -99,6 +99,18 @@ Item {
         field.forceActiveFocus()
     }
 
+    // Seed the field with a known host, fully selected, without opening the
+    // dropdown. Resolves the selection so the panel can prefill creds/type.
+    function presetHost(hostText) {
+        control._typedPrefix = hostText
+        field.text = hostText
+        control._results = hostModel.searchHosts(hostText)
+        listView.currentIndex = -1
+        _syncSelection()
+        popup.close()
+        field.selectAll()
+    }
+
     TextField {
         id: field
 

@@ -56,12 +56,21 @@ Item {
         }
     }
 
-    // Land keyboard focus on the host field whenever the mini panel is shown.
+    // On show: focus the host field and seed it (fully selected) with the
+    // last-connected host, mstsc-style — creds/type prefill via the selection
+    // change, and the dropdown stays closed.
+    function _onShown() {
+        picker.focusField()
+        var last = hostModel.lastConnectedHost()
+        if (last.length > 0)
+            picker.presetHost(last)
+    }
+
     Component.onCompleted: if (visible)
-        Qt.callLater(picker.focusField)
+        Qt.callLater(panel._onShown)
 
     onVisibleChanged: if (visible)
-        Qt.callLater(picker.focusField)
+        Qt.callLater(panel._onShown)
 
     ColumnLayout {
         anchors.top: parent.top

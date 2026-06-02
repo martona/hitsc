@@ -251,6 +251,21 @@ void HostStore::delete_host(const QString& id) const
     }
 }
 
+void HostStore::save_last_connected(const QString& host_id) const
+{
+    const RegistryKey root = create_key(HKEY_CURRENT_USER, root_path_);
+    write_string_value(root.get(), L"LastConnected", host_id);
+}
+
+QString HostStore::load_last_connected() const
+{
+    const auto root = open_key(HKEY_CURRENT_USER, root_path_, KEY_READ);
+    if (!root) {
+        return {};
+    }
+    return read_string_value(root->get(), L"LastConnected").value_or(QString());
+}
+
 #else
 
 QByteArray CredentialProtector::protect(const QByteArray& plaintext) const
@@ -280,6 +295,16 @@ void HostStore::delete_host(const QString& id) const
 {
     (void)id;
     throw UserError("saved host storage is not implemented on this platform");
+}
+
+void HostStore::save_last_connected(const QString& host_id) const
+{
+    (void)host_id;
+}
+
+QString HostStore::load_last_connected() const
+{
+    return {};
 }
 
 #endif

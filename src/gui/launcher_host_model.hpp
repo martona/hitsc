@@ -69,6 +69,10 @@ public:
         const QString& password,
         bool save_credentials);
 
+    // Display host of the most recently connected saved host (empty if none or
+    // it has since been deleted). Used to seed the mini launcher on open.
+    Q_INVOKABLE QString lastConnectedHost() const;
+
     void shutdown();
 
 signals:

@@ -309,7 +309,24 @@ QVariantMap LauncherHostModel::connectHost(const QString& host_id)
         return error_result(QStringLiteral("Saved host was not found."));
     }
 
-    return child_processes_.launch_host(hosts_.at(row));
+    const QVariantMap result = child_processes_.launch_host(hosts_.at(row));
+    if (result.value(QStringLiteral("ok")).toBool()) {
+        store_.save_last_connected(hosts_.at(row).id);
+    }
+    return result;
+}
+
+QString LauncherHostModel::lastConnectedHost() const
+{
+    const QString id = store_.load_last_connected();
+    if (id.isEmpty()) {
+        return {};
+    }
+    const int row = index_for_id(id);
+    if (row < 0) {
+        return {};
+    }
+    return launcher_display_host(hosts_.at(row).url);
 }
 
 QVariantList LauncherHostModel::searchHosts(const QString& text) const
@@ -452,7 +469,11 @@ QVariantMap LauncherHostModel::quickConnect(
 
     SavedHost launch = target;
     launch.credentials = LauncherCredentials{resolved_username, resolved_password};
-    return child_processes_.launch_host(launch);
+    const QVariantMap result = child_processes_.launch_host(launch);
+    if (result.value(QStringLiteral("ok")).toBool()) {
+        store_.save_last_connected(target.id);
+    }
+    return result;
 }
 
 void LauncherHostModel::start_probes()

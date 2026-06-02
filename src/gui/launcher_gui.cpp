@@ -248,7 +248,14 @@ int run_launcher_gui(int argc, char* argv[], VerbosityOptions verbosity)
 
     root_window->show();
 
-    return app.exec();
+    const int exit_code = app.exec();
+
+    // Detach before the QML engine (declared after this controller, hence
+    // destroyed first) tears down the window. Otherwise ~WindowPlacementController
+    // would call removeEventFilter on an already-freed window.
+    window_placement.attach(nullptr);
+
+    return exit_code;
 }
 
 } // namespace hitsc
