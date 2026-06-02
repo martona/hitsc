@@ -100,11 +100,13 @@ Item {
     }
 
     // Seed the field with a known host, fully selected, without opening the
-    // dropdown. Resolves the selection so the panel can prefill creds/type.
+    // dropdown. The list stays unfiltered (searchHosts("")) so cursor-down
+    // browses every host instead of just the one preset match; the selection
+    // still resolves so the panel can prefill creds/type.
     function presetHost(hostText) {
         control._typedPrefix = hostText
         field.text = hostText
-        control._results = hostModel.searchHosts(hostText)
+        control._results = hostModel.searchHosts("")
         listView.currentIndex = -1
         _syncSelection()
         popup.close()

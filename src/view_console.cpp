@@ -17,6 +17,7 @@ constexpr float kGlyphWidth = 8.0f;
 constexpr float kGlyphHeight = 8.0f;
 constexpr float kLineHeight = 11.0f;
 constexpr float kMargin = 16.0f;
+constexpr float kGlyphAspect = 0.75f; // render the 8x8 glyphs at a 6:8 (x:y) ratio
 
 void set_color(SDL_Renderer* renderer, Uint8 r, Uint8 g, Uint8 b)
 {
@@ -78,14 +79,15 @@ void render_view_console(SDL_Renderer* renderer, SDL_Window* window, const Conso
     set_color(renderer, 12, 14, 18);
     SDL_RenderClear(renderer);
 
-    const float scale = text_scale(window);
-    SDL_SetRenderScale(renderer, scale, scale);
+    const float scale_y = text_scale(window);
+    const float scale_x = scale_y * kGlyphAspect;
+    SDL_SetRenderScale(renderer, scale_x, scale_y);
 
     int output_width = 0;
     int output_height = 0;
     SDL_GetRenderOutputSize(renderer, &output_width, &output_height);
-    const float logical_width = static_cast<float>(output_width) / scale;
-    const float logical_height = static_cast<float>(output_height) / scale;
+    const float logical_width = static_cast<float>(output_width) / scale_x;
+    const float logical_height = static_cast<float>(output_height) / scale_y;
     const int max_chars = static_cast<int>((logical_width - kMargin * 2.0f) / kGlyphWidth);
 
     float y = kMargin;

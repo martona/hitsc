@@ -182,6 +182,7 @@ int run_launcher_gui(int argc, char* argv[], VerbosityOptions verbosity)
     QGuiApplication app(argc, argv);
     QGuiApplication::setOrganizationName(QStringLiteral("hitsc"));
     QGuiApplication::setApplicationName(QStringLiteral("hitsc"));
+    QGuiApplication::setApplicationVersion(QStringLiteral("0.1.0"));
     QGuiApplication::setWindowIcon(make_application_icon());
 
     const QPalette light_palette = app.palette();

@@ -169,6 +169,20 @@ ApplicationWindow {
                 palette: root.palette
                 onTriggered: addHostDialog.openFresh()
             }
+
+            MenuSeparator {}
+
+            MenuItem {
+                text: "About"
+                palette: root.palette
+                onTriggered: aboutDialog.open()
+            }
+
+            MenuItem {
+                text: "Exit"
+                palette: root.palette
+                onTriggered: Qt.quit()
+            }
         }
     }
 
@@ -565,6 +579,69 @@ ApplicationWindow {
         theme: theme
         controlPalette: root.palette
         statusColor: root.statusColor
+    }
+
+    Dialog {
+        id: aboutDialog
+
+        modal: true
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+        width: Math.min(root.width - 80, 360)
+        padding: 24
+        x: Math.round((root.width - width) / 2)
+        y: Math.round((root.height - height) / 2)
+
+        background: Rectangle {
+            radius: 8
+            color: theme.window
+            border.color: theme.border
+            border.width: 1
+        }
+
+        contentItem: ColumnLayout {
+            spacing: 12
+
+            Image {
+                source: "qrc:/icons/hitsc-128.png"
+                sourceSize.width: 72
+                sourceSize.height: 72
+                Layout.alignment: Qt.AlignHCenter
+            }
+
+            Label {
+                text: "hitsc"
+                color: theme.text
+                font.pixelSize: 26
+                font.weight: Font.DemiBold
+                Layout.alignment: Qt.AlignHCenter
+            }
+
+            Label {
+                text: Qt.application.version.length > 0 ? "Version " + Qt.application.version : ""
+                visible: text.length > 0
+                color: theme.mutedText
+                font.pixelSize: 12
+                Layout.alignment: Qt.AlignHCenter
+            }
+
+            Label {
+                text: "HTTPS IPMI Terminal Services Client"
+                color: theme.mutedText
+                font.pixelSize: 13
+                horizontalAlignment: Text.AlignHCenter
+                wrapMode: Text.WordWrap
+                Layout.fillWidth: true
+                Layout.topMargin: 4
+            }
+
+            Button {
+                text: "Close"
+                Layout.alignment: Qt.AlignHCenter
+                Layout.topMargin: 4
+                palette: root.palette
+                onClicked: aboutDialog.close()
+            }
+        }
     }
 
     Dialog {
