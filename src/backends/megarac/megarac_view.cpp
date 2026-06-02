@@ -2,119 +2,48 @@
 
 #include "backends/aspeed/aspeed_view_renderer.hpp"
 #include "diagnostics.hpp"
-#include "log.hpp"
 #include "megarac_hid.hpp"
 #include "megarac_protocol.hpp"
 #include "megarac_view_session.hpp"
+#include "view_input.hpp"
 
 #include <SDL3/SDL.h>
 
-#include <algorithm>
 #include <atomic>
-#include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <exception>
-#include <iomanip>
 #include <iostream>
 #include <memory>
 #include <optional>
-#include <string_view>
 #include <utility>
 #include <vector>
 
 namespace hitsc {
 namespace {
 
-constexpr std::uint64_t kMouseMotionIntervalMilliseconds = 8;
-
 constexpr std::uint16_t kCmdSendHidPacket = command_value(MegaracCommand::SendHidPacket);
 constexpr std::uint16_t kCmdGetFullScreen = command_value(MegaracCommand::GetFullScreen);
-using KeyboardKeySlots = MegaracKeyboardKeySlots;
-
-constexpr int kRelativeMouseMode = kMegaracRelativeMouseMode;
-constexpr int kOtherMouseMode = kMegaracOtherMouseMode;
-constexpr std::uint8_t kKeyboardLeftCtrl = kMegaracKeyboardLeftCtrl;
-constexpr std::uint8_t kKeyboardLeftShift = kMegaracKeyboardLeftShift;
-constexpr std::uint8_t kKeyboardLeftAlt = kMegaracKeyboardLeftAlt;
-constexpr std::uint8_t kKeyboardLeftGui = kMegaracKeyboardLeftGui;
-constexpr std::uint8_t kKeyboardRightCtrl = kMegaracKeyboardRightCtrl;
-constexpr std::uint8_t kKeyboardRightShift = kMegaracKeyboardRightShift;
-constexpr std::uint8_t kKeyboardRightAlt = kMegaracKeyboardRightAlt;
-constexpr std::uint8_t kKeyboardRightGui = kMegaracKeyboardRightGui;
-constexpr std::uint8_t kMouseLeftButton = kMegaracMouseLeftButton;
-constexpr std::uint8_t kMouseRightButton = kMegaracMouseRightButton;
-constexpr std::uint8_t kMouseMiddleButton = kMegaracMouseMiddleButton;
-
-struct RemoteMousePosition {
-    int x = 0;
-    int y = 0;
-};
-
-std::optional<RemoteMousePosition> remote_mouse_position(
-    float window_x,
-    float window_y,
-    const SDL_FRect& target,
-    int frame_width,
-    int frame_height,
-    bool clamp_to_target)
-{
-    if (frame_width <= 0 || frame_height <= 0 || target.w <= 0.0f || target.h <= 0.0f) {
-        return std::nullopt;
-    }
-    const bool inside =
-        window_x >= target.x
-        && window_y >= target.y
-        && window_x <= target.x + target.w
-        && window_y <= target.y + target.h;
-    if (!inside && !clamp_to_target) {
-        return std::nullopt;
-    }
-
-    const float clamped_x = std::clamp(window_x, target.x, target.x + target.w);
-    const float clamped_y = std::clamp(window_y, target.y, target.y + target.h);
-    const double normalized_x =
-        (static_cast<double>(clamped_x) - static_cast<double>(target.x)) / static_cast<double>(target.w);
-    const double normalized_y =
-        (static_cast<double>(clamped_y) - static_cast<double>(target.y)) / static_cast<double>(target.h);
-    return RemoteMousePosition{
-        std::clamp(static_cast<int>(std::floor(normalized_x * frame_width + 0.5)), 0, frame_width),
-        std::clamp(static_cast<int>(std::floor(normalized_y * frame_height + 0.5)), 0, frame_height),
-    };
-}
-
-std::uint8_t button_mask_for_sdl_button(std::uint8_t button)
-{
-    switch (button) {
-    case SDL_BUTTON_LEFT:
-        return kMouseLeftButton;
-    case SDL_BUTTON_RIGHT:
-        return kMouseRightButton;
-    case SDL_BUTTON_MIDDLE:
-        return kMouseMiddleButton;
-    default:
-        return 0;
-    }
-}
 
 std::optional<std::uint8_t> keyboard_modifier_bit(SDL_Scancode scancode)
 {
     switch (scancode) {
     case SDL_SCANCODE_LCTRL:
-        return kKeyboardLeftCtrl;
+        return kMegaracKeyboardLeftCtrl;
     case SDL_SCANCODE_LSHIFT:
-        return kKeyboardLeftShift;
+        return kMegaracKeyboardLeftShift;
     case SDL_SCANCODE_LALT:
-        return kKeyboardLeftAlt;
+        return kMegaracKeyboardLeftAlt;
     case SDL_SCANCODE_LGUI:
-        return kKeyboardLeftGui;
+        return kMegaracKeyboardLeftGui;
     case SDL_SCANCODE_RCTRL:
-        return kKeyboardRightCtrl;
+        return kMegaracKeyboardRightCtrl;
     case SDL_SCANCODE_RSHIFT:
-        return kKeyboardRightShift;
+        return kMegaracKeyboardRightShift;
     case SDL_SCANCODE_RALT:
-        return kKeyboardRightAlt;
+        return kMegaracKeyboardRightAlt;
     case SDL_SCANCODE_RGUI:
-        return kKeyboardRightGui;
+        return kMegaracKeyboardRightGui;
     default:
         return std::nullopt;
     }
@@ -131,108 +60,95 @@ std::optional<std::uint8_t> keyboard_usage_from_sdl_scancode(SDL_Scancode scanco
     return std::nullopt;
 }
 
-bool set_keyboard_usage(KeyboardKeySlots& keys, std::uint8_t usage, bool pressed)
+std::uint8_t megarac_button_mask(std::uint32_t buttons)
 {
-    const auto existing = std::find(keys.begin(), keys.end(), usage);
-    if (pressed) {
-        if (existing != keys.end()) {
-            return false;
-        }
-
-        const auto empty = std::find(keys.begin(), keys.end(), 0);
-        if (empty == keys.end()) {
-            return false;
-        }
-
-        *empty = usage;
-        return true;
+    std::uint8_t mask = 0;
+    if (buttons & (1u << SDL_BUTTON_LEFT)) {
+        mask |= kMegaracMouseLeftButton;
     }
-
-    if (existing == keys.end()) {
-        return false;
+    if (buttons & (1u << SDL_BUTTON_RIGHT)) {
+        mask |= kMegaracMouseRightButton;
     }
-
-    *existing = 0;
-    return true;
+    if (buttons & (1u << SDL_BUTTON_MIDDLE)) {
+        mask |= kMegaracMouseMiddleButton;
+    }
+    return mask;
 }
 
-bool has_keyboard_state(std::uint8_t modifiers, const KeyboardKeySlots& keys)
-{
-    return modifiers != 0 || std::any_of(keys.begin(), keys.end(), [](std::uint8_t key) {
-        return key != 0;
-    });
-}
+class MegaracInputEncoder : public KvmInputEncoder {
+public:
+    explicit MegaracInputEncoder(MegaracViewSessionState& state)
+        : state_(state)
+    {
+    }
 
-void send_keyboard_report(
-    MegaracViewSessionState& state,
-    std::uint8_t modifiers,
-    const KeyboardKeySlots& keys,
-    std::uint32_t& sequence,
-    bool verbose)
-{
-    state.input.enqueue(MegaracInputWork{
-        kCmdSendHidPacket,
-        make_megarac_keyboard_packet(MegaracKeyboardReport{modifiers, keys}, sequence++)});
-    if (verbose) {
-        LogLine line = log_info();
-        line << "queued keyboard"
-             << " modifiers=0x" << std::hex << std::setw(2) << std::setfill('0')
-             << static_cast<int>(modifiers)
-             << std::dec << std::setfill(' ')
-             << " keys=";
-        bool first = true;
-        for (const std::uint8_t key : keys) {
-            if (key == 0) {
+    bool accepts_button(std::uint8_t button) const override
+    {
+        return button == SDL_BUTTON_LEFT || button == SDL_BUTTON_MIDDLE || button == SDL_BUTTON_RIGHT;
+    }
+
+    bool accepts_key(SDL_Scancode scancode) const override
+    {
+        return keyboard_modifier_bit(scancode).has_value()
+            || keyboard_usage_from_sdl_scancode(scancode).has_value();
+    }
+
+    void encode_pointer(const PointerState& state, const PointerChange& change) override
+    {
+        const FramePixel pixel = to_frame_pixel(state.position, state.frame_width, state.frame_height);
+        const std::uint8_t buttons = megarac_button_mask(state.buttons);
+        const int wheel = change.kind == PointerChange::Kind::Wheel ? static_cast<int>(change.wheel_y) : 0;
+
+        const int mouse_mode = megarac_view_mouse_mode_snapshot(state_);
+        std::vector<std::uint8_t> packet;
+        if (mouse_mode == kMegaracRelativeMouseMode || mouse_mode == kMegaracOtherMouseMode) {
+            const int dx = last_position_ ? pixel.x - last_position_->x : 0;
+            const int dy = last_position_ ? pixel.y - last_position_->y : 0;
+            packet = make_megarac_relative_mouse_packet(
+                MegaracRelativeMouseReport{buttons, dx, dy, wheel},
+                mouse_sequence_++);
+        } else {
+            packet = make_megarac_absolute_mouse_packet(
+                MegaracAbsoluteMouseReport{buttons, pixel.x, pixel.y, state.frame_width, state.frame_height, wheel},
+                mouse_sequence_++);
+        }
+
+        last_position_ = pixel;
+        state_.input.enqueue(MegaracInputWork{kCmdSendHidPacket, std::move(packet)});
+    }
+
+    void encode_keyboard(const KeyboardState& state, const KeyChange&) override
+    {
+        std::uint8_t modifiers = 0;
+        MegaracKeyboardKeySlots keys{};
+        std::size_t slot = 0;
+        for (std::size_t scancode = 0; scancode < state.down.size(); ++scancode) {
+            if (!state.down[scancode]) {
                 continue;
             }
-            if (!first) {
-                line << ',';
+            const auto code = static_cast<SDL_Scancode>(scancode);
+            if (const auto modifier = keyboard_modifier_bit(code)) {
+                modifiers |= *modifier;
+                continue;
             }
-            first = false;
-            line << static_cast<int>(key);
+            if (const auto usage = keyboard_usage_from_sdl_scancode(code)) {
+                if (slot < keys.size()) {
+                    keys[slot++] = *usage;
+                }
+            }
         }
-        if (first) {
-            line << "none";
-        }
-    }
-}
 
-void send_mouse_report(
-    MegaracViewSessionState& state,
-    std::uint8_t buttons,
-    const RemoteMousePosition& position,
-    int frame_width,
-    int frame_height,
-    int wheel,
-    std::optional<RemoteMousePosition>& last_relative_position,
-    std::uint32_t& sequence,
-    bool verbose)
-{
-    const int mouse_mode = megarac_view_mouse_mode_snapshot(state);
-    std::vector<std::uint8_t> packet;
-    if (mouse_mode == kRelativeMouseMode || mouse_mode == kOtherMouseMode) {
-        const int dx = last_relative_position ? position.x - last_relative_position->x : 0;
-        const int dy = last_relative_position ? position.y - last_relative_position->y : 0;
-        packet = make_megarac_relative_mouse_packet(
-            MegaracRelativeMouseReport{buttons, dx, dy, wheel},
-            sequence++);
-    } else {
-        packet = make_megarac_absolute_mouse_packet(
-            MegaracAbsoluteMouseReport{buttons, position.x, position.y, frame_width, frame_height, wheel},
-            sequence++);
+        state_.input.enqueue(MegaracInputWork{
+            kCmdSendHidPacket,
+            make_megarac_keyboard_packet(MegaracKeyboardReport{modifiers, keys}, keyboard_sequence_++)});
     }
 
-    last_relative_position = position;
-    state.input.enqueue(MegaracInputWork{kCmdSendHidPacket, std::move(packet)});
-    if (verbose) {
-        log_info() << "queued mouse"
-                   << " mode=" << mouse_mode
-                   << " buttons=" << static_cast<int>(buttons)
-                   << " x=" << position.x
-                   << " y=" << position.y
-                   << " wheel=" << wheel;
-    }
-}
+private:
+    MegaracViewSessionState& state_;
+    std::uint32_t mouse_sequence_ = 0;
+    std::uint32_t keyboard_sequence_ = 0;
+    std::optional<FramePixel> last_position_;
+};
 
 class MegaracView : public KvmViewBase {
 public:
@@ -248,7 +164,21 @@ private:
           })
         , options_(options)
         , state_(std::move(state))
+        , encoder_(*state_)
+        , input_(encoder_, [this] { return frame_geometry(); })
     {
+    }
+
+    std::optional<FrameGeometry> frame_geometry() const
+    {
+        const AspeedPresentationSlot* active = aspeed_.active_slot();
+        if (active == nullptr) {
+            return std::nullopt;
+        }
+        return FrameGeometry{
+            active->width,
+            active->height,
+            current_target_rect(active->width, active->height)};
     }
 
     void start_network(KvmNetworkWorker& network) override
@@ -262,6 +192,7 @@ private:
 
     void before_sdl_cleanup() override
     {
+        input_.reset();
         aspeed_.destroy();
     }
 
@@ -281,32 +212,12 @@ private:
 
     void on_focus_lost() override
     {
-        if (has_keyboard_state(keyboard_modifiers_, keyboard_keys_)) {
-            keyboard_modifiers_ = 0;
-            keyboard_keys_.fill(0);
-            send_keyboard_report(
-                *state_,
-                keyboard_modifiers_,
-                keyboard_keys_,
-                keyboard_sequence_,
-                options_.login.vverbose);
-        }
+        input_.release_all_keys();
     }
 
     void handle_event(const SDL_Event& event, bool&) override
     {
-        const AspeedPresentationSlot* active = aspeed_.active_slot();
-        if (event.type == SDL_EVENT_KEY_DOWN || event.type == SDL_EVENT_KEY_UP) {
-            handle_key_event(event);
-        } else if (active != nullptr &&
-                   (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
-                    event.type == SDL_EVENT_MOUSE_BUTTON_UP)) {
-            handle_mouse_button_event(event, *active);
-        } else if (active != nullptr && event.type == SDL_EVENT_MOUSE_MOTION) {
-            handle_mouse_motion_event(event, *active);
-        } else if (active != nullptr && event.type == SDL_EVENT_MOUSE_WHEEL) {
-            handle_mouse_wheel_event(event, *active);
-        }
+        input_.handle_event(event);
     }
 
     void render_visible(bool& render_needed, bool& first_render) override
@@ -341,149 +252,11 @@ private:
         first_render = false;
     }
 
-    void handle_key_event(const SDL_Event& event)
-    {
-        if (event.type == SDL_EVENT_KEY_DOWN && event.key.repeat) {
-            return;
-        }
-
-        const bool pressed = event.type == SDL_EVENT_KEY_DOWN;
-        const std::optional<std::uint8_t> modifier = keyboard_modifier_bit(event.key.scancode);
-        bool changed = false;
-        if (modifier) {
-            if (pressed) {
-                changed = (keyboard_modifiers_ & *modifier) == 0;
-                keyboard_modifiers_ |= *modifier;
-            } else {
-                changed = (keyboard_modifiers_ & *modifier) != 0;
-                keyboard_modifiers_ &= static_cast<std::uint8_t>(~*modifier);
-            }
-        } else if (const std::optional<std::uint8_t> usage =
-                       keyboard_usage_from_sdl_scancode(event.key.scancode)) {
-            changed = set_keyboard_usage(keyboard_keys_, *usage, pressed);
-        }
-
-        if (changed) {
-            send_keyboard_report(
-                *state_,
-                keyboard_modifiers_,
-                keyboard_keys_,
-                keyboard_sequence_,
-                options_.login.vverbose);
-        }
-    }
-
-    void handle_mouse_button_event(const SDL_Event& event, const AspeedPresentationSlot& active)
-    {
-        const std::uint8_t mask = button_mask_for_sdl_button(event.button.button);
-        if (mask == 0) {
-            return;
-        }
-
-        const SDL_FRect target = current_target_rect(active.width, active.height);
-        const bool down = event.type == SDL_EVENT_MOUSE_BUTTON_DOWN;
-        const bool drag_active = mouse_buttons_ != 0;
-        const std::optional<RemoteMousePosition> position = remote_mouse_position(
-            event.button.x,
-            event.button.y,
-            target,
-            active.width,
-            active.height,
-            drag_active || !down);
-        if (!position) {
-            return;
-        }
-
-        if (down) {
-            mouse_buttons_ |= mask;
-        } else {
-            mouse_buttons_ &= static_cast<std::uint8_t>(~mask);
-        }
-        SDL_CaptureMouse(mouse_buttons_ != 0);
-        send_mouse_report(
-            *state_,
-            mouse_buttons_,
-            *position,
-            active.width,
-            active.height,
-            0,
-            last_relative_mouse_position_,
-            mouse_sequence_,
-            options_.login.vverbose);
-    }
-
-    void handle_mouse_motion_event(const SDL_Event& event, const AspeedPresentationSlot& active)
-    {
-        const std::uint64_t ticks = SDL_GetTicks();
-        const bool throttled =
-            mouse_buttons_ == 0 &&
-            ticks - last_mouse_motion_ticks_ < kMouseMotionIntervalMilliseconds;
-        if (throttled) {
-            return;
-        }
-
-        const SDL_FRect target = current_target_rect(active.width, active.height);
-        const std::optional<RemoteMousePosition> position = remote_mouse_position(
-            event.motion.x,
-            event.motion.y,
-            target,
-            active.width,
-            active.height,
-            mouse_buttons_ != 0);
-        if (position) {
-            send_mouse_report(
-                *state_,
-                mouse_buttons_,
-                *position,
-                active.width,
-                active.height,
-                0,
-                last_relative_mouse_position_,
-                mouse_sequence_,
-                options_.login.vverbose);
-            last_mouse_motion_ticks_ = ticks;
-        }
-    }
-
-    void handle_mouse_wheel_event(const SDL_Event& event, const AspeedPresentationSlot& active)
-    {
-        const SDL_FRect target = current_target_rect(active.width, active.height);
-        const std::optional<RemoteMousePosition> position = remote_mouse_position(
-            event.wheel.mouse_x,
-            event.wheel.mouse_y,
-            target,
-            active.width,
-            active.height,
-            mouse_buttons_ != 0);
-        if (!position) {
-            return;
-        }
-
-        const int wheel = event.wheel.direction == SDL_MOUSEWHEEL_FLIPPED
-            ? static_cast<int>(-event.wheel.y)
-            : static_cast<int>(event.wheel.y);
-        send_mouse_report(
-            *state_,
-            mouse_buttons_,
-            *position,
-            active.width,
-            active.height,
-            wheel,
-            last_relative_mouse_position_,
-            mouse_sequence_,
-            options_.login.vverbose);
-    }
-
     MegaracViewOptions options_;
     std::shared_ptr<MegaracViewSessionState> state_;
     AspeedViewRenderer aspeed_;
-    std::uint8_t mouse_buttons_ = 0;
-    std::uint32_t mouse_sequence_ = 0;
-    std::uint8_t keyboard_modifiers_ = 0;
-    KeyboardKeySlots keyboard_keys_{};
-    std::uint32_t keyboard_sequence_ = 0;
-    std::uint64_t last_mouse_motion_ticks_ = 0;
-    std::optional<RemoteMousePosition> last_relative_mouse_position_;
+    MegaracInputEncoder encoder_;
+    KvmInputController input_;
 };
 
 } // namespace

@@ -4,12 +4,10 @@
 #include "aten_network.hpp"
 #include "aten_protocol.hpp"
 #include "diagnostics.hpp"
-#include "log.hpp"
+#include "view_input.hpp"
 
 #include <SDL3/SDL.h>
 
-#include <algorithm>
-#include <array>
 #include <atomic>
 #include <cstdint>
 #include <exception>
@@ -17,66 +15,13 @@
 #include <memory>
 #include <optional>
 #include <utility>
+#include <vector>
 
 namespace hitsc {
 
 extern std::atomic_bool g_aten_full_framebuffer_refresh_requested;
 
 namespace {
-
-constexpr std::uint64_t kMouseMotionIntervalMilliseconds = 8;
-using AtenKeyDownState = std::array<bool, 256>;
-
-struct AtenRemoteMousePosition {
-    int x = 0;
-    int y = 0;
-};
-
-std::optional<AtenRemoteMousePosition> remote_mouse_position(
-    float window_x,
-    float window_y,
-    const SDL_FRect& target,
-    int frame_width,
-    int frame_height,
-    bool clamp_to_target)
-{
-    if (frame_width <= 0 || frame_height <= 0 || target.w <= 0.0f || target.h <= 0.0f) {
-        return std::nullopt;
-    }
-
-    const bool inside =
-        window_x >= target.x
-        && window_y >= target.y
-        && window_x <= target.x + target.w
-        && window_y <= target.y + target.h;
-    if (!inside && !clamp_to_target) {
-        return std::nullopt;
-    }
-
-    const float clamped_x = std::clamp(window_x, target.x, target.x + target.w);
-    const float clamped_y = std::clamp(window_y, target.y, target.y + target.h);
-    const double relative_x =
-        (static_cast<double>(clamped_x) - static_cast<double>(target.x)) / static_cast<double>(target.w);
-    const double relative_y =
-        (static_cast<double>(clamped_y) - static_cast<double>(target.y)) / static_cast<double>(target.h);
-    return AtenRemoteMousePosition{
-        std::clamp(static_cast<int>(relative_x * frame_width + 0.5), 0, frame_width),
-        std::clamp(static_cast<int>(relative_y * frame_height + 0.5), 0, frame_height)};
-}
-
-std::uint8_t button_mask_for_sdl_button(std::uint8_t button)
-{
-    switch (button) {
-    case SDL_BUTTON_LEFT:
-        return 1;
-    case SDL_BUTTON_MIDDLE:
-        return 2;
-    case SDL_BUTTON_RIGHT:
-        return 4;
-    default:
-        return 0;
-    }
-}
 
 std::optional<std::uint32_t> aten_keyboard_usage_from_sdl_scancode(SDL_Scancode scancode)
 {
@@ -89,26 +34,72 @@ std::optional<std::uint32_t> aten_keyboard_usage_from_sdl_scancode(SDL_Scancode 
     return std::nullopt;
 }
 
-void queue_aten_key_event(AtenViewState& state, std::uint32_t usage, bool down)
+std::uint8_t aten_button_mask(std::uint32_t buttons)
 {
-    state.input.enqueue(make_aten_key_event(usage, down));
-}
-
-void queue_aten_pointer_event(AtenViewState& state, int x, int y, std::uint8_t mask)
-{
-    state.input.enqueue(make_aten_pointer_event(x, y, mask));
-}
-
-void release_all_aten_keys(AtenViewState& state, AtenKeyDownState& key_down)
-{
-    for (std::size_t usage = 0; usage < key_down.size(); ++usage) {
-        if (!key_down[usage]) {
-            continue;
-        }
-        key_down[usage] = false;
-        queue_aten_key_event(state, static_cast<std::uint32_t>(usage), false);
+    std::uint8_t mask = 0;
+    if (buttons & (1u << SDL_BUTTON_LEFT)) {
+        mask |= 1;
     }
+    if (buttons & (1u << SDL_BUTTON_MIDDLE)) {
+        mask |= 2;
+    }
+    if (buttons & (1u << SDL_BUTTON_RIGHT)) {
+        mask |= 4;
+    }
+    return mask;
 }
+
+class AtenInputEncoder : public KvmInputEncoder {
+public:
+    explicit AtenInputEncoder(AtenViewState& state)
+        : state_(state)
+    {
+    }
+
+    bool accepts_button(std::uint8_t button) const override
+    {
+        return button == SDL_BUTTON_LEFT || button == SDL_BUTTON_MIDDLE || button == SDL_BUTTON_RIGHT;
+    }
+
+    bool accepts_key(SDL_Scancode scancode) const override
+    {
+        return aten_keyboard_usage_from_sdl_scancode(scancode).has_value();
+    }
+
+    void encode_pointer(const PointerState& state, const PointerChange& change) override
+    {
+        const FramePixel pixel = to_frame_pixel(state.position, state.frame_width, state.frame_height);
+
+        if (change.kind == PointerChange::Kind::Wheel) {
+            if (change.wheel_y == 0.0f) {
+                return;
+            }
+            const std::uint8_t wheel_mask = change.wheel_y > 0.0f ? 8U : 16U;
+            state_.input.enqueue(make_aten_pointer_event(pixel.x, pixel.y, wheel_mask));
+            state_.input.enqueue(make_aten_pointer_event(pixel.x, pixel.y, 0));
+            return;
+        }
+
+        state_.input.enqueue(make_aten_pointer_event(pixel.x, pixel.y, aten_button_mask(state.buttons)));
+    }
+
+    void encode_keyboard(const KeyboardState&, const KeyChange& change) override
+    {
+        for (const SDL_Scancode scancode : change.released) {
+            if (const auto usage = aten_keyboard_usage_from_sdl_scancode(scancode)) {
+                state_.input.enqueue(make_aten_key_event(*usage, false));
+            }
+        }
+        for (const SDL_Scancode scancode : change.pressed) {
+            if (const auto usage = aten_keyboard_usage_from_sdl_scancode(scancode)) {
+                state_.input.enqueue(make_aten_key_event(*usage, true));
+            }
+        }
+    }
+
+private:
+    AtenViewState& state_;
+};
 
 class AtenView : public KvmViewBase {
 public:
@@ -124,7 +115,21 @@ private:
           })
         , options_(options)
         , state_(std::move(state))
+        , encoder_(*state_)
+        , input_(encoder_, [this] { return frame_geometry(); })
     {
+    }
+
+    std::optional<FrameGeometry> frame_geometry() const
+    {
+        const AspeedPresentationSlot* active = aspeed_.active_slot();
+        if (active == nullptr) {
+            return std::nullopt;
+        }
+        return FrameGeometry{
+            active->width,
+            active->height,
+            current_target_rect(active->width, active->height)};
     }
 
     void start_network(KvmNetworkWorker& network) override
@@ -138,6 +143,7 @@ private:
 
     void before_sdl_cleanup() override
     {
+        input_.reset();
         aspeed_.destroy();
     }
 
@@ -155,23 +161,12 @@ private:
 
     void on_focus_lost() override
     {
-        release_all_aten_keys(*state_, key_down_);
+        input_.release_all_keys();
     }
 
     void handle_event(const SDL_Event& event, bool&) override
     {
-        const AspeedPresentationSlot* active = aspeed_.active_slot();
-        if (event.type == SDL_EVENT_KEY_DOWN || event.type == SDL_EVENT_KEY_UP) {
-            handle_key_event(event);
-        } else if (active != nullptr &&
-                   (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
-                    event.type == SDL_EVENT_MOUSE_BUTTON_UP)) {
-            handle_mouse_button_event(event, *active);
-        } else if (active != nullptr && event.type == SDL_EVENT_MOUSE_MOTION) {
-            handle_mouse_motion_event(event, *active);
-        } else if (active != nullptr && event.type == SDL_EVENT_MOUSE_WHEEL) {
-            handle_mouse_wheel_event(event, *active);
-        }
+        input_.handle_event(event);
     }
 
     void render_visible(bool& render_needed, bool& first_render) override
@@ -205,116 +200,11 @@ private:
         first_render = false;
     }
 
-    void handle_key_event(const SDL_Event& event)
-    {
-        if (event.type == SDL_EVENT_KEY_DOWN && event.key.repeat) {
-            return;
-        }
-
-        const std::optional<std::uint32_t> usage =
-            aten_keyboard_usage_from_sdl_scancode(event.key.scancode);
-        if (!usage || *usage >= key_down_.size()) {
-            if (options_.login.vverbose) {
-                log_info() << "ignored ATEN key"
-                           << " scancode=" << event.key.scancode
-                           << " key=" << event.key.key;
-            }
-            return;
-        }
-
-        const bool down = event.type == SDL_EVENT_KEY_DOWN;
-        if (key_down_[*usage] != down) {
-            key_down_[*usage] = down;
-            queue_aten_key_event(*state_, *usage, down);
-        }
-    }
-
-    void handle_mouse_button_event(const SDL_Event& event, const AspeedPresentationSlot& active)
-    {
-        const std::uint8_t mask = button_mask_for_sdl_button(event.button.button);
-        if (mask == 0) {
-            return;
-        }
-
-        const SDL_FRect target = current_target_rect(active.width, active.height);
-        const bool down = event.type == SDL_EVENT_MOUSE_BUTTON_DOWN;
-        const bool drag_active = mouse_buttons_ != 0;
-        const std::optional<AtenRemoteMousePosition> position = remote_mouse_position(
-            event.button.x,
-            event.button.y,
-            target,
-            active.width,
-            active.height,
-            drag_active || !down);
-        if (!position) {
-            return;
-        }
-
-        if (down) {
-            mouse_buttons_ |= mask;
-        } else {
-            mouse_buttons_ &= static_cast<std::uint8_t>(~mask);
-        }
-        SDL_CaptureMouse(mouse_buttons_ != 0);
-        queue_aten_pointer_event(*state_, position->x, position->y, mouse_buttons_);
-    }
-
-    void handle_mouse_motion_event(const SDL_Event& event, const AspeedPresentationSlot& active)
-    {
-        const std::uint64_t ticks = SDL_GetTicks();
-        const bool throttled =
-            mouse_buttons_ == 0 &&
-            ticks - last_mouse_motion_ticks_ < kMouseMotionIntervalMilliseconds;
-        if (throttled) {
-            return;
-        }
-
-        const SDL_FRect target = current_target_rect(active.width, active.height);
-        const std::optional<AtenRemoteMousePosition> position = remote_mouse_position(
-            event.motion.x,
-            event.motion.y,
-            target,
-            active.width,
-            active.height,
-            mouse_buttons_ != 0);
-        if (position) {
-            queue_aten_pointer_event(*state_, position->x, position->y, mouse_buttons_);
-            last_mouse_motion_ticks_ = ticks;
-        }
-    }
-
-    void handle_mouse_wheel_event(const SDL_Event& event, const AspeedPresentationSlot& active)
-    {
-        const SDL_FRect target = current_target_rect(active.width, active.height);
-        const std::optional<AtenRemoteMousePosition> position = remote_mouse_position(
-            event.wheel.mouse_x,
-            event.wheel.mouse_y,
-            target,
-            active.width,
-            active.height,
-            mouse_buttons_ != 0);
-        if (!position) {
-            return;
-        }
-
-        const float y = event.wheel.direction == SDL_MOUSEWHEEL_FLIPPED
-            ? -event.wheel.y
-            : event.wheel.y;
-        if (y == 0.0f) {
-            return;
-        }
-
-        const std::uint8_t wheel_mask = y > 0.0f ? 8U : 16U;
-        queue_aten_pointer_event(*state_, position->x, position->y, wheel_mask);
-        queue_aten_pointer_event(*state_, position->x, position->y, 0);
-    }
-
     AtenViewOptions options_;
     std::shared_ptr<AtenViewState> state_;
     AspeedViewRenderer aspeed_;
-    std::uint8_t mouse_buttons_ = 0;
-    std::uint64_t last_mouse_motion_ticks_ = 0;
-    AtenKeyDownState key_down_{};
+    AtenInputEncoder encoder_;
+    KvmInputController input_;
 };
 
 } // namespace

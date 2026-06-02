@@ -111,6 +111,8 @@ add_executable(
   src/trace.cpp
   src/url.cpp
   src/view_base.cpp
+  src/view_input.cpp
+  src/view_input.hpp
   src/view_status.cpp
 )
 
