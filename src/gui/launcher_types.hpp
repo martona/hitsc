@@ -30,7 +30,6 @@ struct LauncherCredentials {
 struct SavedHost {
     QString id;
     LauncherHostType type = LauncherHostType::Auto;
-    QString name;
     QString url;
     std::optional<LauncherCredentials> credentials;
     ReachabilityStatus reachability = ReachabilityStatus::Unknown;
@@ -43,8 +42,14 @@ std::optional<LauncherHostType> parse_launcher_host_type(const QString& value);
 QString reachability_status_key(ReachabilityStatus status);
 QString reachability_status_label(ReachabilityStatus status);
 
-QString sanitize_host_name_to_url(const QString& name);
+// Lossless projection between the scheme-less host the user types/sees
+// (e.g. "ipmi-box.lan:444") and the stored canonical URL ("https://ipmi-box.lan:444").
+QString launcher_url_from_host(const QString& host_input);
+QString launcher_display_host(const QString& url);
+
 bool validate_launcher_url(const QString& url, QString* error_message = nullptr);
+
+// Parsed host only (no scheme/port/path) — used for reachability probing.
 QString host_from_launcher_url(const QString& url);
 bool saved_host_hostname_less(const SavedHost& left, const SavedHost& right);
 

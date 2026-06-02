@@ -2,26 +2,50 @@
 
 #include <QEvent>
 #include <QGuiApplication>
+#include <QPoint>
 #include <QScreen>
+#include <QSize>
 #include <QWindow>
 
 #include <utility>
 
 namespace hitsc {
+namespace {
+
+constexpr int kWindowSizeMax = 16777215;
+
+const QSize kMiniSize(440, 376);
+const QSize kExpandedMinSize(360, 320);
+const QSize kExpandedDefaultSize(980, 680);
+
+QString normalize_mode(const QString& mode)
+{
+    return mode == QStringLiteral("mini") ? QStringLiteral("mini") : QStringLiteral("expanded");
+}
+
+QRect centered_rect(const QSize& size)
+{
+    QScreen* screen = QGuiApplication::primaryScreen();
+    if (screen == nullptr) {
+        return QRect(QPoint(120, 120), size);
+    }
+    const QRect available = screen->availableGeometry();
+    return QRect(
+        available.center() - QPoint(size.width() / 2, size.height() / 2),
+        size);
+}
+
+} // namespace
 
 WindowPlacementController::WindowPlacementController(
-    QWindow* window,
     WindowPrefsStore store,
     QString preference_name,
     QObject* parent)
     : QObject(parent)
-    , window_(window)
     , store_(std::move(store))
     , preference_name_(std::move(preference_name))
+    , mode_(QStringLiteral("expanded"))
 {
-    if (window_ != nullptr) {
-        window_->installEventFilter(this);
-    }
 }
 
 WindowPlacementController::~WindowPlacementController()
@@ -31,15 +55,86 @@ WindowPlacementController::~WindowPlacementController()
     }
 }
 
+void WindowPlacementController::attach(QWindow* window)
+{
+    if (window_ != nullptr) {
+        window_->removeEventFilter(this);
+    }
+    window_ = window;
+    if (window_ != nullptr) {
+        window_->installEventFilter(this);
+    }
+}
+
+QString WindowPlacementController::mode() const
+{
+    return mode_;
+}
+
 void WindowPlacementController::restore()
 {
     if (window_ == nullptr) {
         return;
     }
 
-    const auto rect = store_.load_window_rect(preference_name_);
-    if (rect && is_rect_within_virtual_desktop(*rect)) {
-        window_->setGeometry(*rect);
+    const auto saved_mode = store_.load_string(preference_name_ + QStringLiteral(".Mode"));
+    mode_ = normalize_mode(saved_mode ? *saved_mode : QString());
+    apply_mode_geometry(mode_);
+    emit modeChanged();
+}
+
+void WindowPlacementController::save()
+{
+    save_if_visible();
+}
+
+void WindowPlacementController::setMode(const QString& mode)
+{
+    const QString normalized = normalize_mode(mode);
+    if (normalized == mode_) {
+        return;
+    }
+
+    // Persist the current mode's geometry before switching away from it.
+    save_if_visible();
+    mode_ = normalized;
+    store_.save_string(preference_name_ + QStringLiteral(".Mode"), mode_);
+    apply_mode_geometry(mode_);
+    emit modeChanged();
+}
+
+QString WindowPlacementController::rect_key(const QString& mode) const
+{
+    return mode == QStringLiteral("mini")
+        ? preference_name_ + QStringLiteral(".Mini")
+        : preference_name_;
+}
+
+void WindowPlacementController::apply_mode_geometry(const QString& mode)
+{
+    if (window_ == nullptr) {
+        return;
+    }
+
+    const auto saved = store_.load_window_rect(rect_key(mode));
+
+    if (mode == QStringLiteral("mini")) {
+        // Fixed-size, non-resizable mini window; only the position is restored.
+        const QRect target =
+            (saved && is_rect_within_virtual_desktop(QRect(saved->topLeft(), kMiniSize)))
+            ? QRect(saved->topLeft(), kMiniSize)
+            : centered_rect(kMiniSize);
+        window_->setMinimumSize(kMiniSize);
+        window_->setMaximumSize(kMiniSize);
+        window_->setGeometry(target);
+    } else {
+        window_->setMaximumSize(QSize(kWindowSizeMax, kWindowSizeMax));
+        window_->setMinimumSize(kExpandedMinSize);
+        if (saved && is_rect_within_virtual_desktop(*saved)) {
+            window_->setGeometry(*saved);
+        } else {
+            window_->setGeometry(centered_rect(kExpandedDefaultSize));
+        }
     }
 }
 
@@ -89,7 +184,7 @@ void WindowPlacementController::save_if_visible()
         return;
     }
 
-    store_.save_window_rect(preference_name_, window_->geometry());
+    store_.save_window_rect(rect_key(mode_), window_->geometry());
 }
 
 } // namespace hitsc

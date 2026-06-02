@@ -10,6 +10,7 @@
 #include <QList>
 #include <QSet>
 #include <QTimer>
+#include <QVariantList>
 #include <QVariantMap>
 
 namespace hitsc {
@@ -23,7 +24,6 @@ public:
         IdRole = Qt::UserRole + 1,
         TypeRole,
         TypeLabelRole,
-        NameRole,
         UrlRole,
         HostRole,
         StatusRole,
@@ -42,8 +42,7 @@ public:
 
     Q_INVOKABLE QVariantMap addHost(
         const QString& type,
-        const QString& name,
-        const QString& url,
+        const QString& host,
         const QString& username,
         const QString& password,
         const QString& repeat_password);
@@ -51,14 +50,24 @@ public:
     Q_INVOKABLE QVariantMap updateHost(
         const QString& host_id,
         const QString& type,
-        const QString& name,
-        const QString& url,
+        const QString& host,
         const QString& username,
         const QString& password,
         const QString& repeat_password);
     Q_INVOKABLE QVariantMap deleteHost(const QString& host_id);
     Q_INVOKABLE QVariantMap connectHost(const QString& host_id);
-    Q_INVOKABLE QString defaultUrlForName(const QString& name) const;
+
+    // Mini-launcher: filtered/ranked host list for the editable picker, and a
+    // connect path that resolves typed-or-saved credentials, upserts the host
+    // (saving the password only when asked), then launches.
+    Q_INVOKABLE QVariantList searchHosts(const QString& text) const;
+    Q_INVOKABLE QVariantMap quickConnect(
+        const QString& existing_id,
+        const QString& host,
+        const QString& type,
+        const QString& username,
+        const QString& password,
+        bool save_credentials);
 
     void shutdown();
 
@@ -69,6 +78,7 @@ private:
     void start_probes();
     void update_reachability(const QString& host_id, bool online);
     int index_for_id(const QString& host_id) const;
+    int index_for_url(const QString& url) const;
     int insertion_row_for_host(const SavedHost& host) const;
     void sort_hosts();
 

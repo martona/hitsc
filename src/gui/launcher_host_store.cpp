@@ -76,9 +76,8 @@ std::optional<SavedHost> read_host_from_key(
     const CredentialProtector& protector)
 {
     const auto type_value = read_string_value(key, L"Type");
-    const auto name_value = read_string_value(key, L"Name");
     const auto url_value = read_string_value(key, L"Url");
-    if (!type_value || !name_value || !url_value) {
+    if (!type_value || !url_value) {
         return std::nullopt;
     }
 
@@ -94,7 +93,6 @@ std::optional<SavedHost> read_host_from_key(
     SavedHost host;
     host.id = id;
     host.type = *type;
-    host.name = *name_value;
     host.url = *url_value;
 
     const auto protected_credentials = read_binary_value(key, L"Credentials");
@@ -220,7 +218,6 @@ void HostStore::save_host(const SavedHost& host) const
     const RegistryKey host_key = create_key(hosts.get(), host.id);
 
     write_string_value(host_key.get(), L"Type", launcher_host_type_key(host.type));
-    write_string_value(host_key.get(), L"Name", host.name);
     write_string_value(host_key.get(), L"Url", host.url);
 
     if (host.credentials && !host.credentials->empty()) {

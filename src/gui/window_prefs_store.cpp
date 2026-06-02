@@ -89,6 +89,26 @@ void WindowPrefsStore::save_window_rect(const QString& window_name, const QRect&
     write_int_value(key.get(), L"Height", rect.height());
 }
 
+std::optional<QString> WindowPrefsStore::load_string(const QString& name) const
+{
+    const auto key = open_key(
+        HKEY_CURRENT_USER,
+        root_path_ + QStringLiteral("\\Prefs"),
+        KEY_READ);
+    if (!key) {
+        return std::nullopt;
+    }
+    return read_string_value(key->get(), to_wide(name).c_str());
+}
+
+void WindowPrefsStore::save_string(const QString& name, const QString& value) const
+{
+    const RegistryKey key = create_key(
+        HKEY_CURRENT_USER,
+        root_path_ + QStringLiteral("\\Prefs"));
+    write_string_value(key.get(), to_wide(name).c_str(), value);
+}
+
 #else
 
 std::optional<QRect> WindowPrefsStore::load_window_rect(const QString& window_name) const
@@ -121,6 +141,26 @@ void WindowPrefsStore::save_window_rect(const QString& window_name, const QRect&
     settings.setValue(QStringLiteral("Y"), rect.y());
     settings.setValue(QStringLiteral("Width"), rect.width());
     settings.setValue(QStringLiteral("Height"), rect.height());
+}
+
+std::optional<QString> WindowPrefsStore::load_string(const QString& name) const
+{
+    (void)root_path_;
+    QSettings settings(QStringLiteral("hitsc"), QStringLiteral("hitsc"));
+    settings.beginGroup(QStringLiteral("Prefs"));
+    const QVariant value = settings.value(name);
+    if (!value.isValid()) {
+        return std::nullopt;
+    }
+    return value.toString();
+}
+
+void WindowPrefsStore::save_string(const QString& name, const QString& value) const
+{
+    (void)root_path_;
+    QSettings settings(QStringLiteral("hitsc"), QStringLiteral("hitsc"));
+    settings.beginGroup(QStringLiteral("Prefs"));
+    settings.setValue(name, value);
 }
 
 #endif

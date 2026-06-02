@@ -8,6 +8,8 @@ qt_add_qml_module(
   OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/Hitsc/Launcher"
   QML_FILES
     LauncherWindow.qml
+    HostPicker.qml
+    MiniLauncherPanel.qml
 )
 
 if(HITSC_STATIC_VCPKG_TRIPLET)

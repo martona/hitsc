@@ -43,12 +43,11 @@ void delete_registry_tree(const QString& path)
     }
 }
 
-hitsc::SavedHost make_saved_host(const QString& name, const QString& url)
+hitsc::SavedHost make_saved_host(const QString& url)
 {
     hitsc::SavedHost host;
     host.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
     host.type = hitsc::LauncherHostType::Megarac;
-    host.name = name;
     host.url = url;
     return host;
 }
@@ -82,9 +81,17 @@ void test_launcher_types()
         "reject unknown host type");
 
     expect(
-        hitsc::sanitize_host_name_to_url(QStringLiteral("Rack 01_BMC"))
-            == QStringLiteral("https://rack-01-bmc"),
-        "sanitize host name to URL");
+        hitsc::launcher_url_from_host(QStringLiteral("ipmi-box.lan:444"))
+            == QStringLiteral("https://ipmi-box.lan:444"),
+        "build URL from host input");
+    expect(
+        hitsc::launcher_url_from_host(QStringLiteral("https://ipmi-box.lan"))
+            == QStringLiteral("https://ipmi-box.lan"),
+        "build URL strips an existing scheme");
+    expect(
+        hitsc::launcher_display_host(QStringLiteral("https://ipmi-box.lan:444/path"))
+            == QStringLiteral("ipmi-box.lan:444/path"),
+        "display host strips scheme losslessly");
     expect(
         hitsc::validate_launcher_url(QStringLiteral("https://bmc.example.com")),
         "validate hostname URL");
@@ -124,7 +131,6 @@ void test_host_store()
         hitsc::SavedHost host;
         host.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
         host.type = hitsc::LauncherHostType::Pikvm;
-        host.name = QStringLiteral("Lab PiKVM");
         host.url = QStringLiteral("https://127.0.0.1");
         host.credentials = hitsc::LauncherCredentials{
             QStringLiteral("admin"),
@@ -137,7 +143,6 @@ void test_host_store()
         if (!loaded.empty()) {
             expect(loaded.front().id == host.id, "registry store preserves id");
             expect(loaded.front().type == host.type, "registry store preserves type");
-            expect(loaded.front().name == host.name, "registry store preserves name");
             expect(loaded.front().url == host.url, "registry store preserves URL");
             expect(loaded.front().credentials.has_value(), "registry store loads credentials");
             if (loaded.front().credentials) {
@@ -153,10 +158,8 @@ void test_host_store()
         store.delete_host(host.id);
         expect(store.load_hosts().empty(), "registry store deletes host");
 
-        hitsc::SavedHost zeta =
-            make_saved_host(QStringLiteral("Alpha display"), QStringLiteral("https://zeta.example"));
-        hitsc::SavedHost alpha =
-            make_saved_host(QStringLiteral("Zulu display"), QStringLiteral("https://alpha.example"));
+        hitsc::SavedHost zeta = make_saved_host(QStringLiteral("https://zeta.example"));
+        hitsc::SavedHost alpha = make_saved_host(QStringLiteral("https://alpha.example"));
 
         store.save_host(zeta);
         store.save_host(alpha);

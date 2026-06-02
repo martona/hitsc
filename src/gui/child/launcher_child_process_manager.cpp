@@ -35,9 +35,9 @@ QVariantMap error_result(const QString& message)
 
 QString log_prefix_for_host(const SavedHost& host)
 {
-    const QString name = host.name.trimmed();
-    if (!name.isEmpty()) {
-        return name;
+    const QString display = launcher_display_host(host.url);
+    if (!display.isEmpty()) {
+        return display;
     }
     return host.url;
 }
@@ -183,7 +183,7 @@ QVariantMap ChildProcessManager::activate_or_launch(const SavedHost& host)
     ChildSessionLaunchRequest request;
     request.session_id = host.id;
     request.type = host.type;
-    request.display_name = host.name;
+    request.display_name = launcher_display_host(host.url);
     request.url = host.url;
     request.credentials = *host.credentials;
     request.parent_process_id = QCoreApplication::applicationPid();

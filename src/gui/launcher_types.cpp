@@ -16,16 +16,6 @@ std::string to_utf8_string(const QString& value)
     return std::string(utf8.constData(), static_cast<std::size_t>(utf8.size()));
 }
 
-bool is_allowed_host_character(QChar ch)
-{
-    return ch.isLetterOrNumber()
-        || ch == QLatin1Char('.')
-        || ch == QLatin1Char('-')
-        || ch == QLatin1Char(':')
-        || ch == QLatin1Char('[')
-        || ch == QLatin1Char(']');
-}
-
 QString strip_url_scheme(QString value)
 {
     if (value.startsWith(QStringLiteral("https://"), Qt::CaseInsensitive)) {
@@ -39,7 +29,7 @@ QString strip_url_scheme(QString value)
 
 QString host_sort_key(const SavedHost& host)
 {
-    QString value = host_from_launcher_url(host.url).trimmed();
+    QString value = launcher_display_host(host.url);
     if (value.isEmpty()) {
         value = host.url.trimmed();
     }
@@ -135,40 +125,17 @@ QString reachability_status_label(ReachabilityStatus status)
     return QStringLiteral("Unknown");
 }
 
-QString sanitize_host_name_to_url(const QString& name)
+QString launcher_display_host(const QString& url)
 {
-    QString value = strip_url_scheme(name.trimmed()).toLower();
-    QString host;
-    bool previous_was_dash = false;
+    return strip_url_scheme(url.trimmed());
+}
 
-    for (const QChar ch : value) {
-        if (ch.isSpace() || ch == QLatin1Char('_')) {
-            if (!host.isEmpty() && !previous_was_dash) {
-                host += QLatin1Char('-');
-                previous_was_dash = true;
-            }
-            continue;
-        }
-
-        if (is_allowed_host_character(ch)) {
-            host += ch;
-            previous_was_dash = ch == QLatin1Char('-');
-            continue;
-        }
-
-        if (!host.isEmpty() && !previous_was_dash) {
-            host += QLatin1Char('-');
-            previous_was_dash = true;
-        }
+QString launcher_url_from_host(const QString& host_input)
+{
+    const QString host = strip_url_scheme(host_input.trimmed());
+    if (host.isEmpty()) {
+        return {};
     }
-
-    while (host.startsWith(QLatin1Char('-')) || host.startsWith(QLatin1Char('.'))) {
-        host.remove(0, 1);
-    }
-    while (host.endsWith(QLatin1Char('-')) || host.endsWith(QLatin1Char('.'))) {
-        host.chop(1);
-    }
-
     return QStringLiteral("https://") + host;
 }
 
@@ -200,12 +167,6 @@ bool saved_host_hostname_less(const SavedHost& left, const SavedHost& right)
     const int host_order = QString::localeAwareCompare(host_sort_key(left), host_sort_key(right));
     if (host_order != 0) {
         return host_order < 0;
-    }
-
-    const int name_order =
-        QString::localeAwareCompare(left.name.toCaseFolded(), right.name.toCaseFolded());
-    if (name_order != 0) {
-        return name_order < 0;
     }
 
     return QString::compare(left.id, right.id, Qt::CaseSensitive) < 0;

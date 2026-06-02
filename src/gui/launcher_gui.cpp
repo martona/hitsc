@@ -190,10 +190,12 @@ int run_launcher_gui(int argc, char* argv[], VerbosityOptions verbosity)
 
     LauncherHostModel host_model(verbosity);
     LauncherTheme launcher_theme(app.styleHints()->colorScheme());
+    WindowPlacementController window_placement(WindowPrefsStore{}, QStringLiteral("Launcher"));
 
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty(QStringLiteral("hostModel"), &host_model);
     engine.rootContext()->setContextProperty(QStringLiteral("launcherTheme"), &launcher_theme);
+    engine.rootContext()->setContextProperty(QStringLiteral("windowPlacement"), &window_placement);
     engine.load(QUrl(QStringLiteral("qrc:/qt/qml/Hitsc/Launcher/LauncherWindow.qml")));
     if (engine.rootObjects().isEmpty()) {
         return EXIT_FAILURE;
@@ -205,11 +207,14 @@ int run_launcher_gui(int argc, char* argv[], VerbosityOptions verbosity)
     }
     apply_window_clear_color(root_window, app.palette().color(QPalette::Window));
 
-    WindowPlacementController window_placement(
-        root_window,
-        WindowPrefsStore{},
-        QStringLiteral("Launcher"));
+    window_placement.attach(root_window);
     window_placement.restore();
+
+    QObject::connect(
+        &app,
+        &QGuiApplication::aboutToQuit,
+        &window_placement,
+        &WindowPlacementController::save);
 
 #ifdef _WIN32
     LauncherBackgroundEraseFilter background_erase_filter;

@@ -6,10 +6,10 @@ import QtQuick.Shapes
 ApplicationWindow {
     id: root
 
+    property string viewMode: windowPlacement.mode
+
     width: 980
     height: 680
-    minimumWidth: 300
-    minimumHeight: 420
     visible: false
     title: "hitsc"
 
@@ -114,6 +114,49 @@ ApplicationWindow {
             Item {
                 Layout.fillWidth: true
             }
+
+            ToolButton {
+                id: viewToggleButton
+
+                Layout.preferredWidth: 40
+                Layout.preferredHeight: 32
+                Layout.alignment: Qt.AlignVCenter
+                palette: root.palette
+
+                onClicked: windowPlacement.setMode(root.viewMode === "mini" ? "expanded" : "mini")
+
+                contentItem: Item {
+                    Grid {
+                        anchors.centerIn: parent
+                        columns: 2
+                        rowSpacing: 3
+                        columnSpacing: 3
+                        visible: root.viewMode === "mini"
+
+                        Repeater {
+                            model: 4
+
+                            delegate: Rectangle {
+                                width: 7
+                                height: 7
+                                radius: 1.5
+                                color: theme.text
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        anchors.centerIn: parent
+                        visible: root.viewMode !== "mini"
+                        width: 18
+                        height: 13
+                        radius: 2
+                        color: "transparent"
+                        border.color: theme.text
+                        border.width: 2
+                    }
+                }
+            }
         }
 
         Menu {
@@ -128,6 +171,12 @@ ApplicationWindow {
             }
         }
     }
+
+    Item {
+        id: expandedView
+
+        anchors.fill: parent
+        visible: root.viewMode !== "mini"
 
     ScrollView {
         id: hostScroll
@@ -201,7 +250,6 @@ ApplicationWindow {
 
                     required property string hostId
                     required property string typeLabel
-                    required property string name
                     required property string url
                     required property string host
                     required property string status
@@ -376,7 +424,7 @@ ApplicationWindow {
                                 spacing: hostGrid.extraCompactMode ? 8 : hostGrid.compactMode ? 8 : 10
 
                                 Label {
-                                    text: name
+                                    text: host
                                     color: theme.text
                                     font.pixelSize: hostGrid.extraCompactMode ? 13 : hostGrid.compactMode ? 18 : 20
                                     font.weight: hostGrid.extraCompactMode ? Font.Normal : Font.DemiBold
@@ -399,15 +447,6 @@ ApplicationWindow {
                                         hoverEnabled: true
                                     }
                                 }
-                            }
-
-                            Label {
-                                visible: !hostGrid.extraCompactMode
-                                text: host.length > 0 ? host : url
-                                color: theme.mutedText
-                                font.pixelSize: 13
-                                elide: Text.ElideRight
-                                Layout.fillWidth: true
                             }
 
                             Item {
@@ -515,13 +554,24 @@ ApplicationWindow {
             Layout.fillWidth: true
         }
     }
+    }
+
+    MiniLauncherPanel {
+        id: miniView
+
+        anchors.fill: parent
+        visible: root.viewMode === "mini"
+
+        theme: theme
+        controlPalette: root.palette
+        statusColor: root.statusColor
+    }
 
     Dialog {
         id: addHostDialog
 
         property bool editing: false
         property string editingHostId: ""
-        property bool urlDirty: false
         property string errorText: ""
         readonly property string passwordMismatchText: "Passwords do not match."
 
@@ -546,15 +596,13 @@ ApplicationWindow {
             editing = false
             editingHostId = ""
             typeCombo.currentIndex = 0
-            nameField.text = ""
-            urlField.text = "https://"
+            hostField.text = ""
             usernameField.text = ""
             passwordField.text = ""
             repeatPasswordField.text = ""
             errorText = ""
-            urlDirty = false
             open()
-            nameField.forceActiveFocus()
+            hostField.forceActiveFocus()
         }
 
         function openForEdit(hostId) {
@@ -567,15 +615,13 @@ ApplicationWindow {
             editing = true
             editingHostId = host.id
             selectType(host.type)
-            nameField.text = host.name
-            urlField.text = host.url
+            hostField.text = host.host
             usernameField.text = host.username
             passwordField.text = ""
             repeatPasswordField.text = ""
             errorText = ""
-            urlDirty = true
             open()
-            nameField.forceActiveFocus()
+            hostField.forceActiveFocus()
         }
 
         function validatePasswordMatch() {
@@ -599,15 +645,13 @@ ApplicationWindow {
                 ? hostModel.updateHost(
                       addHostDialog.editingHostId,
                       typeKey,
-                      nameField.text,
-                      urlField.text,
+                      hostField.text,
                       usernameField.text,
                       passwordField.text,
                       repeatPasswordField.text)
                 : hostModel.addHost(
                       typeKey,
-                      nameField.text,
-                      urlField.text,
+                      hostField.text,
                       usernameField.text,
                       passwordField.text,
                       repeatPasswordField.text)
@@ -669,26 +713,13 @@ ApplicationWindow {
                 }
 
                 TextField {
-                    id: nameField
-                    placeholderText: "Name"
+                    id: hostField
+                    placeholderText: "host or host:port"
                     Layout.fillWidth: true
                     palette: root.palette
-                    onTextEdited: {
-                        if (!addHostDialog.urlDirty)
-                            urlField.text = hostModel.defaultUrlForName(text)
-                    }
+                    inputMethodHints: Qt.ImhUrlCharactersOnly
                     onAccepted: addHostDialog.submit()
                 }
-            }
-
-            TextField {
-                id: urlField
-                placeholderText: "https://host[:port]"
-                Layout.fillWidth: true
-                palette: root.palette
-                inputMethodHints: Qt.ImhUrlCharactersOnly
-                onTextEdited: addHostDialog.urlDirty = true
-                onAccepted: addHostDialog.submit()
             }
 
             TextField {

@@ -14,6 +14,9 @@ public:
     std::optional<QRect> load_window_rect(const QString& window_name) const;
     void save_window_rect(const QString& window_name, const QRect& rect) const;
 
+    std::optional<QString> load_string(const QString& name) const;
+    void save_string(const QString& name, const QString& value) const;
+
     const QString& root_path() const;
 
 private:
