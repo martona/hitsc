@@ -323,6 +323,60 @@ std::optional<QRect> HostStore::load_window_rect(const QString& host_id) const
     return QRect(*x, *y, *width, *height);
 }
 
+void HostStore::save_pinned_cert(const QString& host_id, const std::string& sha256_hex) const
+{
+    const QString trimmed_id = host_id.trimmed();
+    if (trimmed_id.isEmpty() || sha256_hex.empty()) {
+        return;
+    }
+
+    const auto root = open_key(HKEY_CURRENT_USER, root_path_, KEY_READ);
+    if (!root) {
+        return;
+    }
+    const auto hosts = open_key(root->get(), QStringLiteral("Hosts"), KEY_READ);
+    if (!hosts) {
+        return;
+    }
+    const auto host_key = open_key(hosts->get(), trimmed_id, KEY_WRITE);
+    if (!host_key) {
+        return; // host no longer exists — don't recreate it
+    }
+
+    write_string_value(
+        host_key->get(),
+        L"PinnedCertSha256",
+        QString::fromUtf8(sha256_hex.c_str(), static_cast<int>(sha256_hex.size())));
+}
+
+std::optional<std::string> HostStore::load_pinned_cert(const QString& host_id) const
+{
+    const QString trimmed_id = host_id.trimmed();
+    if (trimmed_id.isEmpty()) {
+        return std::nullopt;
+    }
+
+    const auto root = open_key(HKEY_CURRENT_USER, root_path_, KEY_READ);
+    if (!root) {
+        return std::nullopt;
+    }
+    const auto hosts = open_key(root->get(), QStringLiteral("Hosts"), KEY_READ);
+    if (!hosts) {
+        return std::nullopt;
+    }
+    const auto host_key = open_key(hosts->get(), trimmed_id, KEY_READ);
+    if (!host_key) {
+        return std::nullopt;
+    }
+
+    const auto value = read_string_value(host_key->get(), L"PinnedCertSha256");
+    if (!value || value->isEmpty()) {
+        return std::nullopt;
+    }
+    const QByteArray utf8 = value->toUtf8();
+    return std::string(utf8.constData(), static_cast<std::size_t>(utf8.size()));
+}
+
 #else
 
 QByteArray CredentialProtector::protect(const QByteArray& plaintext) const
@@ -371,6 +425,18 @@ void HostStore::save_window_rect(const QString& host_id, const QRect& rect) cons
 }
 
 std::optional<QRect> HostStore::load_window_rect(const QString& host_id) const
+{
+    (void)host_id;
+    return std::nullopt;
+}
+
+void HostStore::save_pinned_cert(const QString& host_id, const std::string& sha256_hex) const
+{
+    (void)host_id;
+    (void)sha256_hex;
+}
+
+std::optional<std::string> HostStore::load_pinned_cert(const QString& host_id) const
 {
     (void)host_id;
     return std::nullopt;

@@ -61,6 +61,10 @@ add_executable(
   src/backends/aspeed/aspeed_decoder.cpp
   src/backends/aspeed/aspeed_presenter.cpp
   src/bmc_session.cpp
+  src/cert_prompt.cpp
+  src/cert_prompt.hpp
+  src/cert_trust.cpp
+  src/cert_trust.hpp
   src/cli.cpp
   src/console.cpp
   src/cookie_jar.cpp
@@ -198,7 +202,7 @@ if(WIN32)
   enable_language(RC)
   target_sources(hitsc PRIVATE src/resources/hitsc.rc)
 
-  target_link_libraries(hitsc PRIVATE Crypt32 D3d11 Dbghelp Dwmapi Dxgi Iphlpapi Ws2_32)
+  target_link_libraries(hitsc PRIVATE Comctl32 Crypt32 D3d11 Dbghelp Dwmapi Dxgi Iphlpapi Ws2_32)
   set_target_properties(hitsc PROPERTIES WIN32_EXECUTABLE TRUE)
 
   add_executable(

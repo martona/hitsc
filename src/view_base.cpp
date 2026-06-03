@@ -1,5 +1,6 @@
 #include "view_base.hpp"
 
+#include "cert_trust.hpp"
 #include "gui/launcher_host_store.hpp"
 #include "log.hpp"
 #include "view_console.hpp"
@@ -101,6 +102,16 @@ ViewWindow make_view_window(const std::string& geometry_key)
     // default spot first.
     restore_child_window_geometry(window, geometry_key);
     SDL_ShowWindow(window);
+
+    // Hand the certificate-trust broker the window to parent prompts on and the
+    // host id to key the pin. geometry_key is the host id (empty for direct CLI
+    // launches, which then can't persist a pin). This is the one place every
+    // viewer window is born, so it covers both direct backends and the auto
+    // bootstrap that later hands this same window off.
+    cert_trust_attach_window(
+        SDL_GetPointerProperty(
+            SDL_GetWindowProperties(window), SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr),
+        geometry_key);
 
     return ViewWindow{window, frame_event_type};
 }
