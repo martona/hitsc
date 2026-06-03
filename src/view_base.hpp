@@ -1,9 +1,12 @@
 #pragma once
 
 #include "view_console.hpp"
+#include "view_input_types.hpp"
 #include "view_status.hpp"
 
 #include <SDL3/SDL.h>
+
+#include <QImage>
 
 #include <atomic>
 #include <cstdint>
@@ -12,11 +15,14 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <utility>
 
 namespace hitsc {
+
+class KvmInputController;
 
 struct ViewWindow {
     SDL_Window* window = nullptr;
@@ -194,6 +200,43 @@ public:
     // then owns SDL teardown. Call before run().
     void adopt_sdl(const ViewWindow& view_window);
 
+    // -----------------------------------------------------------------------
+    // Qt-hosted mode (step 5 drives these instead of run()). None of these
+    // create or touch an SDL window/renderer; the run()/event_loop() SDL path
+    // below is untouched and remains the default until the migration completes.
+    // -----------------------------------------------------------------------
+    void hosted_start_network();  // start the network worker (no SDL window)
+    void hosted_stop_network();   // stop it (idempotent)
+    void hosted_poll();           // per-tick: detect session end, record error
+    bool hosted_session_ended() const { return session_ended_; }
+    bool hosted_connected() const;  // live KVM session (render_state.connected)
+    void hosted_retry();          // 'R' on the disconnected console
+
+    std::string hosted_title() const;
+
+    // What the surface should display now: a console screen, or nullopt meaning
+    // "show the latest video frame" via latest_frame_image().
+    std::optional<ConsoleScreen> hosted_console_screen() const;
+    virtual std::optional<QImage> latest_frame_image() { return std::nullopt; }
+    // Cheap current-frame dimensions for hosted pointer mapping (no conversion).
+    virtual std::optional<std::pair<int, int>> latest_frame_size() { return std::nullopt; }
+
+    // Lifecycle, mirroring the SDL event_loop's window-event branches.
+    void hosted_minimized();
+    void hosted_restored();
+    void hosted_focus_lost();
+    void hosted_close();
+
+    // SDL-free input feed (Qt surface/window -> the backend's controller).
+    void feed_key(const KvmKeyEvent& key);
+    void feed_pointer_button(const KvmPointerButton& button);
+    void feed_pointer_motion(const KvmPointerMotion& motion);
+    void feed_pointer_wheel(const KvmPointerWheel& wheel);
+
+    // The Qt surface reports its current (logical) size so hosted pointer mapping
+    // can centre the frame within it (there is no SDL window to query).
+    void hosted_set_surface_size(int width, int height);
+
 protected:
     SDL_Window* window() const;
     SDL_Renderer* renderer() const;
@@ -229,6 +272,10 @@ protected:
     virtual void handle_event(const SDL_Event& event, bool& render_needed) = 0;
     virtual void render_visible(bool& render_needed, bool& first_render) = 0;
 
+    // Qt-hosted input routing: a backend returns its KvmInputController so the
+    // base's feed_*() can drive it. Default null = no hosted input.
+    virtual KvmInputController* hosted_input_controller() { return nullptr; }
+
 private:
     void initialize_sdl();
     void cleanup_sdl();
@@ -255,6 +302,8 @@ private:
     bool had_error_ = false;
     std::string error_message_;
     std::uint64_t last_console_render_ = 0;
+    int hosted_surface_w_ = 0;
+    int hosted_surface_h_ = 0;
 };
 
 } // namespace hitsc

@@ -2,6 +2,7 @@
 
 #include "diagnostics.hpp"
 #include "errors.hpp"
+#include "gui/viewer/qt_viewer_host.hpp"
 #include "log.hpp"
 #include "pikvm_events.hpp"
 #include "pikvm_input.hpp"
@@ -13,12 +14,20 @@
 
 #include <SDL3/SDL.h>
 
+#include <QImage>
+
+extern "C" {
+#include <libavutil/pixfmt.h>
+#include <libswscale/swscale.h>
+}
+
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <exception>
 #include <functional>
 #include <iomanip>
@@ -599,15 +608,15 @@ public:
     {
     }
 
-    bool accepts_button(std::uint8_t button) const override
+    bool accepts_button(KvmMouseButton button) const override
     {
-        return pikvm_mouse_button_from_sdl_button(button).has_value()
-            && button < kPikvmMouseButtonSlots;
+        return pikvm_mouse_button_from_button(button).has_value()
+            && static_cast<std::size_t>(button) < kPikvmMouseButtonSlots;
     }
 
-    bool accepts_key(SDL_Scancode scancode) const override
+    bool accepts_key(KvmScancode scancode) const override
     {
-        return pikvm_key_code_from_sdl_scancode(scancode).has_value();
+        return pikvm_key_code_from_scancode(scancode).has_value();
     }
 
     void encode_pointer(const PointerState& state, const PointerChange& change) override
@@ -617,7 +626,7 @@ public:
         enqueue(make_pikvm_mouse_move_packet(position));
 
         if (change.kind == PointerChange::Kind::Button) {
-            if (const auto button = pikvm_mouse_button_from_sdl_button(change.button)) {
+            if (const auto button = pikvm_mouse_button_from_button(change.button)) {
                 enqueue(make_pikvm_mouse_button_packet(*button, change.pressed));
             }
         } else if (change.kind == PointerChange::Kind::Wheel) {
@@ -631,13 +640,13 @@ public:
 
     void encode_keyboard(const KeyboardState&, const KeyChange& change) override
     {
-        for (const SDL_Scancode scancode : change.released) {
-            if (const auto code = pikvm_key_code_from_sdl_scancode(scancode)) {
+        for (const KvmScancode scancode : change.released) {
+            if (const auto code = pikvm_key_code_from_scancode(scancode)) {
                 enqueue(make_pikvm_key_packet(*code, false));
             }
         }
-        for (const SDL_Scancode scancode : change.pressed) {
-            if (const auto code = pikvm_key_code_from_sdl_scancode(scancode)) {
+        for (const KvmScancode scancode : change.pressed) {
+            if (const auto code = pikvm_key_code_from_scancode(scancode)) {
                 enqueue(make_pikvm_key_packet(*code, true));
             }
         }
@@ -657,6 +666,13 @@ public:
     explicit PikvmView(const PikvmViewOptions& options)
         : PikvmView(options, std::make_shared<PikvmViewState>())
     {
+    }
+
+    ~PikvmView() override
+    {
+        if (hosted_sws_ != nullptr) {
+            sws_freeContext(hosted_sws_);
+        }
     }
 
 private:
@@ -735,6 +751,8 @@ private:
             texture_wrapped_hardware_source_,
             hardware_);
         last_sequence_ = 0;
+        hosted_last_sequence_ = 0;
+        hosted_frame_ = QImage();
         state_->video_decode_paused.store(false);
     }
 
@@ -772,6 +790,108 @@ private:
     void handle_event(const SDL_Event& event, bool&) override
     {
         input_.handle_event(event);
+    }
+
+    KvmInputController* hosted_input_controller() override
+    {
+        return &input_;
+    }
+
+    std::optional<QImage> latest_frame_image() override
+    {
+        const std::shared_ptr<const PikvmVideoFrame> frame =
+            state_->frames.latest(hosted_last_sequence_);
+        if (frame) {
+            hosted_last_sequence_ = frame->sequence;
+            if (std::optional<QImage> image = convert_hosted_frame(*frame)) {
+                hosted_frame_ = std::move(*image);
+            }
+        }
+        if (hosted_frame_.isNull()) {
+            return std::nullopt;
+        }
+        return hosted_frame_;
+    }
+
+    std::optional<std::pair<int, int>> latest_frame_size() override
+    {
+        if (const std::shared_ptr<const PikvmVideoFrame> frame = state_->frames.latest(0)) {
+            return std::make_pair(frame->width, frame->height);
+        }
+        if (!hosted_frame_.isNull()) {
+            return std::make_pair(hosted_frame_.width(), hosted_frame_.height());
+        }
+        return std::nullopt;
+    }
+
+    // Software-decode frame -> RGBA QImage for the Qt surface. Hosted mode forces
+    // software decode (no hardware device without an SDL renderer), so frames are
+    // i420 / nv12 (swscale to RGBA) or already rgba32 (copy). hardware_nv12 never
+    // reaches here. Published frames are immutable (each owns its AVFrame), so no
+    // lock is needed. The GPU/zero-copy path is commit 4.
+    std::optional<QImage> convert_hosted_frame(const PikvmVideoFrame& frame)
+    {
+        if (frame.width <= 0 || frame.height <= 0) {
+            return std::nullopt;
+        }
+
+        if (frame.format == PikvmVideoPixelFormat::rgba32) {
+            QImage image(frame.width, frame.height, QImage::Format_RGBA8888);
+            const int src_pitch = frame.pitches[0] > 0 ? frame.pitches[0] : frame.width * 4;
+            const std::uint8_t* src =
+                frame.planes[0] != nullptr ? frame.planes[0] : frame.rgba.data();
+            for (int y = 0; y < frame.height; ++y) {
+                std::memcpy(
+                    image.scanLine(y),
+                    src + static_cast<std::size_t>(y) * static_cast<std::size_t>(src_pitch),
+                    static_cast<std::size_t>(frame.width) * 4U);
+            }
+            return image;
+        }
+
+        AVPixelFormat source_format = AV_PIX_FMT_NONE;
+        switch (frame.format) {
+        case PikvmVideoPixelFormat::i420:
+            source_format = AV_PIX_FMT_YUV420P;
+            break;
+        case PikvmVideoPixelFormat::nv12:
+            source_format = AV_PIX_FMT_NV12;
+            break;
+        default:
+            return std::nullopt;
+        }
+
+        hosted_sws_ = sws_getCachedContext(
+            hosted_sws_,
+            frame.width,
+            frame.height,
+            source_format,
+            frame.width,
+            frame.height,
+            AV_PIX_FMT_RGBA,
+            SWS_BILINEAR,
+            nullptr,
+            nullptr,
+            nullptr);
+        if (hosted_sws_ == nullptr) {
+            return std::nullopt;
+        }
+
+        QImage image(frame.width, frame.height, QImage::Format_RGBA8888);
+        std::uint8_t* destination_data[4] = {image.bits(), nullptr, nullptr, nullptr};
+        int destination_linesize[4] = {static_cast<int>(image.bytesPerLine()), 0, 0, 0};
+        const int scaled = sws_scale(
+            hosted_sws_,
+            frame.planes.data(),
+            frame.pitches.data(),
+            0,
+            frame.height,
+            destination_data,
+            destination_linesize);
+        if (scaled != frame.height) {
+            return std::nullopt;
+        }
+        return image;
     }
 
     void render_visible(bool& render_needed, bool& first_render) override
@@ -977,6 +1097,9 @@ private:
     PikvmClock::time_point last_frame_latency_log_ = PikvmClock::now();
     std::shared_ptr<const PikvmVideoFrame> pending_present_latency_frame_;
     std::uint64_t last_sequence_ = 0;
+    SwsContext* hosted_sws_ = nullptr;
+    QImage hosted_frame_;
+    std::uint64_t hosted_last_sequence_ = 0;
 };
 
 } // namespace
@@ -987,8 +1110,10 @@ void run_pikvm_view(const PikvmViewOptions& options, const ViewWindow* handoff)
         PikvmView view(options);
         if (handoff != nullptr) {
             view.adopt_sdl(*handoff);
+            view.run();
+        } else {
+            run_qt_viewer(view, options.login.base_url.host, options.login.host_id);
         }
-        view.run();
     } catch (const UserError&) {
         throw;
     } catch (...) {

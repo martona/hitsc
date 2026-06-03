@@ -1,6 +1,6 @@
 #pragma once
 
-#include <SDL3/SDL.h>
+#include "view_input_types.hpp"
 
 #include <cstdint>
 #include <optional>
@@ -14,8 +14,8 @@ struct PikvmAbsoluteMousePosition {
     int y = 0;
 };
 
-std::optional<std::string_view> pikvm_key_code_from_sdl_scancode(SDL_Scancode scancode);
-std::optional<std::string_view> pikvm_mouse_button_from_sdl_button(std::uint8_t button);
+std::optional<std::string_view> pikvm_key_code_from_scancode(KvmScancode scancode);
+std::optional<std::string_view> pikvm_mouse_button_from_button(KvmMouseButton button);
 
 PikvmAbsoluteMousePosition make_pikvm_absolute_mouse_position(double normalized_x, double normalized_y);
 

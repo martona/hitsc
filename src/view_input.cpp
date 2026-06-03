@@ -59,31 +59,39 @@ KvmInputController::KvmInputController(
 
 void KvmInputController::handle_event(const SDL_Event& event)
 {
+    // The only place SDL event types survive: translate into the backend-neutral
+    // Kvm input structs and dispatch. (Replaced wholesale when the Qt event
+    // source lands; the handlers below are already SDL-free.)
     switch (event.type) {
     case SDL_EVENT_KEY_DOWN:
-        handle_key(event.key, true);
+        handle_key(KvmKeyEvent{static_cast<KvmScancode>(event.key.scancode), true, event.key.repeat});
         break;
     case SDL_EVENT_KEY_UP:
-        handle_key(event.key, false);
+        handle_key(KvmKeyEvent{static_cast<KvmScancode>(event.key.scancode), false, event.key.repeat});
         break;
     case SDL_EVENT_MOUSE_BUTTON_DOWN:
-        handle_button(event.button, true);
+        handle_button(KvmPointerButton{
+            static_cast<KvmMouseButton>(event.button.button), true, {event.button.x, event.button.y}});
         break;
     case SDL_EVENT_MOUSE_BUTTON_UP:
-        handle_button(event.button, false);
+        handle_button(KvmPointerButton{
+            static_cast<KvmMouseButton>(event.button.button), false, {event.button.x, event.button.y}});
         break;
     case SDL_EVENT_MOUSE_MOTION:
-        handle_motion(event.motion);
+        handle_motion(KvmPointerMotion{{event.motion.x, event.motion.y}});
         break;
-    case SDL_EVENT_MOUSE_WHEEL:
-        handle_wheel(event.wheel);
+    case SDL_EVENT_MOUSE_WHEEL: {
+        const float dx = event.wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -event.wheel.x : event.wheel.x;
+        const float dy = event.wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -event.wheel.y : event.wheel.y;
+        handle_wheel(KvmPointerWheel{dx, dy, {event.wheel.mouse_x, event.wheel.mouse_y}});
         break;
+    }
     default:
         break;
     }
 }
 
-void KvmInputController::handle_button(const SDL_MouseButtonEvent& button, bool down)
+void KvmInputController::handle_button(const KvmPointerButton& button)
 {
     if (!encoder_.accepts_button(button.button)) {
         return;
@@ -96,13 +104,13 @@ void KvmInputController::handle_button(const SDL_MouseButtonEvent& button, bool 
 
     const bool drag_active = any_button_down();
     const std::optional<NormalizedPoint> position =
-        target_normalized_point(button.x, button.y, frame->target, drag_active || !down);
+        target_normalized_point(button.pos.x, button.pos.y, frame->target, drag_active || !button.down);
     if (!position) {
         return;
     }
 
-    const std::uint32_t bit = 1u << button.button;
-    if (down) {
+    const std::uint32_t bit = 1u << static_cast<std::uint8_t>(button.button);
+    if (button.down) {
         buttons_ |= bit;
     } else {
         buttons_ &= ~bit;
@@ -111,10 +119,10 @@ void KvmInputController::handle_button(const SDL_MouseButtonEvent& button, bool 
 
     encoder_.encode_pointer(
         PointerState{*position, frame->width, frame->height, buttons_},
-        PointerChange{PointerChange::Kind::Button, button.button, down, 0.0f, 0.0f});
+        PointerChange{PointerChange::Kind::Button, button.button, button.down, 0.0f, 0.0f});
 }
 
-void KvmInputController::handle_motion(const SDL_MouseMotionEvent& motion)
+void KvmInputController::handle_motion(const KvmPointerMotion& motion)
 {
     const std::optional<FrameGeometry> frame = frame_geometry_();
     if (!frame) {
@@ -128,7 +136,7 @@ void KvmInputController::handle_motion(const SDL_MouseMotionEvent& motion)
     }
 
     const std::optional<NormalizedPoint> position =
-        target_normalized_point(motion.x, motion.y, frame->target, drag_active);
+        target_normalized_point(motion.pos.x, motion.pos.y, frame->target, drag_active);
     if (!position) {
         return;
     }
@@ -139,7 +147,7 @@ void KvmInputController::handle_motion(const SDL_MouseMotionEvent& motion)
     last_motion_ticks_ = ticks;
 }
 
-void KvmInputController::handle_wheel(const SDL_MouseWheelEvent& wheel)
+void KvmInputController::handle_wheel(const KvmPointerWheel& wheel)
 {
     const std::optional<FrameGeometry> frame = frame_geometry_();
     if (!frame) {
@@ -148,25 +156,22 @@ void KvmInputController::handle_wheel(const SDL_MouseWheelEvent& wheel)
 
     const bool drag_active = any_button_down();
     const std::optional<NormalizedPoint> position =
-        target_normalized_point(wheel.mouse_x, wheel.mouse_y, frame->target, drag_active);
+        target_normalized_point(wheel.pos.x, wheel.pos.y, frame->target, drag_active);
     if (!position) {
         return;
     }
 
-    const float wheel_x = wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -wheel.x : wheel.x;
-    const float wheel_y = wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -wheel.y : wheel.y;
-
     PointerChange change{PointerChange::Kind::Wheel};
-    change.wheel_x = wheel_x;
-    change.wheel_y = wheel_y;
+    change.wheel_x = wheel.dx;
+    change.wheel_y = wheel.dy;
     encoder_.encode_pointer(
         PointerState{*position, frame->width, frame->height, buttons_},
         change);
 }
 
-void KvmInputController::handle_key(const SDL_KeyboardEvent& key, bool down)
+void KvmInputController::handle_key(const KvmKeyEvent& key)
 {
-    if (down && key.repeat) {
+    if (key.down && key.repeat) {
         return;
     }
     if (!encoder_.accepts_key(key.scancode)) {
@@ -177,13 +182,13 @@ void KvmInputController::handle_key(const SDL_KeyboardEvent& key, bool down)
     if (index >= key_down_.size()) {
         return;
     }
-    if (key_down_[index] == down) {
+    if (key_down_[index] == key.down) {
         return;
     }
-    key_down_[index] = down;
+    key_down_[index] = key.down;
 
     KeyChange change;
-    if (down) {
+    if (key.down) {
         change.pressed.push_back(key.scancode);
     } else {
         change.released.push_back(key.scancode);
@@ -196,7 +201,7 @@ void KvmInputController::release_all_keys()
     KeyChange change;
     for (std::size_t scancode = 0; scancode < key_down_.size(); ++scancode) {
         if (key_down_[scancode]) {
-            change.released.push_back(static_cast<SDL_Scancode>(scancode));
+            change.released.push_back(static_cast<KvmScancode>(scancode));
             key_down_[scancode] = false;
         }
     }

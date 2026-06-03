@@ -22,7 +22,7 @@ find_package(CLI11 CONFIG REQUIRED)
 find_package(FFMPEG REQUIRED)
 find_package(OpenSSL REQUIRED)
 set(QT_SKIP_SETUP_DEPLOYMENT ON)
-find_package(Qt6 REQUIRED COMPONENTS Core Gui Qml Quick QuickControls2 QuickLayouts)
+find_package(Qt6 REQUIRED COMPONENTS Core Gui Qml Quick QuickControls2 QuickLayouts Widgets)
 find_package(SDL3 CONFIG REQUIRED)
 find_package(ZLIB REQUIRED)
 
@@ -117,6 +117,14 @@ add_executable(
   src/view_base.cpp
   src/view_console.cpp
   src/view_console.hpp
+  src/gui/viewer/qt_console.cpp
+  src/gui/viewer/qt_console.hpp
+  src/gui/viewer/viewer_surface.cpp
+  src/gui/viewer/viewer_surface.hpp
+  src/gui/viewer/viewer_window.cpp
+  src/gui/viewer/viewer_window.hpp
+  src/gui/viewer/qt_viewer_host.cpp
+  src/gui/viewer/qt_viewer_host.hpp
   src/view_input.cpp
   src/view_input.hpp
   src/view_status.cpp
@@ -193,6 +201,7 @@ target_link_libraries(
     Qt6::Quick
     Qt6::QuickControls2
     Qt6::QuickLayouts
+    Qt6::Widgets
     SDL3::SDL3
     hitsc_launcher_qml
     ZLIB::ZLIB

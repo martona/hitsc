@@ -2,6 +2,7 @@
 
 #include "backends/aspeed/aspeed_view_renderer.hpp"
 #include "diagnostics.hpp"
+#include "gui/viewer/qt_viewer_host.hpp"
 #include "megarac_hid.hpp"
 #include "megarac_protocol.hpp"
 #include "megarac_view_session.hpp"
@@ -9,13 +10,17 @@
 
 #include <SDL3/SDL.h>
 
+#include <QImage>
+
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <exception>
 #include <iostream>
 #include <memory>
 #include <optional>
+#include <span>
 #include <utility>
 #include <vector>
 
@@ -25,35 +30,35 @@ namespace {
 constexpr std::uint16_t kCmdSendHidPacket = command_value(MegaracCommand::SendHidPacket);
 constexpr std::uint16_t kCmdGetFullScreen = command_value(MegaracCommand::GetFullScreen);
 
-std::optional<std::uint8_t> keyboard_modifier_bit(SDL_Scancode scancode)
+std::optional<std::uint8_t> keyboard_modifier_bit(KvmScancode scancode)
 {
     switch (scancode) {
-    case SDL_SCANCODE_LCTRL:
+    case KvmScancode::LCTRL:
         return kMegaracKeyboardLeftCtrl;
-    case SDL_SCANCODE_LSHIFT:
+    case KvmScancode::LSHIFT:
         return kMegaracKeyboardLeftShift;
-    case SDL_SCANCODE_LALT:
+    case KvmScancode::LALT:
         return kMegaracKeyboardLeftAlt;
-    case SDL_SCANCODE_LGUI:
+    case KvmScancode::LGUI:
         return kMegaracKeyboardLeftGui;
-    case SDL_SCANCODE_RCTRL:
+    case KvmScancode::RCTRL:
         return kMegaracKeyboardRightCtrl;
-    case SDL_SCANCODE_RSHIFT:
+    case KvmScancode::RSHIFT:
         return kMegaracKeyboardRightShift;
-    case SDL_SCANCODE_RALT:
+    case KvmScancode::RALT:
         return kMegaracKeyboardRightAlt;
-    case SDL_SCANCODE_RGUI:
+    case KvmScancode::RGUI:
         return kMegaracKeyboardRightGui;
     default:
         return std::nullopt;
     }
 }
 
-std::optional<std::uint8_t> keyboard_usage_from_sdl_scancode(SDL_Scancode scancode)
+std::optional<std::uint8_t> keyboard_usage_from_scancode(KvmScancode scancode)
 {
     const auto usage = static_cast<int>(scancode);
-    if ((usage >= SDL_SCANCODE_A && usage <= SDL_SCANCODE_APPLICATION) ||
-        (usage >= SDL_SCANCODE_KP_EQUALS && usage <= SDL_SCANCODE_F24)) {
+    if ((usage >= static_cast<int>(KvmScancode::A) && usage <= static_cast<int>(KvmScancode::APPLICATION)) ||
+        (usage >= static_cast<int>(KvmScancode::KP_EQUALS) && usage <= static_cast<int>(KvmScancode::F24))) {
         return static_cast<std::uint8_t>(usage);
     }
 
@@ -63,13 +68,13 @@ std::optional<std::uint8_t> keyboard_usage_from_sdl_scancode(SDL_Scancode scanco
 std::uint8_t megarac_button_mask(std::uint32_t buttons)
 {
     std::uint8_t mask = 0;
-    if (buttons & (1u << SDL_BUTTON_LEFT)) {
+    if (buttons & (1u << static_cast<unsigned>(KvmMouseButton::LEFT))) {
         mask |= kMegaracMouseLeftButton;
     }
-    if (buttons & (1u << SDL_BUTTON_RIGHT)) {
+    if (buttons & (1u << static_cast<unsigned>(KvmMouseButton::RIGHT))) {
         mask |= kMegaracMouseRightButton;
     }
-    if (buttons & (1u << SDL_BUTTON_MIDDLE)) {
+    if (buttons & (1u << static_cast<unsigned>(KvmMouseButton::MIDDLE))) {
         mask |= kMegaracMouseMiddleButton;
     }
     return mask;
@@ -82,15 +87,15 @@ public:
     {
     }
 
-    bool accepts_button(std::uint8_t button) const override
+    bool accepts_button(KvmMouseButton button) const override
     {
-        return button == SDL_BUTTON_LEFT || button == SDL_BUTTON_MIDDLE || button == SDL_BUTTON_RIGHT;
+        return button == KvmMouseButton::LEFT || button == KvmMouseButton::MIDDLE || button == KvmMouseButton::RIGHT;
     }
 
-    bool accepts_key(SDL_Scancode scancode) const override
+    bool accepts_key(KvmScancode scancode) const override
     {
         return keyboard_modifier_bit(scancode).has_value()
-            || keyboard_usage_from_sdl_scancode(scancode).has_value();
+            || keyboard_usage_from_scancode(scancode).has_value();
     }
 
     void encode_pointer(const PointerState& state, const PointerChange& change) override
@@ -126,12 +131,12 @@ public:
             if (!state.down[scancode]) {
                 continue;
             }
-            const auto code = static_cast<SDL_Scancode>(scancode);
+            const auto code = static_cast<KvmScancode>(scancode);
             if (const auto modifier = keyboard_modifier_bit(code)) {
                 modifiers |= *modifier;
                 continue;
             }
-            if (const auto usage = keyboard_usage_from_sdl_scancode(code)) {
+            if (const auto usage = keyboard_usage_from_scancode(code)) {
                 if (slot < keys.size()) {
                     keys[slot++] = *usage;
                 }
@@ -204,6 +209,8 @@ private:
         aspeed_.destroy();
         aspeed_.reset_sequences();
         input_.reset();
+        hosted_frame_ = QImage();
+        hosted_last_sequence_ = 0;
     }
 
     void on_minimized() override
@@ -228,6 +235,69 @@ private:
     void handle_event(const SDL_Event& event, bool&) override
     {
         input_.handle_event(event);
+    }
+
+    KvmInputController* hosted_input_controller() override
+    {
+        return &input_;
+    }
+
+    std::optional<QImage> latest_frame_image() override
+    {
+        const std::shared_ptr<const MegaracCompressedFrame> frame =
+            state_->frames.latest(hosted_last_sequence_);
+        if (frame) {
+            hosted_last_sequence_ = frame->sequence;
+            if (std::optional<QImage> image = decode_hosted_frame(*frame)) {
+                hosted_frame_ = std::move(*image);
+            }
+        }
+        if (hosted_frame_.isNull()) {
+            return std::nullopt;
+        }
+        return hosted_frame_;
+    }
+
+    std::optional<std::pair<int, int>> latest_frame_size() override
+    {
+        if (const std::shared_ptr<const MegaracCompressedFrame> frame = state_->frames.latest(0)) {
+            return std::make_pair(frame->width, frame->height);
+        }
+        if (!hosted_frame_.isNull()) {
+            return std::make_pair(hosted_frame_.width(), hosted_frame_.height());
+        }
+        return std::nullopt;
+    }
+
+    // See AtenView::decode_hosted_frame: ASPEED delta decode -> opaque RGBA
+    // QImage seeded from the previous frame. Cursor overlay deferred.
+    std::optional<QImage> decode_hosted_frame(const MegaracCompressedFrame& frame)
+    {
+        if (frame.width <= 0 || frame.height <= 0) {
+            return std::nullopt;
+        }
+        const std::size_t size = aspeed_frame_rgba_size(frame.width, frame.height);
+        QImage image(frame.width, frame.height, QImage::Format_RGBX8888);
+        if (static_cast<std::size_t>(image.bytesPerLine()) * static_cast<std::size_t>(frame.height) != size) {
+            return std::nullopt;
+        }
+        if (!hosted_frame_.isNull()
+            && hosted_frame_.width() == frame.width
+            && hosted_frame_.height() == frame.height
+            && hosted_frame_.format() == QImage::Format_RGBX8888) {
+            std::memcpy(image.bits(), hosted_frame_.constBits(), size);
+        } else {
+            image.fill(Qt::white);
+        }
+        try {
+            hosted_decoder_.decode_rgba_into(
+                frame.decode_options,
+                frame.compressed,
+                std::span<std::uint8_t>(image.bits(), size));
+        } catch (...) {
+            return std::nullopt;
+        }
+        return image;
     }
 
     void render_visible(bool& render_needed, bool& first_render) override
@@ -267,6 +337,9 @@ private:
     AspeedViewRenderer aspeed_;
     MegaracInputEncoder encoder_;
     KvmInputController input_;
+    QImage hosted_frame_;
+    std::uint64_t hosted_last_sequence_ = 0;
+    AspeedDecoder hosted_decoder_;
 };
 
 } // namespace
@@ -277,8 +350,10 @@ void run_megarac_view(const MegaracViewOptions& options, const ViewWindow* hando
         MegaracView view(options);
         if (handoff != nullptr) {
             view.adopt_sdl(*handoff);
+            view.run();
+        } else {
+            run_qt_viewer(view, options.login.base_url.host, options.login.host_id);
         }
-        view.run();
     } catch (...) {
         print_current_exception_with_stack(std::cerr, "megarac view ui thread");
         throw;

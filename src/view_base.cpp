@@ -4,6 +4,7 @@
 #include "gui/launcher_host_store.hpp"
 #include "log.hpp"
 #include "view_console.hpp"
+#include "view_input.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -571,6 +572,138 @@ void KvmViewBase::do_retry()
     error_message_.clear();
     start_network(network_);
     network_started_ = true;
+}
+
+// ---------------------------------------------------------------------------
+// Qt-hosted mode. These mirror the responsibilities of run()/event_loop()
+// minus all SDL window/renderer ownership: the Qt entry point starts the
+// network, polls for session end, feeds input, and pulls frames/console.
+// ---------------------------------------------------------------------------
+
+void KvmViewBase::hosted_start_network()
+{
+    // The Qt surface maps pointer coordinates against itself, not an SDL window:
+    // centre the latest frame within the surface's current size. (Persists across
+    // reconnect; reset() does not touch the geometry source.)
+    if (KvmInputController* controller = hosted_input_controller()) {
+        controller->set_frame_geometry_source([this]() -> std::optional<FrameGeometry> {
+            const std::optional<std::pair<int, int>> size = latest_frame_size();
+            if (!size || hosted_surface_w_ <= 0 || hosted_surface_h_ <= 0) {
+                return std::nullopt;
+            }
+            return FrameGeometry{
+                size->first,
+                size->second,
+                centered_target_rect(hosted_surface_w_, hosted_surface_h_, size->first, size->second)};
+        });
+    }
+
+    start_network(network_);
+    network_started_ = true;
+}
+
+void KvmViewBase::hosted_set_surface_size(int width, int height)
+{
+    hosted_surface_w_ = width;
+    hosted_surface_h_ = height;
+}
+
+void KvmViewBase::hosted_stop_network()
+{
+    if (network_started_) {
+        network_.stop();
+        network_started_ = false;
+    }
+}
+
+void KvmViewBase::hosted_poll()
+{
+    if (network_.done() && !session_ended_) {
+        session_ended_ = true;
+        const std::exception_ptr exception = state_.take_exception();
+        had_error_ = static_cast<bool>(exception);
+        error_message_ = message_from_exception(exception);
+        if (had_error_) {
+            log_error() << log_name_ << " session ended with error: " << error_message_;
+        } else {
+            log_info() << log_name_ << " session ended";
+        }
+    }
+}
+
+void KvmViewBase::hosted_retry()
+{
+    do_retry();
+}
+
+bool KvmViewBase::hosted_connected() const
+{
+    return state_.view_status.render_state().connected;
+}
+
+std::string KvmViewBase::hosted_title() const
+{
+    return state_.view_status.title(host_);
+}
+
+std::optional<ConsoleScreen> KvmViewBase::hosted_console_screen() const
+{
+    const ViewRenderState render_state = state_.view_status.render_state();
+    ConsoleScreen screen;
+    if (build_console_screen(render_state, screen)) {
+        return screen;
+    }
+    return std::nullopt;
+}
+
+void KvmViewBase::hosted_minimized()
+{
+    state_.clear_frame_event_pending();
+    state_.view_status.minimize();
+    on_minimized();
+}
+
+void KvmViewBase::hosted_restored()
+{
+    on_restored();
+}
+
+void KvmViewBase::hosted_focus_lost()
+{
+    on_focus_lost();
+}
+
+void KvmViewBase::hosted_close()
+{
+    on_close();
+}
+
+void KvmViewBase::feed_key(const KvmKeyEvent& key)
+{
+    if (KvmInputController* controller = hosted_input_controller()) {
+        controller->feed_key(key);
+    }
+}
+
+void KvmViewBase::feed_pointer_button(const KvmPointerButton& button)
+{
+    if (KvmInputController* controller = hosted_input_controller()) {
+        controller->feed_pointer_button(button);
+    }
+}
+
+void KvmViewBase::feed_pointer_motion(const KvmPointerMotion& motion)
+{
+    if (KvmInputController* controller = hosted_input_controller()) {
+        controller->feed_pointer_motion(motion);
+    }
+}
+
+void KvmViewBase::feed_pointer_wheel(const KvmPointerWheel& wheel)
+{
+    if (KvmInputController* controller = hosted_input_controller()) {
+        controller->feed_pointer_wheel(wheel);
+    }
 }
 
 } // namespace hitsc
