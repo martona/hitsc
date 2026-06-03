@@ -8,11 +8,8 @@
 #include "pikvm_input.hpp"
 #include "pikvm_session.hpp"
 #include "pikvm_video.hpp"
-#include "pikvm_video_hardware.hpp"
 #include "view_base.hpp"
 #include "view_input.hpp"
-
-#include <SDL3/SDL.h>
 
 #include <QImage>
 
@@ -59,53 +56,6 @@ struct PikvmViewState : ViewStateBase {
     std::string status = "starting";
 };
 
-struct DurationStats {
-    std::uint64_t count = 0;
-    std::chrono::microseconds total{};
-    std::chrono::microseconds max{};
-
-    void add(PikvmClock::duration duration)
-    {
-        const auto micros = std::chrono::duration_cast<std::chrono::microseconds>(duration);
-        if (micros.count() < 0) {
-            return;
-        }
-        ++count;
-        total += micros;
-        max = std::max(max, micros);
-    }
-
-    double average_ms() const
-    {
-        if (count == 0) {
-            return 0.0;
-        }
-        return static_cast<double>(total.count()) / static_cast<double>(count) / 1000.0;
-    }
-
-    double max_ms() const
-    {
-        return static_cast<double>(max.count()) / 1000.0;
-    }
-};
-
-struct PikvmFrameLatencyBatch {
-    std::uint64_t frames = 0;
-    std::uint64_t payload_bytes = 0;
-    DurationStats receive_to_decode;
-    DurationStats decode_to_store;
-    DurationStats store_to_present;
-    DurationStats receive_to_present;
-    int last_width = 0;
-    int last_height = 0;
-    PikvmVideoPixelFormat last_format = PikvmVideoPixelFormat::rgba32;
-
-    void clear()
-    {
-        *this = {};
-    }
-};
-
 struct PikvmNetworkStopHandles {
     std::mutex mutex;
     std::function<void()> control_stop;
@@ -141,97 +91,6 @@ struct PikvmNetworkStopHandles {
     }
 };
 
-struct PikvmRendererSetup {
-    SDL_Renderer* renderer = nullptr;
-    std::shared_ptr<PikvmVideoHardware> hardware;
-};
-
-void throw_sdl_error(std::string_view context)
-{
-    throw std::runtime_error(std::string(context) + ": " + SDL_GetError());
-}
-
-std::string format_ms(double value)
-{
-    std::ostringstream out;
-    out << std::fixed << std::setprecision(2) << value;
-    return out.str();
-}
-
-PikvmRendererSetup create_pikvm_renderer(SDL_Window* window, const PikvmViewOptions& options)
-{
-    if (options.video_decode != PikvmVideoDecodeMode::software) {
-        PikvmVideoHardwareRenderer setup =
-            try_create_pikvm_video_hardware_renderer(window, options.login.verbose);
-        if (setup.renderer != nullptr && setup.hardware) {
-            return {setup.renderer, std::move(setup.hardware)};
-        }
-    }
-
-    SDL_Renderer* renderer = SDL_CreateRenderer(window, nullptr);
-    if (renderer == nullptr) {
-        throw_sdl_error("SDL_CreateRenderer");
-    }
-    if (options.login.verbose) {
-        log_info() << "SDL renderer selected for PiKVM"
-                   << " name=" << SDL_GetRendererName(renderer)
-                   << " hardware=no";
-    }
-    return {renderer, {}};
-}
-
-SDL_PixelFormat sdl_pixel_format_for_frame(PikvmVideoPixelFormat format)
-{
-    switch (format) {
-    case PikvmVideoPixelFormat::rgba32:
-        return SDL_PIXELFORMAT_RGBA32;
-    case PikvmVideoPixelFormat::i420:
-        return SDL_PIXELFORMAT_IYUV;
-    case PikvmVideoPixelFormat::nv12:
-        return SDL_PIXELFORMAT_NV12;
-    case PikvmVideoPixelFormat::hardware_nv12:
-        return SDL_PIXELFORMAT_NV12;
-    }
-    return SDL_PIXELFORMAT_RGBA32;
-}
-
-void update_pikvm_texture(SDL_Texture* texture, const PikvmVideoFrame& frame)
-{
-    switch (frame.format) {
-    case PikvmVideoPixelFormat::rgba32:
-        if (!SDL_UpdateTexture(texture, nullptr, frame.rgba.data(), frame.width * 4)) {
-            throw_sdl_error("SDL_UpdateTexture");
-        }
-        return;
-    case PikvmVideoPixelFormat::i420:
-        if (!SDL_UpdateYUVTexture(
-                texture,
-                nullptr,
-                frame.planes[0],
-                frame.pitches[0],
-                frame.planes[1],
-                frame.pitches[1],
-                frame.planes[2],
-                frame.pitches[2])) {
-            throw_sdl_error("SDL_UpdateYUVTexture");
-        }
-        return;
-    case PikvmVideoPixelFormat::nv12:
-        if (!SDL_UpdateNVTexture(
-                texture,
-                nullptr,
-                frame.planes[0],
-                frame.pitches[0],
-                frame.planes[1],
-                frame.pitches[1])) {
-            throw_sdl_error("SDL_UpdateNVTexture");
-        }
-        return;
-    case PikvmVideoPixelFormat::hardware_nv12:
-        throw std::runtime_error("hardware PiKVM frames must be uploaded with the hardware path");
-    }
-}
-
 void set_pikvm_status(PikvmViewState& state, std::string status)
 {
     std::lock_guard lock(state.control_mutex);
@@ -243,123 +102,6 @@ void store_pikvm_frame(PikvmViewState& state, PikvmVideoFrame frame)
     frame.timing.stored_at = PikvmClock::now();
     state.frames.publish(std::move(frame));
     state.push_render_event();
-}
-
-void release_pikvm_latest_frame(
-    PikvmViewState& state,
-    const std::shared_ptr<PikvmVideoHardware>& hardware)
-{
-    std::shared_ptr<const PikvmVideoFrame> frame = state.frames.clear();
-
-    if (frame && hardware && frame->format == PikvmVideoPixelFormat::hardware_nv12) {
-        auto lock = hardware->lock();
-        frame.reset();
-    }
-}
-
-void add_pikvm_frame_latency(
-    PikvmFrameLatencyBatch& batch,
-    const PikvmVideoFrame& frame,
-    PikvmClock::time_point presented_at)
-{
-    ++batch.frames;
-    batch.payload_bytes += pikvm_video_frame_payload_bytes(frame);
-    batch.last_width = frame.width;
-    batch.last_height = frame.height;
-    batch.last_format = frame.format;
-
-    const PikvmVideoFrameTiming& timing = frame.timing;
-    if (timing.media_received_at != PikvmClock::time_point{} &&
-        timing.decoded_at != PikvmClock::time_point{}) {
-        batch.receive_to_decode.add(timing.decoded_at - timing.media_received_at);
-        batch.receive_to_present.add(presented_at - timing.media_received_at);
-    }
-    if (timing.decoded_at != PikvmClock::time_point{} &&
-        timing.stored_at != PikvmClock::time_point{}) {
-        batch.decode_to_store.add(timing.stored_at - timing.decoded_at);
-    }
-    if (timing.stored_at != PikvmClock::time_point{}) {
-        batch.store_to_present.add(presented_at - timing.stored_at);
-    }
-}
-
-void maybe_log_pikvm_frame_latency(
-    PikvmFrameLatencyBatch& batch,
-    PikvmClock::time_point& last_log,
-    bool force)
-{
-    const auto now = PikvmClock::now();
-    if (batch.frames == 0) {
-        return;
-    }
-    if (!force && batch.frames < 60 && now - last_log < std::chrono::seconds(2)) {
-        return;
-    }
-
-    log_info() << "pikvm frame latency"
-               << " frames=" << batch.frames
-               << " payload-bytes=" << batch.payload_bytes
-               << " size=" << batch.last_width << 'x' << batch.last_height
-               << " format=" << pikvm_video_pixel_format_name(batch.last_format)
-               << " receive-decode-avg-ms=" << format_ms(batch.receive_to_decode.average_ms())
-               << " receive-decode-max-ms=" << format_ms(batch.receive_to_decode.max_ms())
-               << " decode-store-avg-ms=" << format_ms(batch.decode_to_store.average_ms())
-               << " decode-store-max-ms=" << format_ms(batch.decode_to_store.max_ms())
-               << " store-present-avg-ms=" << format_ms(batch.store_to_present.average_ms())
-               << " store-present-max-ms=" << format_ms(batch.store_to_present.max_ms())
-               << " receive-present-avg-ms=" << format_ms(batch.receive_to_present.average_ms())
-               << " receive-present-max-ms=" << format_ms(batch.receive_to_present.max_ms());
-    batch.clear();
-    last_log = now;
-}
-
-void destroy_pikvm_texture(
-    SDL_Texture*& texture,
-    const std::shared_ptr<PikvmVideoHardware>& hardware)
-{
-    if (texture == nullptr) {
-        return;
-    }
-
-    std::unique_lock<std::recursive_mutex> hardware_lock;
-    if (hardware) {
-        hardware_lock = hardware->lock();
-    }
-    SDL_DestroyTexture(texture);
-    texture = nullptr;
-}
-
-void reset_pikvm_texture_state(
-    SDL_Texture*& texture,
-    int& texture_width,
-    int& texture_height,
-    PikvmVideoPixelFormat& texture_format,
-    bool& texture_wraps_hardware_source,
-    const void*& texture_wrapped_hardware_source,
-    const std::shared_ptr<PikvmVideoHardware>& hardware)
-{
-    destroy_pikvm_texture(texture, hardware);
-    texture_width = 0;
-    texture_height = 0;
-    texture_format = PikvmVideoPixelFormat::rgba32;
-    texture_wraps_hardware_source = false;
-    texture_wrapped_hardware_source = nullptr;
-}
-
-void destroy_pikvm_renderer(
-    SDL_Renderer*& renderer,
-    const std::shared_ptr<PikvmVideoHardware>& hardware)
-{
-    if (renderer == nullptr) {
-        return;
-    }
-
-    std::unique_lock<std::recursive_mutex> hardware_lock;
-    if (hardware) {
-        hardware_lock = hardware->lock();
-    }
-    SDL_DestroyRenderer(renderer);
-    renderer = nullptr;
 }
 
 struct PikvmControlStopState {
@@ -684,73 +426,23 @@ private:
         , network_options_(options)
         , state_(std::move(state))
         , encoder_(*state_)
-        , input_(encoder_, [this] { return frame_geometry(); })
+        , input_(encoder_, [] { return std::optional<FrameGeometry>{}; })
     {
-    }
-
-    std::optional<FrameGeometry> frame_geometry() const
-    {
-        if (texture_width_ <= 0 || texture_height_ <= 0) {
-            return std::nullopt;
-        }
-        return FrameGeometry{
-            texture_width_,
-            texture_height_,
-            current_target_rect(texture_width_, texture_height_)};
-    }
-
-    SDL_Renderer* create_renderer(SDL_Window* window) override
-    {
-        PikvmRendererSetup renderer_setup = create_pikvm_renderer(window, options_);
-        hardware_ = renderer_setup.hardware;
-        if (!hardware_ && network_options_.video_decode == PikvmVideoDecodeMode::auto_select) {
-            network_options_.video_decode = PikvmVideoDecodeMode::software;
-        }
-        return renderer_setup.renderer;
-    }
-
-    void destroy_renderer(SDL_Renderer* renderer) override
-    {
-        SDL_Renderer* renderer_to_destroy = renderer;
-        destroy_pikvm_renderer(renderer_to_destroy, hardware_);
-        hardware_.reset();
     }
 
     void start_network(KvmNetworkWorker& network) override
     {
         PikvmViewOptions network_options = network_options_;
         std::shared_ptr<PikvmViewState> state = state_;
-        network.start([network_options, hardware = hardware_, state](
-                          std::atomic_bool& stop_requested) {
-            run_pikvm_network_session(network_options, hardware, *state, stop_requested);
+        network.start([network_options, state](std::atomic_bool& stop_requested) {
+            run_pikvm_network_session(network_options, {}, *state, stop_requested);
         });
-    }
-
-    void before_sdl_cleanup() override
-    {
-        input_.reset();
-        if (options_.login.vverbose) {
-            maybe_log_pikvm_frame_latency(frame_latency_, last_frame_latency_log_, true);
-        }
-        pending_present_latency_frame_.reset();
-        release_pikvm_latest_frame(*state_, hardware_);
-        destroy_pikvm_texture(texture_, hardware_);
     }
 
     void reset_for_reconnect() override
     {
         input_.reset();
-        pending_present_latency_frame_.reset();
-        release_pikvm_latest_frame(*state_, hardware_);
-        reset_pikvm_texture_state(
-            texture_,
-            texture_width_,
-            texture_height_,
-            texture_format_,
-            texture_wraps_hardware_source_,
-            texture_wrapped_hardware_source_,
-            hardware_);
-        last_sequence_ = 0;
+        state_->frames.clear();
         hosted_last_sequence_ = 0;
         hosted_frame_ = QImage();
         state_->video_decode_paused.store(false);
@@ -764,17 +456,7 @@ private:
     void on_minimized() override
     {
         state_->video_decode_paused.store(true);
-        pending_present_latency_frame_.reset();
-        release_pikvm_latest_frame(*state_, hardware_);
-        reset_pikvm_texture_state(
-            texture_,
-            texture_width_,
-            texture_height_,
-            texture_format_,
-            texture_wraps_hardware_source_,
-            texture_wrapped_hardware_source_,
-            hardware_);
-        last_sequence_ = 0;
+        state_->frames.clear();
     }
 
     void on_restored() override
@@ -785,11 +467,6 @@ private:
     void on_focus_lost() override
     {
         input_.release_all_keys();
-    }
-
-    void handle_event(const SDL_Event& event, bool&) override
-    {
-        input_.handle_event(event);
     }
 
     KvmInputController* hosted_input_controller() override
@@ -805,6 +482,7 @@ private:
             hosted_last_sequence_ = frame->sequence;
             if (std::optional<QImage> image = convert_hosted_frame(*frame)) {
                 hosted_frame_ = std::move(*image);
+                frame_presented(frame->width, frame->height);
             }
         }
         if (hosted_frame_.isNull()) {
@@ -894,209 +572,11 @@ private:
         return image;
     }
 
-    void render_visible(bool& render_needed, bool& first_render) override
-    {
-        upload_latest_frame(render_needed);
-        if (!render_needed || state_->video_decode_paused.load()) {
-            return;
-        }
-
-        std::unique_lock<std::recursive_mutex> hardware_render_lock;
-        if (hardware_) {
-            hardware_render_lock = hardware_->lock();
-        }
-
-        clear_background();
-        if (texture_ != nullptr && texture_width_ > 0 && texture_height_ > 0) {
-            const SDL_FRect target = current_target_rect(texture_width_, texture_height_);
-            SDL_RenderTexture(renderer(), texture_, nullptr, &target);
-        }
-        present();
-
-        if (pending_present_latency_frame_) {
-            const auto presented_at = PikvmClock::now();
-            frame_presented(
-                pending_present_latency_frame_->width,
-                pending_present_latency_frame_->height);
-            if (options_.login.vverbose) {
-                add_pikvm_frame_latency(
-                    frame_latency_,
-                    *pending_present_latency_frame_,
-                    presented_at);
-                maybe_log_pikvm_frame_latency(frame_latency_, last_frame_latency_log_, false);
-            }
-            pending_present_latency_frame_.reset();
-        }
-        first_render = false;
-    }
-
-    void upload_latest_frame(bool& render_needed)
-    {
-        const std::shared_ptr<const PikvmVideoFrame> frame =
-            state_->video_decode_paused.load()
-                ? nullptr
-                : state_->frames.latest(last_sequence_);
-        if (!frame) {
-            return;
-        }
-
-        std::unique_lock<std::recursive_mutex> hardware_render_lock;
-        if (hardware_) {
-            hardware_render_lock = hardware_->lock();
-        }
-
-        last_sequence_ = frame->sequence;
-        if (frame->format == PikvmVideoPixelFormat::hardware_nv12) {
-            upload_hardware_frame(*frame);
-        } else {
-            upload_software_frame(*frame);
-        }
-
-        pending_present_latency_frame_ = frame;
-        render_needed = true;
-    }
-
-    void upload_hardware_frame(const PikvmVideoFrame& frame)
-    {
-        if (!hardware_) {
-            throw std::runtime_error("hardware PiKVM frame received without a hardware video backend");
-        }
-
-        const bool direct_wrap =
-            !hardware_direct_wrap_disabled_ && hardware_->frame_can_wrap_direct(frame);
-        if (direct_wrap) {
-            try_wrap_hardware_frame(frame);
-        }
-
-        if (texture_ == nullptr || !texture_wraps_hardware_source_) {
-            ensure_hardware_copy_texture(frame);
-            hardware_->copy_frame_to_texture(texture_, frame);
-        }
-    }
-
-    void try_wrap_hardware_frame(const PikvmVideoFrame& frame)
-    {
-        const void* source_id = hardware_->frame_source_id(frame);
-        if (texture_ != nullptr
-            && texture_width_ == frame.width
-            && texture_height_ == frame.height
-            && texture_format_ == frame.format
-            && texture_wraps_hardware_source_
-            && texture_wrapped_hardware_source_ == source_id) {
-            return;
-        }
-
-        if (texture_ != nullptr) {
-            SDL_DestroyTexture(texture_);
-            texture_ = nullptr;
-        }
-
-        std::string wrap_error;
-        texture_ = hardware_->try_create_wrapped_texture(renderer(), frame, wrap_error);
-        if (texture_ != nullptr) {
-            texture_width_ = frame.width;
-            texture_height_ = frame.height;
-            texture_format_ = frame.format;
-            texture_wraps_hardware_source_ = true;
-            texture_wrapped_hardware_source_ = source_id;
-            if (options_.login.verbose) {
-                log_info() << "wrapped PiKVM hardware video texture directly"
-                           << " backend=" << hardware_->name();
-            }
-            return;
-        }
-
-        hardware_direct_wrap_disabled_ = true;
-        texture_width_ = 0;
-        texture_height_ = 0;
-        texture_format_ = PikvmVideoPixelFormat::rgba32;
-        texture_wraps_hardware_source_ = false;
-        texture_wrapped_hardware_source_ = nullptr;
-        if (options_.login.verbose) {
-            log_warning() << "direct hardware texture wrap failed; using GPU copy"
-                          << " backend=" << hardware_->name()
-                          << " error=" << wrap_error;
-        }
-    }
-
-    void ensure_hardware_copy_texture(const PikvmVideoFrame& frame)
-    {
-        if (texture_ != nullptr
-            && texture_width_ == frame.width
-            && texture_height_ == frame.height
-            && texture_format_ == frame.format
-            && !texture_wraps_hardware_source_) {
-            return;
-        }
-
-        if (texture_ != nullptr) {
-            SDL_DestroyTexture(texture_);
-        }
-        texture_ = SDL_CreateTexture(
-            renderer(),
-            SDL_PIXELFORMAT_NV12,
-            SDL_TEXTUREACCESS_STATIC,
-            frame.width,
-            frame.height);
-        if (texture_ == nullptr) {
-            throw_sdl_error("SDL_CreateTexture(hardware NV12)");
-        }
-        if (!hardware_->texture_can_receive_copy(texture_)) {
-            throw std::runtime_error("SDL NV12 texture did not expose a hardware video resource");
-        }
-        texture_width_ = frame.width;
-        texture_height_ = frame.height;
-        texture_format_ = frame.format;
-        texture_wraps_hardware_source_ = false;
-        texture_wrapped_hardware_source_ = nullptr;
-    }
-
-    void upload_software_frame(const PikvmVideoFrame& frame)
-    {
-        if (texture_ == nullptr
-            || texture_width_ != frame.width
-            || texture_height_ != frame.height
-            || texture_format_ != frame.format
-            || texture_wraps_hardware_source_) {
-            if (texture_ != nullptr) {
-                SDL_DestroyTexture(texture_);
-            }
-            texture_ = SDL_CreateTexture(
-                renderer(),
-                sdl_pixel_format_for_frame(frame.format),
-                SDL_TEXTUREACCESS_STREAMING,
-                frame.width,
-                frame.height);
-            if (texture_ == nullptr) {
-                throw_sdl_error("SDL_CreateTexture");
-            }
-            texture_width_ = frame.width;
-            texture_height_ = frame.height;
-            texture_format_ = frame.format;
-            texture_wraps_hardware_source_ = false;
-            texture_wrapped_hardware_source_ = nullptr;
-        }
-
-        update_pikvm_texture(texture_, frame);
-    }
-
     PikvmViewOptions options_;
     PikvmViewOptions network_options_;
     std::shared_ptr<PikvmViewState> state_;
     PikvmInputEncoder encoder_;
     KvmInputController input_;
-    SDL_Texture* texture_ = nullptr;
-    std::shared_ptr<PikvmVideoHardware> hardware_;
-    int texture_width_ = 0;
-    int texture_height_ = 0;
-    PikvmVideoPixelFormat texture_format_ = PikvmVideoPixelFormat::rgba32;
-    bool texture_wraps_hardware_source_ = false;
-    bool hardware_direct_wrap_disabled_ = false;
-    const void* texture_wrapped_hardware_source_ = nullptr;
-    PikvmFrameLatencyBatch frame_latency_;
-    PikvmClock::time_point last_frame_latency_log_ = PikvmClock::now();
-    std::shared_ptr<const PikvmVideoFrame> pending_present_latency_frame_;
-    std::uint64_t last_sequence_ = 0;
     SwsContext* hosted_sws_ = nullptr;
     QImage hosted_frame_;
     std::uint64_t hosted_last_sequence_ = 0;
@@ -1104,16 +584,11 @@ private:
 
 } // namespace
 
-void run_pikvm_view(const PikvmViewOptions& options, const ViewWindow* handoff)
+void run_pikvm_view(const PikvmViewOptions& options)
 {
     try {
         PikvmView view(options);
-        if (handoff != nullptr) {
-            view.adopt_sdl(*handoff);
-            view.run();
-        } else {
-            run_qt_viewer(view, options.login.base_url.host, options.login.host_id);
-        }
+        run_qt_viewer(view, options.login.base_url.host, options.login.host_id);
     } catch (const UserError&) {
         throw;
     } catch (...) {

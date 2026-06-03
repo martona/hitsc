@@ -1,13 +1,12 @@
 #include "aten_view.hpp"
 
-#include "backends/aspeed/aspeed_view_renderer.hpp"
+#include "backends/aspeed/aspeed_decoder.hpp"
+#include "backends/aspeed/aspeed_presenter.hpp"
 #include "aten_network.hpp"
 #include "aten_protocol.hpp"
 #include "diagnostics.hpp"
 #include "gui/viewer/qt_viewer_host.hpp"
 #include "view_input.hpp"
-
-#include <SDL3/SDL.h>
 
 #include <QImage>
 
@@ -121,20 +120,8 @@ private:
         , options_(options)
         , state_(std::move(state))
         , encoder_(*state_)
-        , input_(encoder_, [this] { return frame_geometry(); })
+        , input_(encoder_, [] { return std::optional<FrameGeometry>{}; })
     {
-    }
-
-    std::optional<FrameGeometry> frame_geometry() const
-    {
-        const AspeedPresentationSlot* active = aspeed_.active_slot();
-        if (active == nullptr) {
-            return std::nullopt;
-        }
-        return FrameGeometry{
-            active->width,
-            active->height,
-            current_target_rect(active->width, active->height)};
     }
 
     void start_network(KvmNetworkWorker& network) override
@@ -146,19 +133,11 @@ private:
         });
     }
 
-    void before_sdl_cleanup() override
-    {
-        input_.reset();
-        aspeed_.destroy();
-    }
-
     void reset_for_reconnect() override
     {
         state_->frames.clear();
         state_->cursors.clear();
         state_->input.clear();
-        aspeed_.destroy();
-        aspeed_.reset_sequences();
         input_.reset();
         hosted_frame_ = QImage();
         hosted_last_sequence_ = 0;
@@ -167,8 +146,6 @@ private:
     void on_minimized() override
     {
         state_->frames.clear();
-        aspeed_.destroy();
-        aspeed_.reset_sequences();
     }
 
     void on_restored() override
@@ -179,11 +156,6 @@ private:
     void on_focus_lost() override
     {
         input_.release_all_keys();
-    }
-
-    void handle_event(const SDL_Event& event, bool&) override
-    {
-        input_.handle_event(event);
     }
 
     KvmInputController* hosted_input_controller() override
@@ -199,6 +171,7 @@ private:
             hosted_last_sequence_ = frame->sequence;
             if (std::optional<QImage> image = decode_hosted_frame(*frame)) {
                 hosted_frame_ = std::move(*image);
+                frame_presented(frame->width, frame->height);
             }
         }
         if (hosted_frame_.isNull()) {
@@ -253,40 +226,8 @@ private:
         return image;
     }
 
-    void render_visible(bool& render_needed, bool& first_render) override
-    {
-        bool presented_new_frame = false;
-        aspeed_.update(
-            renderer(),
-            state_->frames,
-            state_->cursors,
-            "ATEN",
-            options_.login.vverbose,
-            render_needed,
-            presented_new_frame);
-
-        if (!render_needed) {
-            return;
-        }
-
-        clear_background();
-        if (const AspeedPresentationSlot* active = aspeed_.active_slot();
-            active != nullptr && active->texture != nullptr) {
-            aspeed_.render(renderer(), current_target_rect(active->width, active->height));
-        }
-        present();
-
-        if (presented_new_frame) {
-            if (const AspeedPresentationSlot* active = aspeed_.active_slot()) {
-                frame_presented(active->width, active->height);
-            }
-        }
-        first_render = false;
-    }
-
     AtenViewOptions options_;
     std::shared_ptr<AtenViewState> state_;
-    AspeedViewRenderer aspeed_;
     AtenInputEncoder encoder_;
     KvmInputController input_;
     QImage hosted_frame_;
@@ -296,16 +237,11 @@ private:
 
 } // namespace
 
-void run_aten_view(const AtenViewOptions& options, const ViewWindow* handoff)
+void run_aten_view(const AtenViewOptions& options)
 {
     try {
         AtenView view(options);
-        if (handoff != nullptr) {
-            view.adopt_sdl(*handoff);
-            view.run();
-        } else {
-            run_qt_viewer(view, options.login.base_url.host, options.login.host_id);
-        }
+        run_qt_viewer(view, options.login.base_url.host, options.login.host_id);
     } catch (...) {
         print_current_exception_with_stack(std::cerr, "aten view ui thread");
         throw;
