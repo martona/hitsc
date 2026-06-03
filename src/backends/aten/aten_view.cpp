@@ -110,7 +110,7 @@ public:
 
 private:
     AtenView(const AtenViewOptions& options, std::shared_ptr<AtenViewState> state)
-        : KvmViewBase(*state, options.login.base_url.host, "aten", [state] {
+        : KvmViewBase(*state, options.login.base_url.host, options.login.host_id, "aten", [state] {
               state->input.clear();
           })
         , options_(options)

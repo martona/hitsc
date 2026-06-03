@@ -51,6 +51,7 @@ LoginOptions make_login_options(const ChildSessionLaunchRequest& request)
     login.base_url.target = "/";
     login.username = to_utf8_string(request.credentials.username);
     login.password = to_utf8_string(request.credentials.password);
+    login.host_id = to_utf8_string(request.session_id);
     return login;
 }
 

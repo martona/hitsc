@@ -159,7 +159,7 @@ public:
 
 private:
     MegaracView(const MegaracViewOptions& options, std::shared_ptr<MegaracViewSessionState> state)
-        : KvmViewBase(*state, options.login.base_url.host, "megarac", [state] {
+        : KvmViewBase(*state, options.login.base_url.host, options.login.host_id, "megarac", [state] {
               state->input.clear();
           })
         , options_(options)

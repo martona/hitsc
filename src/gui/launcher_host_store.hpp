@@ -4,7 +4,10 @@
 
 #include <QByteArray>
 #include <QList>
+#include <QRect>
 #include <QString>
+
+#include <optional>
 
 namespace hitsc {
 
@@ -24,6 +27,10 @@ public:
 
     void save_last_connected(const QString& host_id) const;
     QString load_last_connected() const;
+
+    // Per-host viewer-window geometry, stored alongside the host record.
+    void save_window_rect(const QString& host_id, const QRect& rect) const;
+    std::optional<QRect> load_window_rect(const QString& host_id) const;
 
     const QString& root_path() const;
 

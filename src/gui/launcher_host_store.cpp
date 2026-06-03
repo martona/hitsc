@@ -266,6 +266,63 @@ QString HostStore::load_last_connected() const
     return read_string_value(root->get(), L"LastConnected").value_or(QString());
 }
 
+void HostStore::save_window_rect(const QString& host_id, const QRect& rect) const
+{
+    const QString trimmed_id = host_id.trimmed();
+    if (trimmed_id.isEmpty() || rect.width() <= 0 || rect.height() <= 0) {
+        return;
+    }
+
+    const auto root = open_key(HKEY_CURRENT_USER, root_path_, KEY_READ);
+    if (!root) {
+        return;
+    }
+    const auto hosts = open_key(root->get(), QStringLiteral("Hosts"), KEY_READ);
+    if (!hosts) {
+        return;
+    }
+    const auto host_key = open_key(hosts->get(), trimmed_id, KEY_WRITE);
+    if (!host_key) {
+        return; // host no longer exists — don't recreate it
+    }
+
+    write_int_value(host_key->get(), L"WindowX", rect.x());
+    write_int_value(host_key->get(), L"WindowY", rect.y());
+    write_int_value(host_key->get(), L"WindowWidth", rect.width());
+    write_int_value(host_key->get(), L"WindowHeight", rect.height());
+}
+
+std::optional<QRect> HostStore::load_window_rect(const QString& host_id) const
+{
+    const QString trimmed_id = host_id.trimmed();
+    if (trimmed_id.isEmpty()) {
+        return std::nullopt;
+    }
+
+    const auto root = open_key(HKEY_CURRENT_USER, root_path_, KEY_READ);
+    if (!root) {
+        return std::nullopt;
+    }
+    const auto hosts = open_key(root->get(), QStringLiteral("Hosts"), KEY_READ);
+    if (!hosts) {
+        return std::nullopt;
+    }
+    const auto host_key = open_key(hosts->get(), trimmed_id, KEY_READ);
+    if (!host_key) {
+        return std::nullopt;
+    }
+
+    const auto x = read_int_value(host_key->get(), L"WindowX");
+    const auto y = read_int_value(host_key->get(), L"WindowY");
+    const auto width = read_int_value(host_key->get(), L"WindowWidth");
+    const auto height = read_int_value(host_key->get(), L"WindowHeight");
+    if (!x || !y || !width || !height) {
+        return std::nullopt;
+    }
+
+    return QRect(*x, *y, *width, *height);
+}
+
 #else
 
 QByteArray CredentialProtector::protect(const QByteArray& plaintext) const
@@ -305,6 +362,18 @@ void HostStore::save_last_connected(const QString& host_id) const
 QString HostStore::load_last_connected() const
 {
     return {};
+}
+
+void HostStore::save_window_rect(const QString& host_id, const QRect& rect) const
+{
+    (void)host_id;
+    (void)rect;
+}
+
+std::optional<QRect> HostStore::load_window_rect(const QString& host_id) const
+{
+    (void)host_id;
+    return std::nullopt;
 }
 
 #endif

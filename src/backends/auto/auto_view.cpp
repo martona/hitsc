@@ -364,10 +364,12 @@ void run_auto_view(const AutoViewOptions& options)
     // Create the window up front so detection runs on-screen (with the same
     // console + retry as a live session), then hand the window to the detected
     // backend, which takes over SDL ownership.
-    ViewWindow view_window = make_view_window();
+    ViewWindow view_window = make_view_window(options.login.host_id);
 
-    const auto destroy_window = [&view_window]() {
+    const auto destroy_window = [&view_window, &options]() {
         if (view_window.window != nullptr) {
+            // Remember the window position even if detection failed/was aborted.
+            save_view_window_geometry(view_window.window, options.login.host_id);
             SDL_DestroyWindow(view_window.window);
             view_window.window = nullptr;
         }

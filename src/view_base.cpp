@@ -1,10 +1,12 @@
 #include "view_base.hpp"
 
+#include "gui/launcher_host_store.hpp"
 #include "log.hpp"
 #include "view_console.hpp"
 
 #include <algorithm>
 #include <cmath>
+#include <optional>
 #include <stdexcept>
 #include <string>
 
@@ -30,9 +32,51 @@ std::string message_from_exception(std::exception_ptr exception)
     }
 }
 
+bool rect_intersects_a_display(const SDL_Rect& rect)
+{
+    int count = 0;
+    SDL_DisplayID* displays = SDL_GetDisplays(&count);
+    if (displays == nullptr) {
+        return false;
+    }
+
+    bool intersects = false;
+    for (int i = 0; i < count; ++i) {
+        SDL_Rect bounds{};
+        if (SDL_GetDisplayBounds(displays[i], &bounds) && SDL_HasRectIntersection(&rect, &bounds)) {
+            intersects = true;
+            break;
+        }
+    }
+
+    SDL_free(displays);
+    return intersects;
+}
+
+void restore_child_window_geometry(SDL_Window* window, const std::string& host_id)
+{
+    if (host_id.empty()) {
+        return;
+    }
+
+    const HostStore store;
+    const std::optional<QRect> rect = store.load_window_rect(QString::fromStdString(host_id));
+    if (!rect || rect->width() <= 0 || rect->height() <= 0) {
+        return;
+    }
+
+    const SDL_Rect window_rect{rect->x(), rect->y(), rect->width(), rect->height()};
+    if (!rect_intersects_a_display(window_rect)) {
+        return; // saved on a monitor that's no longer there — keep the default
+    }
+
+    SDL_SetWindowSize(window, rect->width(), rect->height());
+    SDL_SetWindowPosition(window, rect->x(), rect->y());
+}
+
 } // namespace
 
-ViewWindow make_view_window()
+ViewWindow make_view_window(const std::string& geometry_key)
 {
     if (!SDL_Init(SDL_INIT_VIDEO)) {
         throw_view_sdl_error("SDL_Init");
@@ -45,14 +89,43 @@ ViewWindow make_view_window()
         throw std::runtime_error(std::move(error));
     }
 
-    SDL_Window* window = SDL_CreateWindow("hitsc", 1024, 768, SDL_WINDOW_RESIZABLE);
+    SDL_Window* window =
+        SDL_CreateWindow("hitsc", 1024, 768, SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIDDEN);
     if (window == nullptr) {
         std::string error = std::string("SDL_CreateWindow: ") + SDL_GetError();
         SDL_Quit();
         throw std::runtime_error(std::move(error));
     }
 
+    // Position before showing so a restored window doesn't flash at the OS
+    // default spot first.
+    restore_child_window_geometry(window, geometry_key);
+    SDL_ShowWindow(window);
+
     return ViewWindow{window, frame_event_type};
+}
+
+void save_view_window_geometry(SDL_Window* window, const std::string& geometry_key)
+{
+    if (window == nullptr || geometry_key.empty()) {
+        return;
+    }
+    if ((SDL_GetWindowFlags(window) & (SDL_WINDOW_MINIMIZED | SDL_WINDOW_MAXIMIZED)) != 0) {
+        return; // don't persist a minimized/maximized rect
+    }
+
+    int x = 0;
+    int y = 0;
+    int width = 0;
+    int height = 0;
+    SDL_GetWindowPosition(window, &x, &y);
+    SDL_GetWindowSize(window, &width, &height);
+    if (width <= 0 || height <= 0) {
+        return;
+    }
+
+    const HostStore store;
+    store.save_window_rect(QString::fromStdString(geometry_key), QRect(x, y, width, height));
 }
 
 void ViewStateBase::set_exception(std::exception_ptr exception)
@@ -142,11 +215,13 @@ bool KvmNetworkWorker::done() const
 KvmViewBase::KvmViewBase(
     ViewStateBase& state,
     std::string host,
+    std::string geometry_key,
     std::string log_name,
     std::function<void()> network_cleanup)
     : state_(state)
     , network_(state_, std::move(network_cleanup))
     , host_(std::move(host))
+    , geometry_key_(std::move(geometry_key))
     , log_name_(std::move(log_name))
 {
 }
@@ -268,7 +343,7 @@ void KvmViewBase::initialize_sdl()
         sdl_initialized_ = true; // we own SDL teardown now
         state_.set_frame_event_type(adopted_frame_event_type_);
     } else {
-        const ViewWindow created = make_view_window();
+        const ViewWindow created = make_view_window(geometry_key_);
         sdl_initialized_ = true;
         window_ = created.window;
         state_.set_frame_event_type(created.frame_event_type);
@@ -289,6 +364,7 @@ void KvmViewBase::cleanup_sdl()
         return;
     }
 
+    save_view_window_geometry(window_, geometry_key_);
     SDL_RemoveEventWatch(on_event_watch, this);
     SDL_CaptureMouse(false);
     before_sdl_cleanup();

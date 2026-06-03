@@ -25,7 +25,14 @@ struct ViewWindow {
 
 // Initialize SDL video, register the per-frame event, and create the view
 // window. Throws on failure (tearing SDL back down if it had been initialized).
-ViewWindow make_view_window();
+// geometry_key, when non-empty, restores the window's saved per-host position
+// and size (the same key cleanup uses to save it back).
+ViewWindow make_view_window(const std::string& geometry_key = "");
+
+// Persist a window's current position/size under its per-host geometry key.
+// No-op for an empty key or a minimized/maximized window. Used by the views on
+// cleanup and by the auto bootstrap when it closes the window before handoff.
+void save_view_window_geometry(SDL_Window* window, const std::string& geometry_key);
 
 class ViewStateBase {
 public:
@@ -172,6 +179,7 @@ public:
     KvmViewBase(
         ViewStateBase& state,
         std::string host,
+        std::string geometry_key,
         std::string log_name,
         std::function<void()> network_cleanup);
     virtual ~KvmViewBase() = default;
@@ -233,6 +241,7 @@ private:
     ViewStateBase& state_;
     KvmNetworkWorker network_;
     std::string host_;
+    std::string geometry_key_;
     std::string log_name_;
     SDL_Window* window_ = nullptr;
     SDL_Renderer* renderer_ = nullptr;

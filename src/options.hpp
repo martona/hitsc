@@ -23,6 +23,9 @@ struct LoginOptions {
     bool insecure = false;
     bool debug_disable_http_keepalive = false;
     std::shared_ptr<TlsSessionCache> tls_session_cache;
+    // Saved-host id, used to persist this viewer's window geometry with the host
+    // record. Empty for direct-CLI launches (no saved host).
+    std::string host_id;
 };
 
 struct MegaracViewOptions {

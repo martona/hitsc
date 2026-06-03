@@ -661,7 +661,7 @@ public:
 
 private:
     PikvmView(const PikvmViewOptions& options, std::shared_ptr<PikvmViewState> state)
-        : KvmViewBase(*state, options.login.base_url.host, "pikvm", [state] {
+        : KvmViewBase(*state, options.login.base_url.host, options.login.host_id, "pikvm", [state] {
               state->input.clear();
           })
         , options_(options)
