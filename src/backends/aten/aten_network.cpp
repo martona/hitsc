@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <deque>
 #include <limits>
 #include <memory>
@@ -43,6 +44,19 @@ namespace {
 using AtenWebSocket = BmcWebSocketStream;
 
 constexpr std::chrono::milliseconds kAtenFramebufferRequestBackoff{33};
+// When the host is powered off the BMC streams the same ~20KB 800x600 "I'm off"
+// JPEG forever (see handle_ast_rect). Once we've confirmed that state, slow our
+// pull-rate from ~30fps to this, cutting the wasted receive + TLS + bandwidth ~6x.
+// Reset to the fast rate the instant a non-duplicate frame arrives.
+constexpr std::chrono::milliseconds kAtenStaticFramebufferInterval{200};
+// A duplicate only counts toward that backoff if it's at least this big -- i.e. a
+// full-screen image, not a sub-KB all-SKIP "nothing changed" delta from a live idle
+// host. The powered-off image is ~20KB; idle deltas are well under 1KB, so 10KB is a
+// wide, safe divider that keeps an idle-but-ALIVE host at full responsiveness.
+constexpr std::size_t kAtenStaticFrameMinBytes = 10 * 1024;
+// Consecutive large identical frames before we engage the backoff (~165ms of
+// confirmation at the fast rate). Resets on any non-duplicate / small / no-op frame.
+constexpr int kAtenStaticBackoffAfterFrames = 5;
 constexpr std::size_t kMaxAtenMessagesPerReceiveDrain = 8;
 
 struct AtenQueuedWrite {
@@ -688,6 +702,7 @@ private:
         if (ast_payload_is_frame_end_only(payload)) {
             previous_width_ = rect.width;
             previous_height_ = rect.height;
+            static_frame_count_ = 0; // a real no-change frame from a live host: stay responsive
             if (options_.login.vverbose && (updates_ <= 20 || updates_ % 60 == 0)) {
                 log_info() << "skipped ATEN no-op frame #" << updates_
                            << " size=" << rect.width << 'x' << rect.height
@@ -700,6 +715,50 @@ private:
         if (payload.size() <= 4) {
             return;
         }
+
+        // Supermicro/ATEN powered-off "video", a.k.a. why this dedup exists.
+        // When the host is OFF, the BMC does NOT send a no-signal packet (its own RFB
+        // layer supports exactly that). Instead it BROADCASTS a full-frame 800x600
+        // branded "system is powered off" JPEG and re-sends it ~30 times a second,
+        // full frames, NOT delta-compressed, indefinitely, to announce that nothing
+        // is happening. Their own H5 viewer "handles" this by brute force: it pegs
+        // SIX cores to decode a static image at 12 fps. We manage it on one core at
+        // ~30 fps, which is less humiliating but still ridiculous.
+        //
+        // Fix: if the compressed payload is byte-for-byte identical to the previous
+        // frame, drop it here -- before it's queued or decoded. The size compare +
+        // memcmp costs a few microseconds; the JPEG decode it avoids costs ~a milli-
+        // second. Net on a dead host: ~zero CPU, which is what announcing "I'm off"
+        // should have cost before SMC decided a 30fps video stream was the way to do
+        // it. We compare payload[4:] (past the AST frame-tag word) so a changing tag
+        // can't defeat it. Thanks, Supermicro.
+        const std::uint8_t* compressed_data = payload.data() + 4;
+        const std::size_t compressed_size = payload.size() - 4;
+        if (compressed_size == previous_compressed_.size() &&
+            std::memcmp(compressed_data, previous_compressed_.data(), compressed_size) == 0) {
+            state_.view_status.kvm_display_status(true); // still showing the identical image
+            previous_width_ = rect.width;
+            previous_height_ = rect.height;
+            // Only a LARGE identical repeat (the ~20KB powered-off image) counts toward
+            // the request-rate backoff; a tiny all-SKIP "nothing changed" delta from a
+            // live idle host does not, so an idle-but-ALIVE screen keeps full latency.
+            if (compressed_size >= kAtenStaticFrameMinBytes) {
+                if (static_frame_count_ < kAtenStaticBackoffAfterFrames) {
+                    ++static_frame_count_;
+                }
+            } else {
+                static_frame_count_ = 0;
+            }
+            if (options_.login.vverbose && (updates_ <= 20 || updates_ % 120 == 0)) {
+                log_info() << "skipped duplicate ATEN frame #" << updates_
+                           << " size=" << rect.width << 'x' << rect.height
+                           << " compressed=" << compressed_size
+                           << " static-streak=" << static_frame_count_;
+            }
+            return;
+        }
+        previous_compressed_.assign(compressed_data, compressed_data + compressed_size);
+        static_frame_count_ = 0; // a real (different) frame -- resume full-rate polling
 
         blank_screen_packets_ = 0;
         AtenCompressedFrame frame;
@@ -732,6 +791,8 @@ private:
         ++blank_screen_packets_;
         state_.view_status.kvm_display_status(false);
         g_aten_full_framebuffer_refresh_requested.store(true);
+        previous_compressed_.clear(); // never dedup across a blank: force the next real frame to decode
+        static_frame_count_ = 0;      // and resume full-rate polling
 
         if (rect.width > 0) {
             previous_width_ = rect.width;
@@ -816,7 +877,14 @@ private:
 
         framebuffer_request_timer_active_ = true;
         auto self = shared_from_this();
-        framebuffer_request_timer_.expires_after(kAtenFramebufferRequestBackoff);
+        // Wind the pull-rate down to kAtenStaticFramebufferInterval once we're sure we're
+        // staring at the powered-off image (a streak of large identical frames); otherwise
+        // poll at the normal fast rate. static_frame_count_ resets to 0 on any non-dup /
+        // small / no-op frame, so recovery latency is <= one slow tick.
+        const auto request_interval = static_frame_count_ >= kAtenStaticBackoffAfterFrames
+            ? kAtenStaticFramebufferInterval
+            : kAtenFramebufferRequestBackoff;
+        framebuffer_request_timer_.expires_after(request_interval);
         framebuffer_request_timer_.async_wait(
             asio::bind_executor(strand_, [self](beast::error_code error) {
                 self->framebuffer_request_timer_active_ = false;
@@ -957,6 +1025,8 @@ private:
     std::size_t last_websocket_message_bytes_ = 0;
     int previous_width_ = 0;
     int previous_height_ = 0;
+    std::vector<std::uint8_t> previous_compressed_; // last decoded frame's payload, for powered-off dedup
+    int static_frame_count_ = 0;                    // consecutive large identical frames (powered-off backoff)
     int cursor_pattern_width_ = 0;
     int cursor_pattern_height_ = 0;
     int updates_ = 0;
