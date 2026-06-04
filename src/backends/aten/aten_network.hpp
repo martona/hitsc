@@ -26,7 +26,7 @@ struct AtenCompressedFrame {
 };
 
 struct AtenViewState : ViewStateBase {
-    LatestMailbox<AtenCompressedFrame> frames;
+    FrameQueue<AtenCompressedFrame> frames; // differential stream: never drop
     LatestMailbox<HardwareCursor> cursors;
     InputQueue<std::vector<std::uint8_t>> input;
 };

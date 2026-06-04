@@ -184,14 +184,22 @@ private:
             recomposite = true;
         }
 
-        const std::shared_ptr<const AtenCompressedFrame> frame =
-            state_->frames.latest(hosted_last_sequence_);
-        if (frame) {
+        // ASPEED is a differential stream (see FrameQueue): decode EVERY queued
+        // frame in arrival order. Skipping any (as the old latest-wins mailbox
+        // did) corrupts the SKIP/PASS2 delta chain until the next full refresh.
+        const std::vector<std::shared_ptr<const AtenCompressedFrame>> frames =
+            state_->frames.drain();
+        for (const std::shared_ptr<const AtenCompressedFrame>& frame : frames) {
             hosted_last_sequence_ = frame->sequence;
             if (decode_hosted_frame(*frame)) {
                 frame_presented(frame->width, frame->height);
                 recomposite = true;
             }
+        }
+        if (state_->frames.overflowed()) {
+            // Fell too far behind to preserve the delta chain; request a full
+            // framebuffer refresh to resync instead of accumulating garbage.
+            g_aten_full_framebuffer_refresh_requested.store(true);
         }
 
         if (recomposite && !hosted_clean_rgba_.empty()) {
@@ -207,8 +215,8 @@ private:
 
     std::optional<std::pair<int, int>> latest_frame_size() override
     {
-        if (const std::shared_ptr<const AtenCompressedFrame> frame = state_->frames.latest(0)) {
-            return std::make_pair(frame->width, frame->height);
+        if (hosted_clean_width_ > 0 && hosted_clean_height_ > 0) {
+            return std::make_pair(hosted_clean_width_, hosted_clean_height_);
         }
         if (!hosted_frame_.isNull()) {
             return std::make_pair(hosted_frame_.width(), hosted_frame_.height());

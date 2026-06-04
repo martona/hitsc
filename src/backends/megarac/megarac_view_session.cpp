@@ -759,6 +759,13 @@ private:
             return;
         }
 
+        // Honest backpressure only: report the magnitude of our received-vs-decoded
+        // backlog so the BMC slows if we GENUINELY fall behind. Do NOT try to use
+        // this to enforce a target frame rate -- the BMC's 100ms feedback loop is a
+        // coarse stop-and-go controller (pause on backlog, resume when clear) that
+        // cannot track a synthetic set-point without bursting/stalling (it settled
+        // ~10fps + jerky when we tried). It free-runs at its native rate; this is an
+        // emergency brake, not a throttle.
         const std::uint64_t frames_presented =
             state_.video_feedback_presented_frames.load(std::memory_order_relaxed);
         const std::uint64_t presented_delta = frames_presented - last_video_feedback_presented_frames_;
