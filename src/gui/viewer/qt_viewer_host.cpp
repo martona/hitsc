@@ -1,5 +1,6 @@
 #include "gui/viewer/qt_viewer_host.hpp"
 
+#include "cert_prompt.hpp"
 #include "cert_trust.hpp"
 #include "console_screen.hpp"
 #include "gui/launcher_host_store.hpp"
@@ -168,6 +169,9 @@ int run_viewer(const ViewerLaunch& launch, const std::function<void(ViewerHost&)
             const HostStore store;
             store.save_window_rect(QString::fromStdString(host_id), window.geometry());
         }
+        // Release any cert prompt blocked on the GUI thread before joining the
+        // network/detection thread, or the join deadlocks against it.
+        cancel_pending_cert_prompt();
         if (KvmViewBase* view = host.view()) {
             view->hosted_stop_network();
         }
@@ -204,8 +208,8 @@ int run_viewer(const ViewerLaunch& launch, const std::function<void(ViewerHost&)
             }
         });
 
-    // Cert prompts parent on this window and pin under host_id (HWND on Windows).
-    cert_trust_attach_window(reinterpret_cast<void*>(window.winId()), host_id);
+    // Cert prompts parent on this window and pin under host_id.
+    cert_trust_attach_window(&window, host_id);
 
     // The view is attached once QRhi (and its D3D11 device) is up, so the network
     // starts only after the device exists -- pikvm binds FFmpeg D3D11VA decode to
@@ -225,6 +229,7 @@ int run_viewer(const ViewerLaunch& launch, const std::function<void(ViewerHost&)
 
     const int code = app->exec();
 
+    cancel_pending_cert_prompt();
     if (KvmViewBase* view = host.view()) {
         view->hosted_stop_network();
     }

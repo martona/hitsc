@@ -1,75 +1,108 @@
 #include "cert_prompt.hpp"
 
-#ifdef _WIN32
+#include <QApplication>
+#include <QCheckBox>
+#include <QMessageBox>
+#include <QObject>
+#include <QPushButton>
+#include <QSemaphore>
+#include <QString>
+#include <QThread>
+#include <QWidget>
 
-// Bind to v6 of the common controls so TaskDialogIndirect is available and
-// themed. Localised here so the rest of the build needs no manifest juggling.
-#if defined(_MSC_VER)
-#pragma comment( \
-    linker, \
-    "/manifestdependency:\"type='win32' " \
-    "name='Microsoft.Windows.Common-Controls' version='6.0.0.0' " \
-    "processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
-#endif
-
-#include <windows.h>
-
-#include <commctrl.h>
-
+#include <memory>
+#include <mutex>
+#include <optional>
 #include <string>
 
 namespace hitsc {
 namespace {
 
-std::wstring widen(const std::string& value)
+QString to_qstring(const std::string& value)
 {
-    if (value.empty()) {
-        return {};
-    }
-    const int length = MultiByteToWideChar(
-        CP_UTF8, 0, value.data(), static_cast<int>(value.size()), nullptr, 0);
-    if (length <= 0) {
-        return {};
-    }
-    std::wstring wide(static_cast<std::size_t>(length), L'\0');
-    MultiByteToWideChar(
-        CP_UTF8, 0, value.data(), static_cast<int>(value.size()), wide.data(), length);
-    return wide;
+    return QString::fromStdString(value);
 }
 
-std::wstring build_content(
+QString build_content(
     const std::string& host,
     const CertPromptInfo& info,
     bool changed,
     const std::optional<std::string>& previous_fingerprint)
 {
-    std::wstring content = L"hitsc could not confirm the identity of ";
-    content += widen(host);
-    content += L".";
+    QString content = QStringLiteral("hitsc could not confirm the identity of ") + to_qstring(host)
+        + QLatin1Char('.');
 
     if (!info.reason.empty()) {
-        content += L"\n\n";
-        content += widen(info.reason);
+        content += QStringLiteral("\n\n") + to_qstring(info.reason);
     }
 
-    content += L"\n";
+    content += QLatin1Char('\n');
     if (!info.subject.empty()) {
-        content += L"\nName:  " + widen(info.subject);
+        content += QStringLiteral("\nName:  ") + to_qstring(info.subject);
     }
     if (!info.issuer.empty()) {
-        content += L"\nIssuer:  " + widen(info.issuer);
+        content += QStringLiteral("\nIssuer:  ") + to_qstring(info.issuer);
     }
     if (!info.valid_from.empty() || !info.valid_to.empty()) {
-        content += L"\nValid:  " + widen(info.valid_from) + L"  to  " + widen(info.valid_to);
+        content += QStringLiteral("\nValid:  ") + to_qstring(info.valid_from) + QStringLiteral("  to  ")
+            + to_qstring(info.valid_to);
     }
-    content += L"\nSHA-256:  " + widen(info.fingerprint);
+    content += QStringLiteral("\nSHA-256:  ") + to_qstring(info.fingerprint);
 
     if (changed && previous_fingerprint) {
-        content += L"\n\nPreviously pinned:\n" + widen(*previous_fingerprint);
+        content += QStringLiteral("\n\nPreviously pinned:\n") + to_qstring(*previous_fingerprint);
     }
 
     return content;
 }
+
+// Build and run the modal prompt. Must be called on the GUI thread.
+CertPromptResult show_cert_prompt_gui(
+    QWidget* parent,
+    const std::string& host,
+    const CertPromptInfo& info,
+    bool changed,
+    const std::optional<std::string>& previous_fingerprint,
+    bool allow_pin)
+{
+    QMessageBox box(parent);
+    box.setWindowTitle(QStringLiteral("hitsc"));
+    box.setIcon(changed ? QMessageBox::Critical : QMessageBox::Warning);
+    // Plain text: the subject/issuer come from an untrusted certificate, so never
+    // let them be interpreted as rich text.
+    box.setTextFormat(Qt::PlainText);
+    box.setText(
+        changed ? QStringLiteral("This host's certificate has changed")
+                : QStringLiteral("Untrusted certificate"));
+    box.setInformativeText(build_content(host, info, changed, previous_fingerprint));
+
+    QPushButton* connect_button = box.addButton(QStringLiteral("Connect"), QMessageBox::AcceptRole);
+    QPushButton* cancel_button = box.addButton(QMessageBox::Cancel);
+    box.setDefaultButton(changed ? cancel_button : connect_button);
+    box.setEscapeButton(cancel_button);
+
+    QCheckBox* pin_box = nullptr;
+    if (allow_pin) {
+        // QMessageBox takes ownership of the check box.
+        pin_box = new QCheckBox(
+            changed ? QStringLiteral("Replace the pinned certificate with this one")
+                    : QStringLiteral("Pin this certificate and remember it for this host"));
+        box.setCheckBox(pin_box);
+    }
+
+    box.exec();
+
+    CertPromptResult choice;
+    choice.proceed = box.clickedButton() == connect_button;
+    choice.pin = allow_pin && choice.proceed && pin_box != nullptr && pin_box->isChecked();
+    return choice;
+}
+
+// The wait of an in-flight prompt, so the GUI shutdown path can release a network
+// thread blocked waiting for us to show the dialog. Single slot: hitsc talks to
+// one server with a stable cert for its lifetime, so prompts never overlap.
+std::mutex g_pending_mutex;
+std::shared_ptr<QSemaphore> g_pending;
 
 } // namespace
 
@@ -81,73 +114,60 @@ CertPromptResult show_cert_prompt(
     const std::optional<std::string>& previous_fingerprint,
     bool allow_pin)
 {
-    const HWND parent = reinterpret_cast<HWND>(native_parent);
-
-    const std::wstring title = L"hitsc";
-    const std::wstring instruction =
-        changed ? L"This host's certificate has changed" : L"Untrusted certificate";
-    const std::wstring content = build_content(host, info, changed, previous_fingerprint);
-    const std::wstring verification =
-        changed ? L"Replace the pinned certificate with this one"
-                : L"Pin this certificate and remember it for this host";
-
-    constexpr int kConnectId = 1001;
-    TASKDIALOG_BUTTON connect_button{kConnectId, L"Connect"};
-
-    TASKDIALOGCONFIG config{};
-    config.cbSize = sizeof(config);
-    config.hwndParent = parent;
-    config.dwFlags = TDF_POSITION_RELATIVE_TO_WINDOW | TDF_ALLOW_DIALOG_CANCELLATION;
-    config.pszWindowTitle = title.c_str();
-    config.pszMainIcon = changed ? TD_ERROR_ICON : TD_WARNING_ICON;
-    config.pszMainInstruction = instruction.c_str();
-    config.pszContent = content.c_str();
-    config.pButtons = &connect_button;
-    config.cButtons = 1;
-    config.dwCommonButtons = TDCBF_CANCEL_BUTTON;
-    config.nDefaultButton = changed ? IDCANCEL : kConnectId;
-    if (allow_pin) {
-        config.pszVerificationText = verification.c_str();
+    // No Qt application (headless probe) -> cannot prompt; strict verification wins.
+    if (qApp == nullptr) {
+        return {};
     }
 
-    int pressed = 0;
-    BOOL checked = FALSE;
-    const HRESULT result = TaskDialogIndirect(&config, &pressed, nullptr, &checked);
-    if (FAILED(result)) {
-        // Common controls v6 unavailable — degrade to a plain prompt. The
-        // remember checkbox is lost; the user can still connect once or bail.
-        const std::wstring fallback_title = title + L" - certificate";
-        const UINT flags = MB_OKCANCEL | (changed ? MB_ICONERROR | MB_DEFBUTTON2 : MB_ICONWARNING);
-        const int answer = MessageBoxW(parent, content.c_str(), fallback_title.c_str(), flags);
-        CertPromptResult fallback;
-        fallback.proceed = answer == IDOK;
-        fallback.pin = false;
-        return fallback;
+    auto* parent = static_cast<QWidget*>(native_parent);
+
+    // Already on the GUI thread (not expected from the verify callback, but cheap
+    // to honour): show it directly.
+    if (QThread::currentThread() == qApp->thread()) {
+        return show_cert_prompt_gui(parent, host, info, changed, previous_fingerprint, allow_pin);
     }
 
-    CertPromptResult choice;
-    choice.proceed = pressed == kConnectId;
-    choice.pin = allow_pin && choice.proceed && checked != FALSE;
-    return choice;
+    // cert_trust_evaluate runs on the network thread; QWidgets live on the GUI
+    // thread. Post the dialog there (non-blocking) and wait on our own semaphore,
+    // which cancel_pending_cert_prompt() releases on shutdown -- otherwise a
+    // window-close mid-prompt would deadlock (network thread blocked here while the
+    // GUI thread blocks joining the network thread). The dialog lambda and cancel
+    // both run on the GUI thread, so claiming g_pending serialises them: whoever
+    // runs first wins, the loser is a no-op.
+    CertPromptResult result;
+    auto sem = std::make_shared<QSemaphore>();
+    {
+        std::lock_guard<std::mutex> lock(g_pending_mutex);
+        g_pending = sem;
+    }
+    QMetaObject::invokeMethod(
+        qApp,
+        [&, sem]() {
+            {
+                std::lock_guard<std::mutex> lock(g_pending_mutex);
+                if (g_pending != sem) {
+                    return;  // cancelled before we ran; result stays {proceed:false}
+                }
+                g_pending.reset();
+            }
+            result = show_cert_prompt_gui(parent, host, info, changed, previous_fingerprint, allow_pin);
+            sem->release();
+        },
+        Qt::QueuedConnection);
+    sem->acquire();
+    return result;
 }
 
-} // namespace hitsc
-
-#else // !_WIN32
-
-namespace hitsc {
-
-CertPromptResult show_cert_prompt(
-    void*,
-    const std::string&,
-    const CertPromptInfo&,
-    bool,
-    const std::optional<std::string>&,
-    bool)
+void cancel_pending_cert_prompt()
 {
-    return {};
+    std::shared_ptr<QSemaphore> sem;
+    {
+        std::lock_guard<std::mutex> lock(g_pending_mutex);
+        sem = std::move(g_pending);
+    }
+    if (sem) {
+        sem->release();  // unblock show_cert_prompt with the default {proceed:false}
+    }
 }
 
 } // namespace hitsc
-
-#endif // _WIN32

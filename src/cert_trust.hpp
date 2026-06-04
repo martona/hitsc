@@ -7,9 +7,9 @@
 namespace hitsc {
 
 // Attach the window and host identity the certificate prompt uses. Called once,
-// as soon as the viewer window exists. native_window_handle is an HWND on
-// Windows (may be null when there is no window — headless probes, etc., in which
-// case the broker can never prompt and falls back to strict verification).
+// as soon as the viewer window exists. native_window_handle is the viewer window
+// (a QWidget*; may be null when there is no window — headless probes, etc., in
+// which case the broker can never prompt and falls back to strict verification).
 // host_id keys the persistent pin in the host store; an empty id disables
 // persistence (the cert can still be accepted for the lifetime of the process).
 void cert_trust_attach_window(void* native_window_handle, std::string host_id);
