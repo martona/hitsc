@@ -168,7 +168,7 @@ public:
     KvmViewBase& operator=(const KvmViewBase&) = delete;
 
     // -----------------------------------------------------------------------
-    // Qt-native entry. The Qt viewer host (run_qt_viewer) drives these.
+    // Qt-native entry. The Qt viewer host (run_viewer) drives these.
     // -----------------------------------------------------------------------
     void hosted_start_network();  // start the network worker
     void hosted_stop_network();   // stop it (idempotent)

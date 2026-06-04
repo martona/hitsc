@@ -163,7 +163,7 @@ void KvmViewBase::do_retry()
 }
 
 // ---------------------------------------------------------------------------
-// Qt-hosted mode. The Qt viewer host (run_qt_viewer) drives these: start the
+// Qt-hosted mode. The Qt viewer host (run_viewer) drives these: start the
 // network, poll for session end, feed input, and pull frames/console.
 // ---------------------------------------------------------------------------
 

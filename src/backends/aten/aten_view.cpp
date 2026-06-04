@@ -292,11 +292,17 @@ private:
 
 } // namespace
 
+std::unique_ptr<KvmViewBase> make_aten_view(const AtenViewOptions& options)
+{
+    return std::make_unique<AtenView>(options);
+}
+
 void run_aten_view(const AtenViewOptions& options)
 {
     try {
-        AtenView view(options);
-        run_qt_viewer(view, options.login.base_url.host, options.login.host_id);
+        run_viewer({options.login.base_url.host, options.login.host_id}, [options](ViewerHost& host) {
+            host.attach_view(make_aten_view(options));
+        });
     } catch (...) {
         print_current_exception_with_stack(std::cerr, "aten view ui thread");
         throw;

@@ -3,24 +3,19 @@
 #include "backends/aten/aten_view.hpp"
 #include "backends/megarac/megarac_view.hpp"
 #include "backends/pikvm/pikvm_view.hpp"
-#include "cert_trust.hpp"
 #include "cookie_jar.hpp"
 #include "errors.hpp"
-#include "gui/viewer/viewer_surface.hpp"
+#include "gui/viewer/qt_viewer_host.hpp"
 #include "gui/viewer/viewer_window.hpp"
 #include "http_client.hpp"
 #include "log.hpp"
 #include "text.hpp"
-#include "console_screen.hpp"
 #include "tls_session_cache.hpp"
-#include "view_input_types.hpp"
+#include "view_base.hpp"  // complete KvmViewBase: make_detected_view owns unique_ptr<KvmViewBase>
 
 #include <boost/beast/http.hpp>
 
-#include <QApplication>
-#include <QCoreApplication>
-#include <QEventLoop>
-#include <QString>
+#include <QObject>
 
 #include <algorithm>
 #include <atomic>
@@ -186,140 +181,113 @@ std::string detection_failure_message()
     return "Could not auto-detect KVM type from GET /. Choose ATEN, MegaRAC, or PiKVM manually.";
 }
 
-// Detect the backend with a Qt window already on screen, so the TLS cert prompt
-// can parent on it (first-time/self-signed hosts) and the user sees the
-// connecting console. Detection runs on a worker; the window's ~16 ms tick polls
-// for completion. Returns the backend, nullopt if the user aborted (Esc/close),
-// or rethrows the detection failure (surfaced by the launcher/CLI). The window
-// is torn down before the concrete backend opens its own.
-std::optional<DetectedKvmBackend> detect_with_qt_window(AutoViewOptions& options)
+std::unique_ptr<KvmViewBase> make_detected_view(DetectedKvmBackend backend, const AutoViewOptions& options)
 {
-    if (!options.login.tls_session_cache) {
-        options.login.tls_session_cache = std::make_shared<TlsSessionCache>(16);
+    switch (backend) {
+    case DetectedKvmBackend::Megarac: {
+        MegaracViewOptions view_options;
+        view_options.login = options.login;
+        view_options.idle_timeout_seconds = options.idle_timeout_seconds;
+        return make_megarac_view(view_options);
     }
+    case DetectedKvmBackend::Aten: {
+        AtenViewOptions view_options;
+        view_options.login = options.login;
+        view_options.idle_timeout_seconds = options.idle_timeout_seconds;
+        view_options.shared = options.aten_shared;
+        return make_aten_view(view_options);
+    }
+    case DetectedKvmBackend::Pikvm: {
+        PikvmViewOptions view_options;
+        view_options.login = options.login;
+        view_options.idle_timeout_seconds = options.idle_timeout_seconds;
+        view_options.video_decode = options.pikvm_video_decode;
+        return make_pikvm_view(view_options);
+    }
+    case DetectedKvmBackend::Unknown:
+        break;
+    }
+    return nullptr;
+}
 
-    const std::string host = options.login.base_url.host;
-
-    ViewerWindow window(QStringLiteral("hitsc - ") + QString::fromStdString(host));
-    cert_trust_attach_window(reinterpret_cast<void*>(window.winId()), options.login.host_id);
-
-    ConsoleScreen screen;
-    screen.severity = ConsoleSeverity::Info;
-    screen.headline = "Connecting to " + host + "...";
-    screen.hint = "Esc to cancel";
-    window.surface()->show_console(screen);
-    window.show();
-
+// Async backend detection driven inside the shared viewer window: a worker runs
+// the HTTPS probe while the harness shows the connecting console; the window's
+// frameTick polls for completion, then attaches the detected view (or fails).
+// The worker holds only a raw pointer back to this state; the destructor joins it
+// before the members are destroyed, so the pointer can never dangle.
+struct AutoDetection {
+    AutoViewOptions options;
     std::atomic_bool done{false};
     std::optional<DetectedKvmBackend> backend;
     std::exception_ptr error;
-    std::thread worker([&]() {
-        try {
-            const KvmBackendFingerprint fingerprint = detect_kvm_backend(options.login);
-            if (fingerprint.backend == DetectedKvmBackend::Unknown) {
-                throw UserError(detection_failure_message());
-            }
-            log_info() << "auto KVM detection selected"
-                       << " backend=" << backend_name(fingerprint.backend)
-                       << " score=" << fingerprint.score
-                       << " reason=" << join_reasons(fingerprint.reasons);
-            backend = fingerprint.backend;
-        } catch (...) {
-            error = std::current_exception();
-        }
-        done.store(true);
-    });
+    std::thread worker;
+    bool handled = false;
 
-    QEventLoop loop;
-    bool aborted = false;
-    QObject::connect(&window, &ViewerWindow::closeRequested, &loop, [&]() {
-        aborted = true;
-        loop.quit();
-    });
-    QObject::connect(&window, &ViewerWindow::keyEvent, &loop, [&](const KvmKeyEvent& key) {
-        if (key.down && key.scancode == KvmScancode::ESCAPE) {
-            aborted = true;
-            loop.quit();
+    ~AutoDetection()
+    {
+        if (worker.joinable()) {
+            worker.join();
         }
-    });
-    QObject::connect(&window, &ViewerWindow::frameTick, &loop, [&]() {
-        if (done.load()) {
-            loop.quit();
-        }
-    });
-    loop.exec();
-
-    worker.join();
-
-    if (aborted) {
-        return std::nullopt;
     }
-    if (error) {
-        std::rethrow_exception(error);
-    }
-    return backend;
-}
+};
 
 } // namespace
 
 void run_auto_view(const AutoViewOptions& options)
 {
-    // Own the QApplication across both phases (detection window, then the backend
-    // view window). The child/direct process has none yet.
-    static char program_name[] = "hitsc";
-    int argc = 1;
-    char* argv[] = {program_name, nullptr};
-    std::unique_ptr<QApplication> owned_app;
-    if (QCoreApplication::instance() == nullptr) {
-        owned_app = std::make_unique<QApplication>(argc, argv);
-    }
-    auto* app = qobject_cast<QApplication*>(QCoreApplication::instance());
+    // One window for both phases: the harness owns the QApplication + window and
+    // shows the connecting console; detection runs once the surface is up (so cert
+    // prompts parent on the window), then the detected view attaches in place.
+    run_viewer({options.login.base_url.host, options.login.host_id}, [options](ViewerHost& host) {
+        auto detection = std::make_shared<AutoDetection>();
+        detection->options = options;
+        if (!detection->options.login.tls_session_cache) {
+            detection->options.login.tls_session_cache = std::make_shared<TlsSessionCache>(16);
+        }
 
-    AutoViewOptions detected_options = options;
+        AutoDetection* state = detection.get();
+        detection->worker = std::thread([state]() {
+            try {
+                const KvmBackendFingerprint fingerprint = detect_kvm_backend(state->options.login);
+                if (fingerprint.backend == DetectedKvmBackend::Unknown) {
+                    throw UserError(detection_failure_message());
+                }
+                log_info() << "auto KVM detection selected"
+                           << " backend=" << backend_name(fingerprint.backend)
+                           << " score=" << fingerprint.score
+                           << " reason=" << join_reasons(fingerprint.reasons);
+                state->backend = fingerprint.backend;
+            } catch (...) {
+                state->error = std::current_exception();
+            }
+            state->done.store(true);
+        });
 
-    // Closing the detection window must not quit the app before the real view
-    // opens (quit-on-last-window-closed would otherwise fire between phases).
-    const bool prior_quit_on_last = app != nullptr && app->quitOnLastWindowClosed();
-    if (app != nullptr) {
-        app->setQuitOnLastWindowClosed(false);
-    }
-    std::optional<DetectedKvmBackend> backend = detect_with_qt_window(detected_options);
-    if (app != nullptr) {
-        app->setQuitOnLastWindowClosed(prior_quit_on_last);
-    }
-
-    if (!backend) {
-        return; // user aborted during detection
-    }
-
-    // From here a concrete backend opens its own Qt window.
-    switch (*backend) {
-    case DetectedKvmBackend::Megarac: {
-        MegaracViewOptions view_options;
-        view_options.login = std::move(detected_options.login);
-        view_options.idle_timeout_seconds = detected_options.idle_timeout_seconds;
-        run_megarac_view(view_options);
-        return;
-    }
-    case DetectedKvmBackend::Aten: {
-        AtenViewOptions view_options;
-        view_options.login = std::move(detected_options.login);
-        view_options.idle_timeout_seconds = detected_options.idle_timeout_seconds;
-        view_options.shared = detected_options.aten_shared;
-        run_aten_view(view_options);
-        return;
-    }
-    case DetectedKvmBackend::Pikvm: {
-        PikvmViewOptions view_options;
-        view_options.login = std::move(detected_options.login);
-        view_options.idle_timeout_seconds = detected_options.idle_timeout_seconds;
-        view_options.video_decode = detected_options.pikvm_video_decode;
-        run_pikvm_view(view_options);
-        return;
-    }
-    case DetectedKvmBackend::Unknown:
-        break;
-    }
+        // Poll the worker on the window's tick; attach the detected view (or
+        // surface the failure) once it finishes. Esc/close while detecting is
+        // handled by the harness, since no view is attached yet.
+        QObject::connect(&host.window(), &ViewerWindow::frameTick, &host.window(), [detection, &host]() {
+            if (detection->handled || !detection->done.load()) {
+                return;
+            }
+            detection->handled = true;
+            if (detection->worker.joinable()) {
+                detection->worker.join();
+            }
+            if (detection->error) {
+                host.fail(detection->error);
+                return;
+            }
+            // Runs inside the event loop: keep a view-constructor throw out of Qt.
+            try {
+                if (detection->backend) {
+                    host.attach_view(make_detected_view(*detection->backend, detection->options));
+                }
+            } catch (...) {
+                host.fail(std::current_exception());
+            }
+        });
+    });
 }
 
 } // namespace hitsc

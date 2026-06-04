@@ -14,9 +14,12 @@
 #include <QRect>
 #include <QString>
 
+#include <exception>
 #include <memory>
 #include <optional>
 #include <stdexcept>
+#include <string>
+#include <utility>
 
 namespace hitsc {
 namespace {
@@ -38,9 +41,46 @@ QApplication* ensure_application(int& argc, char** argv, std::unique_ptr<QApplic
     return owned.get();
 }
 
+// Concrete ViewerHost: owns the attached view (until the window closes) and
+// remembers a fatal error for run_viewer to rethrow.
+class ViewerHostImpl : public ViewerHost {
+public:
+    ViewerHostImpl(ViewerWindow& window, ViewerSurface& surface)
+        : window_(window)
+        , surface_(surface)
+    {
+    }
+
+    ViewerWindow& window() override { return window_; }
+
+    void attach_view(std::unique_ptr<KvmViewBase> view) override
+    {
+        view_ = std::move(view);
+        if (view_ != nullptr) {
+            view_->set_rhi_d3d11_device(surface_.d3d11_device());
+            view_->hosted_start_network();
+        }
+    }
+
+    void fail(std::exception_ptr error) override
+    {
+        error_ = std::move(error);
+        window_.close();
+    }
+
+    KvmViewBase* view() const { return view_.get(); }
+    std::exception_ptr error() const { return error_; }
+
+private:
+    ViewerWindow& window_;
+    ViewerSurface& surface_;
+    std::unique_ptr<KvmViewBase> view_;
+    std::exception_ptr error_;
+};
+
 } // namespace
 
-int run_qt_viewer(KvmViewBase& view, const std::string& host_label, const std::string& host_id)
+int run_viewer(const ViewerLaunch& launch, const std::function<void(ViewerHost&)>& on_ready)
 {
     static char program_name[] = "hitsc";
     int argc = 1;
@@ -49,8 +89,12 @@ int run_qt_viewer(KvmViewBase& view, const std::string& host_label, const std::s
     std::unique_ptr<QApplication> owned_app;
     QApplication* app = ensure_application(argc, argv, owned_app);
 
-    ViewerWindow window(QStringLiteral("hitsc - ") + QString::fromStdString(host_label));
+    ViewerWindow window(QStringLiteral("hitsc - ") + QString::fromStdString(launch.host_label));
     ViewerSurface* surface = window.surface();
+    ViewerHostImpl host(window, *surface);
+
+    const std::string host_id = launch.host_id;
+    const std::string host_label = launch.host_label;
 
     // Restore the saved per-host geometry.
     // TODO: guard against a rect on a monitor that is no longer present (via
@@ -64,20 +108,21 @@ int run_qt_viewer(KvmViewBase& view, const std::string& host_label, const std::s
         }
     }
 
-    // Keyboard gating: the disconnected console takes only R (reconnect) / Esc
-    // (close); a live session forwards keys to the guest; the connecting console
-    // takes Esc (cancel).
-    QObject::connect(&window, &ViewerWindow::keyEvent, &window, [&view, &window](const KvmKeyEvent& key) {
-        if (view.hosted_session_ended()) {
+    // Keyboard gating: a live session forwards keys to the guest; the disconnected
+    // console takes R (reconnect) / Esc (close); the connecting/detecting phase
+    // (no view yet) takes Esc (cancel).
+    QObject::connect(&window, &ViewerWindow::keyEvent, &window, [&host, &window](const KvmKeyEvent& key) {
+        KvmViewBase* view = host.view();
+        if (view != nullptr && view->hosted_session_ended()) {
             if (key.down && key.scancode == KvmScancode::R) {
-                view.hosted_retry();
+                view->hosted_retry();
             } else if (key.down && key.scancode == KvmScancode::ESCAPE) {
                 window.close();
             }
             return;
         }
-        if (view.hosted_connected()) {
-            view.feed_key(key);
+        if (view != nullptr && view->hosted_connected()) {
+            view->feed_key(key);
             return;
         }
         if (key.down && key.scancode == KvmScancode::ESCAPE) {
@@ -85,52 +130,74 @@ int run_qt_viewer(KvmViewBase& view, const std::string& host_label, const std::s
         }
     });
 
-    // Pointer input only flows to a live session (matches event_loop).
-    QObject::connect(surface, &ViewerSurface::pointerButton, &window, [&view](const KvmPointerButton& button) {
-        if (view.hosted_connected()) {
-            view.feed_pointer_button(button);
+    // Pointer input only flows to a live session.
+    QObject::connect(surface, &ViewerSurface::pointerButton, &window, [&host](const KvmPointerButton& button) {
+        if (KvmViewBase* view = host.view(); view != nullptr && view->hosted_connected()) {
+            view->feed_pointer_button(button);
         }
     });
-    QObject::connect(surface, &ViewerSurface::pointerMotion, &window, [&view](const KvmPointerMotion& motion) {
-        if (view.hosted_connected()) {
-            view.feed_pointer_motion(motion);
+    QObject::connect(surface, &ViewerSurface::pointerMotion, &window, [&host](const KvmPointerMotion& motion) {
+        if (KvmViewBase* view = host.view(); view != nullptr && view->hosted_connected()) {
+            view->feed_pointer_motion(motion);
         }
     });
-    QObject::connect(surface, &ViewerSurface::pointerWheel, &window, [&view](const KvmPointerWheel& wheel) {
-        if (view.hosted_connected()) {
-            view.feed_pointer_wheel(wheel);
+    QObject::connect(surface, &ViewerSurface::pointerWheel, &window, [&host](const KvmPointerWheel& wheel) {
+        if (KvmViewBase* view = host.view(); view != nullptr && view->hosted_connected()) {
+            view->feed_pointer_wheel(wheel);
         }
     });
-    QObject::connect(surface, &ViewerSurface::focusLost, &window, [&view]() { view.hosted_focus_lost(); });
+    QObject::connect(surface, &ViewerSurface::focusLost, &window, [&host]() {
+        if (KvmViewBase* view = host.view()) {
+            view->hosted_focus_lost();
+        }
+    });
 
-    QObject::connect(&window, &ViewerWindow::minimized, &window, [&view]() { view.hosted_minimized(); });
-    QObject::connect(&window, &ViewerWindow::restored, &window, [&view]() { view.hosted_restored(); });
+    QObject::connect(&window, &ViewerWindow::minimized, &window, [&host]() {
+        if (KvmViewBase* view = host.view()) {
+            view->hosted_minimized();
+        }
+    });
+    QObject::connect(&window, &ViewerWindow::restored, &window, [&host]() {
+        if (KvmViewBase* view = host.view()) {
+            view->hosted_restored();
+        }
+    });
 
-    QObject::connect(&window, &ViewerWindow::closeRequested, &window, [&view, &window, host_id]() {
+    QObject::connect(&window, &ViewerWindow::closeRequested, &window, [&host, &window, host_id]() {
         if (!host_id.empty() && !window.isMinimized() && !window.isMaximized()) {
             const HostStore store;
             store.save_window_rect(QString::fromStdString(host_id), window.geometry());
         }
-        view.hosted_stop_network();
+        if (KvmViewBase* view = host.view()) {
+            view->hosted_stop_network();
+        }
     });
 
-    // ~16 ms cadence: advance session state, keep the surface size current for
-    // pointer mapping, and push the latest console/frame to the surface.
+    // ~16 ms cadence: drive the attached view (poll, size, console/frame, title),
+    // or show the connecting console until a view is attached.
     QObject::connect(
         &window,
         &ViewerWindow::frameTick,
         &window,
-        [&view, &window, surface, last_title = QString()]() mutable {
-            view.hosted_poll();
-            view.hosted_set_surface_size(surface->width(), surface->height());
-            if (const std::optional<ConsoleScreen> console = view.hosted_console_screen()) {
+        [&host, &window, surface, host_label, last_title = QString()]() mutable {
+            KvmViewBase* view = host.view();
+            if (view == nullptr) {
+                ConsoleScreen screen;
+                screen.headline = "Connecting to " + host_label + "...";
+                screen.hint = "Esc to cancel";
+                surface->show_console(screen);
+                return;
+            }
+            view->hosted_poll();
+            view->hosted_set_surface_size(surface->width(), surface->height());
+            if (const std::optional<ConsoleScreen> console = view->hosted_console_screen()) {
                 surface->show_console(*console);
-            } else if (const std::optional<HardwareVideoFrame> hw = view.latest_hardware_frame()) {
+            } else if (const std::optional<HardwareVideoFrame> hw = view->latest_hardware_frame()) {
                 surface->show_hardware_frame(*hw);
-            } else if (const std::optional<QImage> frame = view.latest_frame_image()) {
+            } else if (const std::optional<QImage> frame = view->latest_frame_image()) {
                 surface->show_frame(*frame);
             }
-            const QString title = QString::fromStdString(view.hosted_title());
+            const QString title = QString::fromStdString(view->hosted_title());
             if (title != last_title) {
                 last_title = title;
                 window.setWindowTitle(title);
@@ -140,12 +207,17 @@ int run_qt_viewer(KvmViewBase& view, const std::string& host_label, const std::s
     // Cert prompts parent on this window and pin under host_id (HWND on Windows).
     cert_trust_attach_window(reinterpret_cast<void*>(window.winId()), host_id);
 
-    // Start the network only once QRhi (and its D3D11 device) is up, so pikvm can
-    // bind FFmpeg D3D11VA decode to the same device QRhi renders with. rhiReady
-    // fires once, on the surface's first render (the connecting console).
-    QObject::connect(surface, &ViewerSurface::rhiReady, &window, [&view, surface]() {
-        view.set_rhi_d3d11_device(surface->d3d11_device());
-        view.hosted_start_network();
+    // The view is attached once QRhi (and its D3D11 device) is up, so the network
+    // starts only after the device exists -- pikvm binds FFmpeg D3D11VA decode to
+    // the same device QRhi renders with. rhiReady fires once.
+    QObject::connect(surface, &ViewerSurface::rhiReady, &window, [&host, &on_ready]() {
+        // on_ready runs inside the event loop, so an exception (e.g. a view
+        // constructor) must not escape into Qt; route it to fail() instead.
+        try {
+            on_ready(host);
+        } catch (...) {
+            host.fail(std::current_exception());
+        }
     });
 
     window.show();
@@ -153,7 +225,12 @@ int run_qt_viewer(KvmViewBase& view, const std::string& host_label, const std::s
 
     const int code = app->exec();
 
-    view.hosted_stop_network();
+    if (KvmViewBase* view = host.view()) {
+        view->hosted_stop_network();
+    }
+    if (host.error()) {
+        std::rethrow_exception(host.error());
+    }
     return code;
 }
 

@@ -625,11 +625,17 @@ private:
 
 } // namespace
 
+std::unique_ptr<KvmViewBase> make_pikvm_view(const PikvmViewOptions& options)
+{
+    return std::make_unique<PikvmView>(options);
+}
+
 void run_pikvm_view(const PikvmViewOptions& options)
 {
     try {
-        PikvmView view(options);
-        run_qt_viewer(view, options.login.base_url.host, options.login.host_id);
+        run_viewer({options.login.base_url.host, options.login.host_id}, [options](ViewerHost& host) {
+            host.attach_view(make_pikvm_view(options));
+        });
     } catch (const UserError&) {
         throw;
     } catch (...) {

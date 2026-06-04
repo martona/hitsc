@@ -335,11 +335,17 @@ private:
 
 } // namespace
 
+std::unique_ptr<KvmViewBase> make_megarac_view(const MegaracViewOptions& options)
+{
+    return std::make_unique<MegaracView>(options);
+}
+
 void run_megarac_view(const MegaracViewOptions& options)
 {
     try {
-        MegaracView view(options);
-        run_qt_viewer(view, options.login.base_url.host, options.login.host_id);
+        run_viewer({options.login.base_url.host, options.login.host_id}, [options](ViewerHost& host) {
+            host.attach_view(make_megarac_view(options));
+        });
     } catch (...) {
         print_current_exception_with_stack(std::cerr, "megarac view ui thread");
         throw;
