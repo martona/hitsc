@@ -22,7 +22,7 @@ find_package(CLI11 CONFIG REQUIRED)
 find_package(FFMPEG REQUIRED)
 find_package(OpenSSL REQUIRED)
 set(QT_SKIP_SETUP_DEPLOYMENT ON)
-find_package(Qt6 REQUIRED COMPONENTS Core Gui Qml Quick QuickControls2 QuickLayouts Widgets)
+find_package(Qt6 REQUIRED COMPONENTS Core Gui Qml Quick QuickControls2 QuickLayouts ShaderTools Widgets)
 find_package(SDL3 CONFIG REQUIRED)
 find_package(ZLIB REQUIRED)
 
@@ -132,6 +132,19 @@ add_executable(
 
 target_compile_features(hitsc PRIVATE cxx_std_20)
 
+# Bake the QRhi video-quad shaders to .qsb and embed them under :/hitsc/shaders/.
+qt_add_shaders(hitsc "hitsc_viewer_shaders"
+  PREFIX "/hitsc/shaders"
+  FILES
+    src/gui/viewer/viewer_quad.vert
+    src/gui/viewer/viewer_quad.frag
+    src/gui/viewer/viewer_nv12.frag
+  OUTPUTS
+    viewer_quad.vert.qsb
+    viewer_quad.frag.qsb
+    viewer_nv12.frag.qsb
+)
+
 add_subdirectory(src/gui)
 
 target_compile_definitions(
@@ -197,6 +210,7 @@ target_link_libraries(
     OpenSSL::Crypto
     Qt6::Core
     Qt6::Gui
+    Qt6::GuiPrivate
     Qt6::Qml
     Qt6::Quick
     Qt6::QuickControls2

@@ -125,6 +125,8 @@ int run_qt_viewer(KvmViewBase& view, const std::string& host_label, const std::s
             view.hosted_set_surface_size(surface->width(), surface->height());
             if (const std::optional<ConsoleScreen> console = view.hosted_console_screen()) {
                 surface->show_console(*console);
+            } else if (const std::optional<HardwareVideoFrame> hw = view.latest_hardware_frame()) {
+                surface->show_hardware_frame(*hw);
             } else if (const std::optional<QImage> frame = view.latest_frame_image()) {
                 surface->show_frame(*frame);
             }
@@ -138,7 +140,14 @@ int run_qt_viewer(KvmViewBase& view, const std::string& host_label, const std::s
     // Cert prompts parent on this window and pin under host_id (HWND on Windows).
     cert_trust_attach_window(reinterpret_cast<void*>(window.winId()), host_id);
 
-    view.hosted_start_network();
+    // Start the network only once QRhi (and its D3D11 device) is up, so pikvm can
+    // bind FFmpeg D3D11VA decode to the same device QRhi renders with. rhiReady
+    // fires once, on the surface's first render (the connecting console).
+    QObject::connect(surface, &ViewerSurface::rhiReady, &window, [&view, surface]() {
+        view.set_rhi_d3d11_device(surface->d3d11_device());
+        view.hosted_start_network();
+    });
+
     window.show();
     surface->setFocus();
 

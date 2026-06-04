@@ -2,6 +2,10 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
+#include <mutex>
+
+struct ID3D11Texture2D;
 
 namespace hitsc {
 
@@ -92,6 +96,20 @@ struct KvmPointerWheel {
     float dx = 0.0f;   // +right
     float dy = 0.0f;   // +up
     KvmPointerPos pos;
+};
+
+// A decoded hardware video frame: the decoder's D3D11 NV12 texture array + the
+// slice for this frame, ready to import into QRhi for zero-copy display. `lock`
+// is the decode mutex (also FFmpeg's D3D11VA lock callback) and MUST be held
+// while the renderer touches the device/texture. `keepalive` pins the underlying
+// AVFrame so the texture stays valid until the frame is dropped.
+struct HardwareVideoFrame {
+    ID3D11Texture2D* texture = nullptr;
+    int array_slice = 0;
+    int width = 0;
+    int height = 0;
+    std::shared_ptr<std::recursive_mutex> lock;
+    std::shared_ptr<const void> keepalive;
 };
 
 } // namespace hitsc

@@ -8,6 +8,7 @@
 #include "pikvm_input.hpp"
 #include "pikvm_session.hpp"
 #include "pikvm_video.hpp"
+#include "pikvm_video_hardware.hpp"
 #include "view_base.hpp"
 #include "view_input.hpp"
 
@@ -434,9 +435,22 @@ private:
     {
         PikvmViewOptions network_options = network_options_;
         std::shared_ptr<PikvmViewState> state = state_;
-        network.start([network_options, state](std::atomic_bool& stop_requested) {
-            run_pikvm_network_session(network_options, {}, *state, stop_requested);
+        network.start([network_options, hardware = hardware_, state](
+                          std::atomic_bool& stop_requested) {
+            run_pikvm_network_session(network_options, hardware, *state, stop_requested);
         });
+    }
+
+    void set_rhi_d3d11_device(void* d3d11_device) override
+    {
+        // Bind FFmpeg D3D11VA decode to QRhi's device for zero-copy display. The
+        // decoder still falls back to software internally if hardware init fails;
+        // honor an explicit software request by not creating the adapter at all.
+        if (options_.video_decode == PikvmVideoDecodeMode::software) {
+            return;
+        }
+        hardware_ = make_pikvm_d3d11_hardware(
+            static_cast<ID3D11Device*>(d3d11_device), options_.login.verbose);
     }
 
     void reset_for_reconnect() override
@@ -445,6 +459,7 @@ private:
         state_->frames.clear();
         hosted_last_sequence_ = 0;
         hosted_frame_ = QImage();
+        hosted_hw_frame_.reset();
         state_->video_decode_paused.store(false);
     }
 
@@ -478,7 +493,7 @@ private:
     {
         const std::shared_ptr<const PikvmVideoFrame> frame =
             state_->frames.latest(hosted_last_sequence_);
-        if (frame) {
+        if (frame && frame->format != PikvmVideoPixelFormat::hardware_nv12) {
             hosted_last_sequence_ = frame->sequence;
             if (std::optional<QImage> image = convert_hosted_frame(*frame)) {
                 hosted_frame_ = std::move(*image);
@@ -489,6 +504,31 @@ private:
             return std::nullopt;
         }
         return hosted_frame_;
+    }
+
+    std::optional<HardwareVideoFrame> latest_hardware_frame() override
+    {
+        if (!hardware_) {
+            return std::nullopt;
+        }
+        const std::shared_ptr<const PikvmVideoFrame> frame =
+            state_->frames.latest(hosted_last_sequence_);
+        if (frame && frame->format == PikvmVideoPixelFormat::hardware_nv12) {
+            hosted_last_sequence_ = frame->sequence;
+            hosted_hw_frame_ = frame;
+            frame_presented(frame->width, frame->height);
+        }
+        if (!hosted_hw_frame_) {
+            return std::nullopt;  // software session, or no frame yet
+        }
+        HardwareVideoFrame hw;
+        hw.texture = hardware_->frame_texture(*hosted_hw_frame_);
+        hw.array_slice = hardware_->frame_array_slice(*hosted_hw_frame_);
+        hw.width = hosted_hw_frame_->width;
+        hw.height = hosted_hw_frame_->height;
+        hw.lock = hardware_->lock_handle();
+        hw.keepalive = hosted_hw_frame_->owner;
+        return hw;
     }
 
     std::optional<std::pair<int, int>> latest_frame_size() override
@@ -580,6 +620,8 @@ private:
     SwsContext* hosted_sws_ = nullptr;
     QImage hosted_frame_;
     std::uint64_t hosted_last_sequence_ = 0;
+    std::shared_ptr<PikvmVideoHardware> hardware_;
+    std::shared_ptr<const PikvmVideoFrame> hosted_hw_frame_;
 };
 
 } // namespace

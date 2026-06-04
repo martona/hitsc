@@ -1,0 +1,14 @@
+#version 440
+
+// Positions arrive already in normalized device coordinates (the CPU computes the
+// aspect-fit rectangle each frame), so the vertex stage is a pass-through.
+layout(location = 0) in vec2 position;
+layout(location = 1) in vec2 texcoord;
+
+layout(location = 0) out vec2 v_texcoord;
+
+void main()
+{
+    v_texcoord = texcoord;
+    gl_Position = vec4(position, 0.0, 1.0);
+}

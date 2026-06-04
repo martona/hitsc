@@ -197,6 +197,12 @@ public:
     // Cheap current-frame dimensions for hosted pointer mapping (no conversion).
     virtual std::optional<std::pair<int, int>> latest_frame_size() { return std::nullopt; }
 
+    // Zero-copy hardware path (pikvm D3D11VA). The surface hands its QRhi
+    // ID3D11Device via set_rhi_d3d11_device once RHI is up; latest_hardware_frame
+    // then yields decoded NV12 textures to import. Default: software-only.
+    virtual std::optional<HardwareVideoFrame> latest_hardware_frame() { return std::nullopt; }
+    virtual void set_rhi_d3d11_device(void* d3d11_device) { (void)d3d11_device; }
+
     // Lifecycle, mirroring the SDL event_loop's window-event branches.
     void hosted_minimized();
     void hosted_restored();
