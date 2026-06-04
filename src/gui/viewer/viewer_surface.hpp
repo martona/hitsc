@@ -1,7 +1,6 @@
 #pragma once
 
-#include "view_console.hpp"      // ConsoleScreen (NOTE: still pulls SDL transitively;
-                                 // extract ConsoleScreen to an SDL-free header in cleanup)
+#include "console_screen.hpp"    // ConsoleScreen / ConsoleSeverity
 #include "view_input_types.hpp"  // KvmPointer*, KvmMouseButton, HardwareVideoFrame
 
 #include <QImage>

@@ -1,7 +1,6 @@
 #include "view_base.hpp"
 
 #include "log.hpp"
-#include "view_console.hpp"
 #include "view_input.hpp"
 
 #include <algorithm>
@@ -60,34 +59,6 @@ std::function<void()> ViewStateBase::force_close_snapshot()
     return force_close_;
 }
 
-void ViewStateBase::set_frame_event_type(Uint32 frame_event_type)
-{
-    frame_event_type_.store(frame_event_type);
-}
-
-bool ViewStateBase::is_frame_event(Uint32 event_type) const
-{
-    const auto frame_event_type = static_cast<Uint32>(frame_event_type_.load());
-    return frame_event_type != 0 && event_type == frame_event_type;
-}
-
-void ViewStateBase::clear_frame_event_pending()
-{
-    frame_event_pending_.store(false);
-}
-
-void ViewStateBase::push_render_event()
-{
-    const auto frame_event_type = static_cast<Uint32>(frame_event_type_.load());
-    if (frame_event_type != 0 && !frame_event_pending_.exchange(true)) {
-        SDL_Event event{};
-        event.type = frame_event_type;
-        if (!SDL_PushEvent(&event)) {
-            frame_event_pending_.store(false);
-        }
-    }
-}
-
 KvmNetworkWorker::KvmNetworkWorker(ViewStateBase& state, std::function<void()> cleanup)
     : state_(state)
     , cleanup_(std::move(cleanup))
@@ -115,18 +86,16 @@ bool KvmNetworkWorker::done() const
 KvmViewBase::KvmViewBase(
     ViewStateBase& state,
     std::string host,
-    std::string geometry_key,
     std::string log_name,
     std::function<void()> network_cleanup)
     : state_(state)
     , network_(state_, std::move(network_cleanup))
     , host_(std::move(host))
-    , geometry_key_(std::move(geometry_key))
     , log_name_(std::move(log_name))
 {
 }
 
-SDL_FRect KvmViewBase::centered_target_rect(
+TargetRect KvmViewBase::centered_target_rect(
     int window_width,
     int window_height,
     int frame_width,
@@ -135,7 +104,7 @@ SDL_FRect KvmViewBase::centered_target_rect(
     const float width_scale = static_cast<float>(window_width) / static_cast<float>(frame_width);
     const float height_scale = static_cast<float>(window_height) / static_cast<float>(frame_height);
     const float scale = std::min(width_scale, height_scale);
-    SDL_FRect rect{};
+    TargetRect rect{};
     rect.w = std::floor(static_cast<float>(frame_width) * scale);
     rect.h = std::floor(static_cast<float>(frame_height) * scale);
     rect.x = std::floor((static_cast<float>(window_width) - rect.w) / 2.0f);
@@ -195,15 +164,14 @@ void KvmViewBase::do_retry()
 
 // ---------------------------------------------------------------------------
 // Qt-hosted mode. The Qt viewer host (run_qt_viewer) drives these: start the
-// network, poll for session end, feed input, and pull frames/console. There is
-// no SDL window/renderer or SDL event loop anymore.
+// network, poll for session end, feed input, and pull frames/console.
 // ---------------------------------------------------------------------------
 
 void KvmViewBase::hosted_start_network()
 {
-    // The Qt surface maps pointer coordinates against itself, not an SDL window:
-    // centre the latest frame within the surface's current size. (Persists across
-    // reconnect; reset() does not touch the geometry source.)
+    // The Qt surface maps pointer coordinates against itself: centre the latest
+    // frame within the surface's current size. (Persists across reconnect;
+    // reset() does not touch the geometry source.)
     if (KvmInputController* controller = hosted_input_controller()) {
         controller->set_frame_geometry_source([this]() -> std::optional<FrameGeometry> {
             const std::optional<std::pair<int, int>> size = latest_frame_size();
@@ -277,7 +245,6 @@ std::optional<ConsoleScreen> KvmViewBase::hosted_console_screen() const
 
 void KvmViewBase::hosted_minimized()
 {
-    state_.clear_frame_event_pending();
     state_.view_status.minimize();
     on_minimized();
 }

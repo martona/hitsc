@@ -677,7 +677,6 @@ private:
         }
         const SharedCursor cursor_for_log = *cursor;
         state_.cursors.publish(std::move(*cursor));
-        state_.push_render_event();
 
         if (options_.login.vverbose) {
             log_info() << "hardware cursor"
@@ -744,7 +743,6 @@ private:
         state_.view_status.kvm_display_status(true);
         compressed_frame.published_at = std::chrono::steady_clock::now();
         state_.frames.publish(std::move(compressed_frame));
-        state_.push_render_event();
         ++frames_seen_;
     }
 

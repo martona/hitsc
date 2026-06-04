@@ -115,7 +115,7 @@ public:
 
 private:
     AtenView(const AtenViewOptions& options, std::shared_ptr<AtenViewState> state)
-        : KvmViewBase(*state, options.login.base_url.host, options.login.host_id, "aten", [state] {
+        : KvmViewBase(*state, options.login.base_url.host, "aten", [state] {
               state->input.clear();
           })
         , options_(options)
@@ -248,7 +248,7 @@ private:
     // destination stays opaque). We must not paint into hosted_clean_rgba_ — it is
     // the delta seed for the next frame. The sprite goes at (cursor.x, cursor.y):
     // make_cursor_image already bakes the pattern x/y_offset into the sampled
-    // sprite, matching the old SDL HardwareCursorPresenter.
+    // sprite, so its top-left maps to (cursor.x, cursor.y).
     QImage compose_hosted_frame() const
     {
         const std::size_t size = aspeed_frame_rgba_size(hosted_clean_width_, hosted_clean_height_);

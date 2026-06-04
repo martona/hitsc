@@ -25,9 +25,9 @@ constexpr int kFrameIntervalMs = 16;  // ~60 Hz repaint cadence
 // straight from the WM_KEY* lParam) to a KvmScancode. We read the raw lParam
 // rather than QKeyEvent::nativeScanCode() because the latter drops the extended
 // bit, which is what distinguishes the arrows from the numpad and the right
-// modifiers from the left. (Ported from the pre-Qt hosted viewer: KvmScancode
-// values mirror the USB HID / SDL table, so this is the old SDL mapping with the
-// enum swapped in -- only the top-row digits and DELETE need renamed enumerators.)
+// modifiers from the left. (KvmScancode values are USB HID usage codes, so this
+// is a direct PS/2-to-HID scancode mapping -- only the top-row digits and DELETE
+// need renamed enumerators.)
 KvmScancode kvm_scancode_from_windows(unsigned scancode, bool extended)
 {
     if (extended) {

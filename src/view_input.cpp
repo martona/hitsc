@@ -1,15 +1,29 @@
 #include "view_input.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <utility>
 
 namespace hitsc {
+namespace {
+
+// Monotonic milliseconds for the mouse-motion throttle.
+std::uint64_t now_milliseconds()
+{
+    return static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch())
+            .count());
+}
+
+} // namespace
 
 std::optional<NormalizedPoint> target_normalized_point(
     float window_x,
     float window_y,
-    const SDL_FRect& target,
+    const TargetRect& target,
     bool clamp_to_target)
 {
     if (target.w <= 0.0f || target.h <= 0.0f) {
@@ -57,40 +71,6 @@ KvmInputController::KvmInputController(
 {
 }
 
-void KvmInputController::handle_event(const SDL_Event& event)
-{
-    // The only place SDL event types survive: translate into the backend-neutral
-    // Kvm input structs and dispatch. (Replaced wholesale when the Qt event
-    // source lands; the handlers below are already SDL-free.)
-    switch (event.type) {
-    case SDL_EVENT_KEY_DOWN:
-        handle_key(KvmKeyEvent{static_cast<KvmScancode>(event.key.scancode), true, event.key.repeat});
-        break;
-    case SDL_EVENT_KEY_UP:
-        handle_key(KvmKeyEvent{static_cast<KvmScancode>(event.key.scancode), false, event.key.repeat});
-        break;
-    case SDL_EVENT_MOUSE_BUTTON_DOWN:
-        handle_button(KvmPointerButton{
-            static_cast<KvmMouseButton>(event.button.button), true, {event.button.x, event.button.y}});
-        break;
-    case SDL_EVENT_MOUSE_BUTTON_UP:
-        handle_button(KvmPointerButton{
-            static_cast<KvmMouseButton>(event.button.button), false, {event.button.x, event.button.y}});
-        break;
-    case SDL_EVENT_MOUSE_MOTION:
-        handle_motion(KvmPointerMotion{{event.motion.x, event.motion.y}});
-        break;
-    case SDL_EVENT_MOUSE_WHEEL: {
-        const float dx = event.wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -event.wheel.x : event.wheel.x;
-        const float dy = event.wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -event.wheel.y : event.wheel.y;
-        handle_wheel(KvmPointerWheel{dx, dy, {event.wheel.mouse_x, event.wheel.mouse_y}});
-        break;
-    }
-    default:
-        break;
-    }
-}
-
 void KvmInputController::handle_button(const KvmPointerButton& button)
 {
     if (!encoder_.accepts_button(button.button)) {
@@ -115,7 +95,6 @@ void KvmInputController::handle_button(const KvmPointerButton& button)
     } else {
         buttons_ &= ~bit;
     }
-    SDL_CaptureMouse(any_button_down());
 
     encoder_.encode_pointer(
         PointerState{*position, frame->width, frame->height, buttons_},
@@ -130,7 +109,7 @@ void KvmInputController::handle_motion(const KvmPointerMotion& motion)
     }
 
     const bool drag_active = any_button_down();
-    const std::uint64_t ticks = SDL_GetTicks();
+    const std::uint64_t ticks = now_milliseconds();
     if (mouse_motion_throttled(ticks, last_motion_ticks_, drag_active)) {
         return;
     }
@@ -214,7 +193,6 @@ void KvmInputController::release_all_keys()
 void KvmInputController::reset()
 {
     buttons_ = 0;
-    SDL_CaptureMouse(false);
 }
 
 } // namespace hitsc

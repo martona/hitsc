@@ -3,8 +3,6 @@
 #include "aten_session.hpp"
 #include "log.hpp"
 
-#include <SDL3/SDL.h>
-
 #include <boost/asio/bind_executor.hpp>
 #include <boost/asio/buffer.hpp>
 #include <boost/asio/io_context.hpp>
@@ -714,7 +712,6 @@ private:
         frame.websocket_bytes = last_websocket_message_bytes_;
         frame.published_at = std::chrono::steady_clock::now();
         state_.frames.publish(std::move(frame));
-        state_.push_render_event();
         state_.view_status.kvm_display_status(true);
 
         previous_width_ = rect.width;
@@ -768,7 +765,6 @@ private:
         }
         const HardwareCursor cursor_for_log = hardware_cursor;
         state_.cursors.publish(std::move(hardware_cursor));
-        state_.push_render_event();
 
         if (options_.login.vverbose) {
             LogLine line = log_info();

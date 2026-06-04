@@ -102,7 +102,6 @@ void store_pikvm_frame(PikvmViewState& state, PikvmVideoFrame frame)
 {
     frame.timing.stored_at = PikvmClock::now();
     state.frames.publish(std::move(frame));
-    state.push_render_event();
 }
 
 struct PikvmControlStopState {
@@ -420,7 +419,7 @@ public:
 
 private:
     PikvmView(const PikvmViewOptions& options, std::shared_ptr<PikvmViewState> state)
-        : KvmViewBase(*state, options.login.base_url.host, options.login.host_id, "pikvm", [state] {
+        : KvmViewBase(*state, options.login.base_url.host, "pikvm", [state] {
               state->input.clear();
           })
         , options_(options)
@@ -542,9 +541,9 @@ private:
         return std::nullopt;
     }
 
-    // Software-decode frame -> RGBA QImage for the Qt surface. Hosted mode forces
-    // software decode (no hardware device without an SDL renderer), so frames are
-    // i420 / nv12 (swscale to RGBA) or already rgba32 (copy). hardware_nv12 never
+    // Software-decode frame -> RGBA QImage for the Qt surface. On the software
+    // path (no D3D11 device handed to the decoder), frames are i420 / nv12
+    // (swscale to RGBA) or already rgba32 (copy). hardware_nv12 never
     // reaches here. Published frames are immutable (each owns its AVFrame), so no
     // lock is needed. The GPU/zero-copy path is commit 4.
     std::optional<QImage> convert_hosted_frame(const PikvmVideoFrame& frame)

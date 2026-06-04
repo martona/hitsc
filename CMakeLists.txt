@@ -23,7 +23,6 @@ find_package(FFMPEG REQUIRED)
 find_package(OpenSSL REQUIRED)
 set(QT_SKIP_SETUP_DEPLOYMENT ON)
 find_package(Qt6 REQUIRED COMPONENTS Core Gui Qml Quick QuickControls2 QuickLayouts ShaderTools Widgets)
-find_package(SDL3 CONFIG REQUIRED)
 find_package(ZLIB REQUIRED)
 
 qt_policy(SET QTP0001 NEW)
@@ -97,7 +96,6 @@ add_executable(
   src/backends/megarac/megarac_view.cpp
   src/main.cpp
   src/hardware_cursor.cpp
-  src/hardware_cursor_presenter.cpp
   src/backends/megarac/megarac_hid.cpp
   src/backends/megarac/megarac_view_session.cpp
   src/backends/megarac/megarac_protocol.cpp
@@ -115,8 +113,7 @@ add_executable(
   src/trace.cpp
   src/url.cpp
   src/view_base.cpp
-  src/view_console.cpp
-  src/view_console.hpp
+  src/console_screen.hpp
   src/gui/viewer/qt_console.cpp
   src/gui/viewer/qt_console.hpp
   src/gui/viewer/viewer_surface.cpp
@@ -153,7 +150,6 @@ target_compile_definitions(
     BOOST_ASIO_NO_DEPRECATED
     BOOST_BEAST_USE_STD_STRING_VIEW
     NOMINMAX
-    SDL_MAIN_HANDLED
     WIN32_LEAN_AND_MEAN
     _CRT_SECURE_NO_WARNINGS
     _WIN32_WINNT=0x0A00
@@ -216,7 +212,6 @@ target_link_libraries(
     Qt6::QuickControls2
     Qt6::QuickLayouts
     Qt6::Widgets
-    SDL3::SDL3
     hitsc_launcher_qml
     ZLIB::ZLIB
 )

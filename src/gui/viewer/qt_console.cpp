@@ -1,7 +1,7 @@
 #include "gui/viewer/qt_console.hpp"
 
+#include "console_screen.hpp"
 #include "log.hpp"
-#include "view_console.hpp"
 
 #include <QColor>
 #include <QFont>

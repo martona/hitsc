@@ -441,6 +441,11 @@ void ViewerSurface::releaseResources()
 
 void ViewerSurface::mousePressEvent(QMouseEvent* event)
 {
+    // Capture the mouse for the duration of a drag so motion and release events
+    // keep arriving even when the pointer leaves the widget (the input controller
+    // clamps to the target rect while a button is held). Also fixes the prior gap
+    // where dragging outside the window lost capture.
+    grabMouse();
     if (const auto button = kvm_button(event->button())) {
         emit pointerButton(KvmPointerButton{*button, true, to_pos(event->position())});
     }
@@ -450,6 +455,9 @@ void ViewerSurface::mouseReleaseEvent(QMouseEvent* event)
 {
     if (const auto button = kvm_button(event->button())) {
         emit pointerButton(KvmPointerButton{*button, false, to_pos(event->position())});
+    }
+    if (event->buttons() == Qt::NoButton) {
+        releaseMouse();
     }
 }
 

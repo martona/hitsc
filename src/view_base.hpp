@@ -1,10 +1,8 @@
 #pragma once
 
-#include "view_console.hpp"
+#include "console_screen.hpp"
 #include "view_input_types.hpp"
 #include "view_status.hpp"
-
-#include <SDL3/SDL.h>
 
 #include <QImage>
 
@@ -33,19 +31,12 @@ public:
     void set_force_close(std::function<void()> force_close);
     std::function<void()> force_close_snapshot();
 
-    void set_frame_event_type(Uint32 frame_event_type);
-    bool is_frame_event(Uint32 event_type) const;
-    void clear_frame_event_pending();
-    void push_render_event();
-
     std::mutex control_mutex;
     ViewStatus view_status;
 
 private:
     std::exception_ptr exception_;
     std::function<void()> force_close_;
-    std::atomic_uint32_t frame_event_type_{0};
-    std::atomic_bool frame_event_pending_{false};
 };
 
 template <typename T>
@@ -169,7 +160,6 @@ public:
     KvmViewBase(
         ViewStateBase& state,
         std::string host,
-        std::string geometry_key,
         std::string log_name,
         std::function<void()> network_cleanup);
     virtual ~KvmViewBase() = default;
@@ -178,10 +168,9 @@ public:
     KvmViewBase& operator=(const KvmViewBase&) = delete;
 
     // -----------------------------------------------------------------------
-    // Qt-native entry. The Qt viewer host (run_qt_viewer) drives these; the view
-    // no longer owns an SDL window/renderer or runs an SDL event loop.
+    // Qt-native entry. The Qt viewer host (run_qt_viewer) drives these.
     // -----------------------------------------------------------------------
-    void hosted_start_network();  // start the network worker (no SDL window)
+    void hosted_start_network();  // start the network worker
     void hosted_stop_network();   // stop it (idempotent)
     void hosted_poll();           // per-tick: detect session end, record error
     bool hosted_session_ended() const { return session_ended_; }
@@ -203,26 +192,26 @@ public:
     virtual std::optional<HardwareVideoFrame> latest_hardware_frame() { return std::nullopt; }
     virtual void set_rhi_d3d11_device(void* d3d11_device) { (void)d3d11_device; }
 
-    // Lifecycle, mirroring the SDL event_loop's window-event branches.
+    // Window lifecycle.
     void hosted_minimized();
     void hosted_restored();
     void hosted_focus_lost();
     void hosted_close();
 
-    // SDL-free input feed (Qt surface/window -> the backend's controller).
+    // Input feed (Qt surface/window -> the backend's controller).
     void feed_key(const KvmKeyEvent& key);
     void feed_pointer_button(const KvmPointerButton& button);
     void feed_pointer_motion(const KvmPointerMotion& motion);
     void feed_pointer_wheel(const KvmPointerWheel& wheel);
 
     // The Qt surface reports its current (logical) size so hosted pointer mapping
-    // can centre the frame within it (there is no SDL window to query).
+    // can centre the frame within it.
     void hosted_set_surface_size(int width, int height);
 
 protected:
     // Aspect-fit a frame within a surface of the given size (used for hosted
-    // pointer mapping; there is no SDL window to query anymore).
-    static SDL_FRect centered_target_rect(
+    // pointer mapping).
+    static TargetRect centered_target_rect(
         int window_width,
         int window_height,
         int frame_width,
@@ -252,7 +241,6 @@ private:
     ViewStateBase& state_;
     KvmNetworkWorker network_;
     std::string host_;
-    std::string geometry_key_;
     std::string log_name_;
     bool network_started_ = false;
     bool session_ended_ = false;

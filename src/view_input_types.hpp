@@ -17,14 +17,11 @@ inline constexpr std::size_t kKvmScancodeCount = 512;
 
 // Keyboard scancodes, as USB HID Usage Table page 0x07 codes.
 //
-// These values are IDENTICAL to the SDL_Scancode values they replace, and that
-// is load-bearing: the ATEN and MegaRAC encoders send the raw numeric value to
-// the guest as its HID usage (SDL mirrors the HID table, so SDL_SCANCODE_A == 4
-// == HID usage "a"). Keep these values in lockstep with the USB HID table.
-//
-// The enumerator names also match SDL's (sans prefix) so the SDL->Kvm migration
-// could be a mechanical `SDL_SCANCODE_` -> `KvmScancode::` replace; the only
-// exception is the top-row digits, which can't be bare numbers (DIGIT_n here).
+// The numeric values ARE the USB HID usage codes, and that is load-bearing: the
+// ATEN and MegaRAC encoders send the raw value to the guest as its HID usage
+// (A == 4 == HID usage "a"). Keep these values in lockstep with the USB HID
+// table. The only naming wrinkle is the top-row digits, which can't be bare
+// numbers (DIGIT_n here).
 enum class KvmScancode : std::uint16_t {
     UNKNOWN = 0,
 
@@ -60,14 +57,23 @@ enum class KvmScancode : std::uint16_t {
     RCTRL = 228, RSHIFT = 229, RALT = 230, RGUI = 231,
 };
 
-// Mouse buttons, matching SDL_BUTTON_* values (1-based) and names (sans prefix);
-// the encoders branch on these exact values (e.g. X1/X2 -> "up"/"down").
+// Mouse buttons, as 1-based button indices; the encoders branch on these exact
+// values (e.g. X1/X2 -> "up"/"down").
 enum class KvmMouseButton : std::uint8_t {
     LEFT = 1,
     MIDDLE = 2,
     RIGHT = 3,
     X1 = 4,
     X2 = 5,
+};
+
+// On-surface rectangle (logical pixels) where the frame is drawn, aspect-fit and
+// centred within the surface. Used for pointer mapping; plain POD.
+struct TargetRect {
+    float x = 0.0f;
+    float y = 0.0f;
+    float w = 0.0f;
+    float h = 0.0f;
 };
 
 // Window-relative pointer position, in device pixels of the render surface.

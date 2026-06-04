@@ -1,11 +1,11 @@
 #include "gui/viewer/qt_viewer_host.hpp"
 
 #include "cert_trust.hpp"
+#include "console_screen.hpp"
 #include "gui/launcher_host_store.hpp"
 #include "gui/viewer/viewer_surface.hpp"
 #include "gui/viewer/viewer_window.hpp"
 #include "view_base.hpp"
-#include "view_console.hpp"
 #include "view_input_types.hpp"
 
 #include <QApplication>
@@ -52,9 +52,9 @@ int run_qt_viewer(KvmViewBase& view, const std::string& host_label, const std::s
     ViewerWindow window(QStringLiteral("hitsc - ") + QString::fromStdString(host_label));
     ViewerSurface* surface = window.surface();
 
-    // Restore the saved per-host geometry (the same store the SDL viewer used).
-    // TODO: guard against a rect on a monitor that is no longer present (the SDL
-    // path did, via rect_intersects_a_display).
+    // Restore the saved per-host geometry.
+    // TODO: guard against a rect on a monitor that is no longer present (via
+    // QGuiApplication::screens()).
     if (!host_id.empty()) {
         const HostStore store;
         if (const std::optional<QRect> rect = store.load_window_rect(QString::fromStdString(host_id))) {
@@ -64,9 +64,9 @@ int run_qt_viewer(KvmViewBase& view, const std::string& host_label, const std::s
         }
     }
 
-    // Keyboard, mirroring the SDL event_loop's gating: the disconnected console
-    // takes only R (reconnect) / Esc (close); a live session forwards keys to the
-    // guest; the connecting console takes Esc (cancel).
+    // Keyboard gating: the disconnected console takes only R (reconnect) / Esc
+    // (close); a live session forwards keys to the guest; the connecting console
+    // takes Esc (cancel).
     QObject::connect(&window, &ViewerWindow::keyEvent, &window, [&view, &window](const KvmKeyEvent& key) {
         if (view.hosted_session_ended()) {
             if (key.down && key.scancode == KvmScancode::R) {

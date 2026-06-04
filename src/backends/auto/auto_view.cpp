@@ -11,8 +11,8 @@
 #include "http_client.hpp"
 #include "log.hpp"
 #include "text.hpp"
+#include "console_screen.hpp"
 #include "tls_session_cache.hpp"
-#include "view_console.hpp"
 #include "view_input_types.hpp"
 
 #include <boost/beast/http.hpp>
@@ -292,7 +292,7 @@ void run_auto_view(const AutoViewOptions& options)
         return; // user aborted during detection
     }
 
-    // From here a concrete backend opens its own Qt window (no SDL handoff).
+    // From here a concrete backend opens its own Qt window.
     switch (*backend) {
     case DetectedKvmBackend::Megarac: {
         MegaracViewOptions view_options;

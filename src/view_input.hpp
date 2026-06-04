@@ -2,8 +2,6 @@
 
 #include "view_input_types.hpp"
 
-#include <SDL3/SDL.h>
-
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -15,11 +13,10 @@
 namespace hitsc {
 
 // Shared KVM input plumbing. Everything that is *accidentally* identical across
-// the backends (SDL event decode, coordinate mapping, motion throttle, button
-// and key state tracking, mouse capture, release-on-focus-loss) lives in
-// KvmInputController. Each backend supplies a small KvmInputEncoder that turns
-// the canonical input state into its own wire format -- the only part that is
-// genuinely protocol-specific.
+// the backends (coordinate mapping, motion throttle, button and key state
+// tracking, release-on-focus-loss) lives in KvmInputController. Each backend
+// supplies a small KvmInputEncoder that turns the canonical input state into its
+// own wire format -- the only part that is genuinely protocol-specific.
 
 struct NormalizedPoint {
     double x = 0.0;
@@ -36,7 +33,7 @@ struct FramePixel {
 std::optional<NormalizedPoint> target_normalized_point(
     float window_x,
     float window_y,
-    const SDL_FRect& target,
+    const TargetRect& target,
     bool clamp_to_target);
 
 // Scale a normalized point to integer frame pixels, rounded and clamped.
@@ -56,7 +53,7 @@ bool mouse_motion_throttled(
 struct FrameGeometry {
     int width = 0;
     int height = 0;
-    SDL_FRect target{};
+    TargetRect target{};
 };
 
 struct PointerState {
@@ -99,8 +96,8 @@ public:
     virtual void encode_keyboard(const KeyboardState& state, const KeyChange& change) = 0;
 };
 
-// Owns all the shared input machinery. The view forwards SDL events here and
-// supplies the current frame geometry; the controller drives the encoder.
+// Owns all the shared input machinery. The Qt viewer feeds decoded input here
+// and supplies the current frame geometry; the controller drives the encoder.
 class KvmInputController {
 public:
     KvmInputController(
@@ -110,21 +107,18 @@ public:
     KvmInputController(const KvmInputController&) = delete;
     KvmInputController& operator=(const KvmInputController&) = delete;
 
-    void handle_event(const SDL_Event& event);
     void release_all_keys();   // on focus loss
-    void reset();              // on close/cleanup: drop capture and button state
+    void reset();              // on close/cleanup: drop button state
 
-    // SDL-free input entry points for the Qt-hosted path. handle_event stays the
-    // SDL adapter; these forward already-decoded canonical events to the same
-    // internal handlers, so both paths share the throttle/capture/state logic.
+    // Input entry points: the Qt viewer feeds already-decoded canonical events,
+    // which run through the same throttle/state logic as the rest of the class.
     void feed_pointer_button(const KvmPointerButton& button) { handle_button(button); }
     void feed_pointer_motion(const KvmPointerMotion& motion) { handle_motion(motion); }
     void feed_pointer_wheel(const KvmPointerWheel& wheel) { handle_wheel(wheel); }
     void feed_key(const KvmKeyEvent& key) { handle_key(key); }
 
-    // Swap the frame-geometry source after construction. The SDL path maps
-    // pointer coordinates against the SDL window; the Qt-hosted path maps against
-    // the surface, so it installs its own source here.
+    // Install the frame-geometry source: maps pointer coordinates against the Qt
+    // surface (its current size + the centred frame rect).
     void set_frame_geometry_source(std::function<std::optional<FrameGeometry>()> source)
     {
         frame_geometry_ = std::move(source);

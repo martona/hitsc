@@ -72,7 +72,7 @@ Open a PiKVM direct H.264 video and input session:
 .\build\windows-release\hitsc.exe pikvm -u USERNAME https://pikvm.example.com
 ```
 
-PiKVM video decode defaults to `--video-decode auto`, which tries Windows D3D11 hardware decode when SDL exposes a hardware D3D11 renderer and otherwise uses the software FFmpeg path. Use `--video-decode software` to force software decode or `--video-decode d3d11` to require D3D11.
+PiKVM video decode defaults to `--video-decode auto`, which uses Windows D3D11 hardware decode when the viewer's D3D11 device is available and otherwise uses the software FFmpeg path. Use `--video-decode software` to force software decode or `--video-decode d3d11` to require D3D11.
 
 Common viewer options:
 
