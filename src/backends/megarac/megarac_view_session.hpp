@@ -34,7 +34,7 @@ struct MegaracInputWork {
 };
 
 struct MegaracViewSessionState : ViewStateBase {
-    LatestMailbox<MegaracCompressedFrame> frames;
+    FrameQueue<MegaracCompressedFrame> frames; // differential stream: never drop
     LatestMailbox<MegaracHardwareCursor> cursors;
     InputQueue<MegaracInputWork> input;
     std::atomic_int mouse_mode{kMegaracAbsoluteMouseMode};

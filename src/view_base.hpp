@@ -17,6 +17,7 @@
 #include <string>
 #include <thread>
 #include <utility>
+#include <vector>
 
 namespace hitsc {
 
@@ -71,6 +72,67 @@ private:
     std::mutex mutex_;
     std::shared_ptr<const T> latest_;
     std::uint64_t sequence_ = 0;
+};
+
+// Ordered, multi-slot counterpart to LatestMailbox for DIFFERENTIAL video
+// streams (ASPEED dual-JPEG): each frame is a delta on its predecessor — SKIP
+// blocks reuse the prior frame's pixels and PASS2 blocks accumulate onto its
+// stored YUV — so the consumer must decode EVERY frame, in arrival order.
+// Dropping any one (as LatestMailbox does) corrupts the chain until the next
+// keyframe; that is what garbled fast/small hosts whose frames outran the view
+// tick. Use LatestMailbox for already-decoded frames or non-differential data
+// where only the newest matters.
+template <typename T>
+class FrameQueue {
+public:
+    void publish(T value)
+    {
+        std::lock_guard lock(mutex_);
+        value.sequence = ++sequence_;
+        queue_.push_back(std::make_shared<const T>(std::move(value)));
+        if (queue_.size() > kMaxQueued) {
+            // The consumer has fallen catastrophically behind. We cannot silently
+            // skip differential frames, so drop the oldest and flag that a full
+            // keyframe refresh is needed to resync.
+            queue_.pop_front();
+            overflowed_ = true;
+        }
+    }
+
+    // Every frame published since the previous drain, in arrival order.
+    std::vector<std::shared_ptr<const T>> drain()
+    {
+        std::lock_guard lock(mutex_);
+        std::vector<std::shared_ptr<const T>> out(queue_.begin(), queue_.end());
+        queue_.clear();
+        return out;
+    }
+
+    // True (once) if frames were dropped on overflow since the last check.
+    bool overflowed()
+    {
+        std::lock_guard lock(mutex_);
+        const bool overflowed = overflowed_;
+        overflowed_ = false;
+        return overflowed;
+    }
+
+    void clear()
+    {
+        std::lock_guard lock(mutex_);
+        queue_.clear();
+        overflowed_ = false;
+    }
+
+private:
+    // Bounds memory if the view thread stalls (e.g. a long modal). Large enough
+    // that normal bursts (a few frames per tick) never trip it.
+    static constexpr std::size_t kMaxQueued = 240;
+
+    std::mutex mutex_;
+    std::deque<std::shared_ptr<const T>> queue_;
+    std::uint64_t sequence_ = 0;
+    bool overflowed_ = false;
 };
 
 template <typename Work>

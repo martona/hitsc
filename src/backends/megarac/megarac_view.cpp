@@ -24,6 +24,11 @@
 #include <utility>
 #include <vector>
 
+// Uncomment to log how many ASPEED frames are drained (decoded) per view tick.
+// A count > 1 means frames arrived faster than the ~16 ms tick — exactly the
+// intermediate differential frames the old latest-wins mailbox used to drop.
+// #define HITSC_MEGARAC_FRAME_DEBUG 1
+
 namespace hitsc {
 namespace {
 
@@ -234,15 +239,32 @@ private:
             recomposite = true;
         }
 
-        const std::shared_ptr<const MegaracCompressedFrame> frame =
-            state_->frames.latest(hosted_last_sequence_);
-        if (frame) {
+        // ASPEED is a differential stream (see FrameQueue): decode EVERY queued
+        // frame in arrival order. Skipping any (as the old latest-wins mailbox
+        // did) corrupts the SKIP/PASS2 delta chain until the next keyframe — the
+        // root cause of the fast-host garbling.
+        const std::vector<std::shared_ptr<const MegaracCompressedFrame>> frames =
+            state_->frames.drain();
+#ifdef HITSC_MEGARAC_FRAME_DEBUG
+        if (frames.size() > 1) {
+            std::cerr << "[megarac] drained " << frames.size()
+                      << " frames this tick (latest-wins would have dropped "
+                      << (frames.size() - 1) << ")" << std::endl;
+        }
+#endif
+        for (const std::shared_ptr<const MegaracCompressedFrame>& frame : frames) {
             hosted_last_sequence_ = frame->sequence;
             if (decode_hosted_frame(*frame)) {
                 frame_presented(frame->width, frame->height);
                 state_->video_feedback_presented_frames.fetch_add(1, std::memory_order_relaxed);
                 recomposite = true;
             }
+        }
+        if (state_->frames.overflowed()) {
+            // Fell too far behind to preserve the delta chain; request a full
+            // keyframe to resync instead of accumulating garbage.
+            state_->input.enqueue(
+                MegaracInputWork{kCmdGetFullScreen, make_simple_packet(kCmdGetFullScreen, 1)});
         }
 
         if (recomposite && !hosted_clean_rgba_.empty()) {
@@ -258,8 +280,8 @@ private:
 
     std::optional<std::pair<int, int>> latest_frame_size() override
     {
-        if (const std::shared_ptr<const MegaracCompressedFrame> frame = state_->frames.latest(0)) {
-            return std::make_pair(frame->width, frame->height);
+        if (hosted_clean_width_ > 0 && hosted_clean_height_ > 0) {
+            return std::make_pair(hosted_clean_width_, hosted_clean_height_);
         }
         if (!hosted_frame_.isNull()) {
             return std::make_pair(hosted_frame_.width(), hosted_frame_.height());
