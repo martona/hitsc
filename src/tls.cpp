@@ -1,13 +1,17 @@
 #include "tls.hpp"
 
+#include "cert_trust.hpp"
 #include "log.hpp"
 
-#include <boost/asio/ssl/host_name_verification.hpp>
 #include <boost/beast/core/error.hpp>
 #include <openssl/err.h>
 #include <openssl/ssl.h>
+#include <openssl/x509.h>
+#include <openssl/x509_vfy.h>
 
+#include <memory>
 #include <stdexcept>
+#include <utility>
 
 namespace hitsc {
 namespace asio = boost::asio;
@@ -60,7 +64,30 @@ void configure_tls(
     }
 #endif
     stream.set_verify_mode(ssl::verify_peer);
-    stream.set_verify_callback(ssl::host_name_verification(host));
+
+    // Walk the chain with the system trust store, but make the final accept/
+    // reject decision ourselves at the leaf: an OS-trusted cert connects
+    // silently, a pinned one connects silently, anything else is handed to the
+    // trust broker (which may prompt and pin). Accumulate whether every depth
+    // preverified, plus the first failure code, so the leaf has the full
+    // picture. The callback runs on the network thread; blocking it on a modal
+    // prompt is exactly the pause we want.
+    auto chain_state = std::make_shared<std::pair<bool, long>>(true, static_cast<long>(X509_V_OK));
+    const std::string verify_host = host;
+    stream.set_verify_callback(
+        [chain_state, verify_host](bool preverified, ssl::verify_context& ctx) -> bool {
+            X509_STORE_CTX* store_ctx = ctx.native_handle();
+            if (!preverified && chain_state->first) {
+                chain_state->first = false;
+                chain_state->second = X509_STORE_CTX_get_error(store_ctx);
+            }
+            if (X509_STORE_CTX_get_error_depth(store_ctx) != 0) {
+                return true; // keep walking down to the leaf
+            }
+            X509* leaf = X509_STORE_CTX_get_current_cert(store_ctx);
+            return cert_trust_evaluate(
+                verify_host, leaf, chain_state->first, chain_state->second);
+        });
 }
 
 void set_server_name_indication(beast::ssl_stream<beast::tcp_stream>& stream, const std::string& host)

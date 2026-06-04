@@ -13,10 +13,15 @@ struct MegaracVideoFrame {
     int height = 0;
     std::uint8_t compression_mode = 0;
     std::uint8_t jpeg_table_selector = 0;
+    std::uint8_t jpeg_yuv_table_mapping = 0;
     std::uint8_t advance_table_selector = 0;
     std::uint8_t rc4_enable = 0;
     std::uint8_t mode420 = 0;
     std::uint32_t compressed_size = 0;
+    // SourceModeInfo (host resolution, header e[4-7]); width/height above are the
+    // DestinationModeInfo (e[13-16]) that currently drive decode + output sizing.
+    int source_width = 0;
+    int source_height = 0;
     std::vector<std::uint8_t> compressed;
 };
 

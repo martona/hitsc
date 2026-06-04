@@ -1,17 +1,22 @@
 #include "megarac_view.hpp"
 
-#include "backends/aspeed/aspeed_view_renderer.hpp"
+#include "backends/aspeed/aspeed_decoder.hpp"
+#include "backends/aspeed/aspeed_presenter.hpp"
 #include "diagnostics.hpp"
+#include "gui/viewer/qt_viewer_host.hpp"
+#include "hardware_cursor.hpp"
 #include "megarac_hid.hpp"
 #include "megarac_protocol.hpp"
 #include "megarac_view_session.hpp"
 #include "view_input.hpp"
 
-#include <SDL3/SDL.h>
+#include <QImage>
+#include <QPainter>
 
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <exception>
 #include <iostream>
 #include <memory>
@@ -19,41 +24,46 @@
 #include <utility>
 #include <vector>
 
+// Uncomment to log how many ASPEED frames are drained (decoded) per view tick.
+// A count > 1 means frames arrived faster than the ~16 ms tick — exactly the
+// intermediate differential frames the old latest-wins mailbox used to drop.
+// #define HITSC_MEGARAC_FRAME_DEBUG 1
+
 namespace hitsc {
 namespace {
 
 constexpr std::uint16_t kCmdSendHidPacket = command_value(MegaracCommand::SendHidPacket);
 constexpr std::uint16_t kCmdGetFullScreen = command_value(MegaracCommand::GetFullScreen);
 
-std::optional<std::uint8_t> keyboard_modifier_bit(SDL_Scancode scancode)
+std::optional<std::uint8_t> keyboard_modifier_bit(KvmScancode scancode)
 {
     switch (scancode) {
-    case SDL_SCANCODE_LCTRL:
+    case KvmScancode::LCTRL:
         return kMegaracKeyboardLeftCtrl;
-    case SDL_SCANCODE_LSHIFT:
+    case KvmScancode::LSHIFT:
         return kMegaracKeyboardLeftShift;
-    case SDL_SCANCODE_LALT:
+    case KvmScancode::LALT:
         return kMegaracKeyboardLeftAlt;
-    case SDL_SCANCODE_LGUI:
+    case KvmScancode::LGUI:
         return kMegaracKeyboardLeftGui;
-    case SDL_SCANCODE_RCTRL:
+    case KvmScancode::RCTRL:
         return kMegaracKeyboardRightCtrl;
-    case SDL_SCANCODE_RSHIFT:
+    case KvmScancode::RSHIFT:
         return kMegaracKeyboardRightShift;
-    case SDL_SCANCODE_RALT:
+    case KvmScancode::RALT:
         return kMegaracKeyboardRightAlt;
-    case SDL_SCANCODE_RGUI:
+    case KvmScancode::RGUI:
         return kMegaracKeyboardRightGui;
     default:
         return std::nullopt;
     }
 }
 
-std::optional<std::uint8_t> keyboard_usage_from_sdl_scancode(SDL_Scancode scancode)
+std::optional<std::uint8_t> keyboard_usage_from_scancode(KvmScancode scancode)
 {
     const auto usage = static_cast<int>(scancode);
-    if ((usage >= SDL_SCANCODE_A && usage <= SDL_SCANCODE_APPLICATION) ||
-        (usage >= SDL_SCANCODE_KP_EQUALS && usage <= SDL_SCANCODE_F24)) {
+    if ((usage >= static_cast<int>(KvmScancode::A) && usage <= static_cast<int>(KvmScancode::APPLICATION)) ||
+        (usage >= static_cast<int>(KvmScancode::KP_EQUALS) && usage <= static_cast<int>(KvmScancode::F24))) {
         return static_cast<std::uint8_t>(usage);
     }
 
@@ -63,13 +73,13 @@ std::optional<std::uint8_t> keyboard_usage_from_sdl_scancode(SDL_Scancode scanco
 std::uint8_t megarac_button_mask(std::uint32_t buttons)
 {
     std::uint8_t mask = 0;
-    if (buttons & (1u << SDL_BUTTON_LEFT)) {
+    if (buttons & (1u << static_cast<unsigned>(KvmMouseButton::LEFT))) {
         mask |= kMegaracMouseLeftButton;
     }
-    if (buttons & (1u << SDL_BUTTON_RIGHT)) {
+    if (buttons & (1u << static_cast<unsigned>(KvmMouseButton::RIGHT))) {
         mask |= kMegaracMouseRightButton;
     }
-    if (buttons & (1u << SDL_BUTTON_MIDDLE)) {
+    if (buttons & (1u << static_cast<unsigned>(KvmMouseButton::MIDDLE))) {
         mask |= kMegaracMouseMiddleButton;
     }
     return mask;
@@ -82,15 +92,15 @@ public:
     {
     }
 
-    bool accepts_button(std::uint8_t button) const override
+    bool accepts_button(KvmMouseButton button) const override
     {
-        return button == SDL_BUTTON_LEFT || button == SDL_BUTTON_MIDDLE || button == SDL_BUTTON_RIGHT;
+        return button == KvmMouseButton::LEFT || button == KvmMouseButton::MIDDLE || button == KvmMouseButton::RIGHT;
     }
 
-    bool accepts_key(SDL_Scancode scancode) const override
+    bool accepts_key(KvmScancode scancode) const override
     {
         return keyboard_modifier_bit(scancode).has_value()
-            || keyboard_usage_from_sdl_scancode(scancode).has_value();
+            || keyboard_usage_from_scancode(scancode).has_value();
     }
 
     void encode_pointer(const PointerState& state, const PointerChange& change) override
@@ -126,12 +136,12 @@ public:
             if (!state.down[scancode]) {
                 continue;
             }
-            const auto code = static_cast<SDL_Scancode>(scancode);
+            const auto code = static_cast<KvmScancode>(scancode);
             if (const auto modifier = keyboard_modifier_bit(code)) {
                 modifiers |= *modifier;
                 continue;
             }
-            if (const auto usage = keyboard_usage_from_sdl_scancode(code)) {
+            if (const auto usage = keyboard_usage_from_scancode(code)) {
                 if (slot < keys.size()) {
                     keys[slot++] = *usage;
                 }
@@ -159,26 +169,14 @@ public:
 
 private:
     MegaracView(const MegaracViewOptions& options, std::shared_ptr<MegaracViewSessionState> state)
-        : KvmViewBase(*state, options.login.base_url.host, options.login.host_id, "megarac", [state] {
+        : KvmViewBase(*state, options.login.base_url.host, "megarac", [state] {
               state->input.clear();
           })
         , options_(options)
         , state_(std::move(state))
         , encoder_(*state_)
-        , input_(encoder_, [this] { return frame_geometry(); })
+        , input_(encoder_, [] { return std::optional<FrameGeometry>{}; })
     {
-    }
-
-    std::optional<FrameGeometry> frame_geometry() const
-    {
-        const AspeedPresentationSlot* active = aspeed_.active_slot();
-        if (active == nullptr) {
-            return std::nullopt;
-        }
-        return FrameGeometry{
-            active->width,
-            active->height,
-            current_target_rect(active->width, active->height)};
     }
 
     void start_network(KvmNetworkWorker& network) override
@@ -190,33 +188,30 @@ private:
         });
     }
 
-    void before_sdl_cleanup() override
-    {
-        input_.reset();
-        aspeed_.destroy();
-    }
-
     void reset_for_reconnect() override
     {
         state_->frames.clear();
         state_->cursors.clear();
         state_->input.clear();
-        aspeed_.destroy();
-        aspeed_.reset_sequences();
         input_.reset();
+        hosted_frame_ = QImage();
+        hosted_clean_rgba_.clear();
+        hosted_clean_width_ = 0;
+        hosted_clean_height_ = 0;
+        hosted_cursor_ = HardwareCursor{};
+        has_hosted_cursor_ = false;
+        hosted_last_sequence_ = 0;
+        hosted_cursor_sequence_ = 0;
     }
 
     void on_minimized() override
     {
         state_->frames.clear();
-        aspeed_.destroy();
-        aspeed_.reset_sequences();
     }
 
     void on_restored() override
     {
         state_->frames.clear();
-        aspeed_.reset_sequences();
         state_->input.enqueue(MegaracInputWork{kCmdGetFullScreen, make_simple_packet(kCmdGetFullScreen, 1)});
     }
 
@@ -225,60 +220,154 @@ private:
         input_.release_all_keys();
     }
 
-    void handle_event(const SDL_Event& event, bool&) override
+    KvmInputController* hosted_input_controller() override
     {
-        input_.handle_event(event);
+        return &input_;
     }
 
-    void render_visible(bool& render_needed, bool& first_render) override
+    std::optional<QImage> latest_frame_image() override
     {
-        bool presented_new_frame = false;
-        aspeed_.update(
-            renderer(),
-            state_->frames,
-            state_->cursors,
-            "MegaRAC",
-            options_.login.vverbose,
-            render_needed,
-            presented_new_frame);
+        bool recomposite = false;
 
-        if (!render_needed) {
-            return;
+        // BMC hardware-cursor packets arrive faster than video frames; cache the
+        // latest cursor so the sprite tracks at tick rate, not frame rate.
+        if (const std::shared_ptr<const HardwareCursor> cursor =
+                state_->cursors.latest(hosted_cursor_sequence_)) {
+            hosted_cursor_ = *cursor;
+            hosted_cursor_sequence_ = cursor->sequence;
+            has_hosted_cursor_ = true;
+            recomposite = true;
         }
 
-        clear_background();
-        if (const AspeedPresentationSlot* active = aspeed_.active_slot();
-            active != nullptr && active->texture != nullptr) {
-            aspeed_.render(renderer(), current_target_rect(active->width, active->height));
+        // ASPEED is a differential stream (see FrameQueue): decode EVERY queued
+        // frame in arrival order. Skipping any (as the old latest-wins mailbox
+        // did) corrupts the SKIP/PASS2 delta chain until the next keyframe — the
+        // root cause of the fast-host garbling.
+        const std::vector<std::shared_ptr<const MegaracCompressedFrame>> frames =
+            state_->frames.drain();
+#ifdef HITSC_MEGARAC_FRAME_DEBUG
+        if (frames.size() > 1) {
+            std::cerr << "[megarac] drained " << frames.size()
+                      << " frames this tick (latest-wins would have dropped "
+                      << (frames.size() - 1) << ")" << std::endl;
         }
-        present();
-
-        if (presented_new_frame) {
-            if (const AspeedPresentationSlot* active = aspeed_.active_slot()) {
-                frame_presented(active->width, active->height);
+#endif
+        for (const std::shared_ptr<const MegaracCompressedFrame>& frame : frames) {
+            hosted_last_sequence_ = frame->sequence;
+            if (decode_hosted_frame(*frame)) {
+                frame_presented(frame->width, frame->height);
                 state_->video_feedback_presented_frames.fetch_add(1, std::memory_order_relaxed);
+                recomposite = true;
             }
         }
-        first_render = false;
+        if (state_->frames.overflowed()) {
+            // Fell too far behind to preserve the delta chain; request a full
+            // keyframe to resync instead of accumulating garbage.
+            state_->input.enqueue(
+                MegaracInputWork{kCmdGetFullScreen, make_simple_packet(kCmdGetFullScreen, 1)});
+        }
+
+        if (recomposite && !hosted_clean_rgba_.empty()) {
+            if (QImage composed = compose_hosted_frame(); !composed.isNull()) {
+                hosted_frame_ = std::move(composed);
+            }
+        }
+        if (hosted_frame_.isNull()) {
+            return std::nullopt;
+        }
+        return hosted_frame_;
+    }
+
+    std::optional<std::pair<int, int>> latest_frame_size() override
+    {
+        if (hosted_clean_width_ > 0 && hosted_clean_height_ > 0) {
+            return std::make_pair(hosted_clean_width_, hosted_clean_height_);
+        }
+        if (!hosted_frame_.isNull()) {
+            return std::make_pair(hosted_frame_.width(), hosted_frame_.height());
+        }
+        return std::nullopt;
+    }
+
+    // See AtenView::decode_hosted_frame / compose_hosted_frame. Delta-decode into
+    // hosted_clean_rgba_ (the cursor-free delta seed); the BMC cursor is blended
+    // on top later so the seed never carries the sprite.
+    bool decode_hosted_frame(const MegaracCompressedFrame& frame)
+    {
+        if (frame.width <= 0 || frame.height <= 0) {
+            return false;
+        }
+        const std::size_t size = aspeed_frame_rgba_size(frame.width, frame.height);
+        const bool reuse_previous = hosted_clean_width_ == frame.width
+            && hosted_clean_height_ == frame.height
+            && hosted_clean_rgba_.size() == size;
+        try {
+            hosted_clean_rgba_ = hosted_decoder_.decode_rgba(
+                frame.decode_options,
+                frame.compressed,
+                reuse_previous ? &hosted_clean_rgba_ : nullptr);
+        } catch (...) {
+            return false;
+        }
+        hosted_clean_width_ = frame.width;
+        hosted_clean_height_ = frame.height;
+        return true;
+    }
+
+    QImage compose_hosted_frame() const
+    {
+        const std::size_t size = aspeed_frame_rgba_size(hosted_clean_width_, hosted_clean_height_);
+        QImage image(hosted_clean_width_, hosted_clean_height_, QImage::Format_RGBX8888);
+        if (hosted_clean_rgba_.size() != size
+            || static_cast<std::size_t>(image.bytesPerLine()) * static_cast<std::size_t>(hosted_clean_height_) != size) {
+            return {};
+        }
+        std::memcpy(image.bits(), hosted_clean_rgba_.data(), size);
+
+        if (has_hosted_cursor_ && hosted_cursor_.visible) {
+            const CursorImage cursor_image = make_cursor_image(
+                hosted_cursor_, hosted_clean_rgba_, hosted_clean_width_, hosted_clean_height_);
+            if (!cursor_image.rgba.empty() && cursor_image.width > 0 && cursor_image.height > 0) {
+                const QImage sprite(
+                    reinterpret_cast<const uchar*>(cursor_image.rgba.data()),
+                    cursor_image.width,
+                    cursor_image.height,
+                    QImage::Format_RGBA8888);
+                QPainter painter(&image);
+                painter.drawImage(QPoint(hosted_cursor_.x, hosted_cursor_.y), sprite);
+            }
+        }
+        return image;
     }
 
     MegaracViewOptions options_;
     std::shared_ptr<MegaracViewSessionState> state_;
-    AspeedViewRenderer aspeed_;
     MegaracInputEncoder encoder_;
     KvmInputController input_;
+    QImage hosted_frame_;                          // displayed: clean frame + BMC cursor
+    std::vector<std::uint8_t> hosted_clean_rgba_;  // clean decoded RGBA; delta seed (no cursor)
+    int hosted_clean_width_ = 0;
+    int hosted_clean_height_ = 0;
+    HardwareCursor hosted_cursor_;
+    bool has_hosted_cursor_ = false;
+    std::uint64_t hosted_last_sequence_ = 0;
+    std::uint64_t hosted_cursor_sequence_ = 0;
+    AspeedDecoder hosted_decoder_;
 };
 
 } // namespace
 
-void run_megarac_view(const MegaracViewOptions& options, const ViewWindow* handoff)
+std::unique_ptr<KvmViewBase> make_megarac_view(const MegaracViewOptions& options)
+{
+    return std::make_unique<MegaracView>(options);
+}
+
+void run_megarac_view(const MegaracViewOptions& options)
 {
     try {
-        MegaracView view(options);
-        if (handoff != nullptr) {
-            view.adopt_sdl(*handoff);
-        }
-        view.run();
+        run_viewer({options.login.base_url.host, options.login.host_id}, [options](ViewerHost& host) {
+            host.attach_view(make_megarac_view(options));
+        });
     } catch (...) {
         print_current_exception_with_stack(std::cerr, "megarac view ui thread");
         throw;

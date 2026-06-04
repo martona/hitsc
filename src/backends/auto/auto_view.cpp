@@ -5,22 +5,23 @@
 #include "backends/pikvm/pikvm_view.hpp"
 #include "cookie_jar.hpp"
 #include "errors.hpp"
+#include "gui/viewer/qt_viewer_host.hpp"
+#include "gui/viewer/viewer_window.hpp"
 #include "http_client.hpp"
 #include "log.hpp"
 #include "text.hpp"
 #include "tls_session_cache.hpp"
-#include "view_base.hpp"
-#include "view_console.hpp"
+#include "view_base.hpp"  // complete KvmViewBase: make_detected_view owns unique_ptr<KvmViewBase>
 
 #include <boost/beast/http.hpp>
 
+#include <QObject>
+
 #include <algorithm>
 #include <atomic>
-#include <cstdint>
 #include <exception>
 #include <memory>
 #include <optional>
-#include <sstream>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -180,78 +181,74 @@ std::string detection_failure_message()
     return "Could not auto-detect KVM type from GET /. Choose ATEN, MegaRAC, or PiKVM manually.";
 }
 
-std::string message_from_exception(std::exception_ptr exception)
+std::unique_ptr<KvmViewBase> make_detected_view(DetectedKvmBackend backend, const AutoViewOptions& options)
 {
-    if (!exception) {
-        return {};
+    switch (backend) {
+    case DetectedKvmBackend::Megarac: {
+        MegaracViewOptions view_options;
+        view_options.login = options.login;
+        view_options.idle_timeout_seconds = options.idle_timeout_seconds;
+        return make_megarac_view(view_options);
     }
-    try {
-        std::rethrow_exception(exception);
-    } catch (const std::exception& error) {
-        return error.what();
-    } catch (...) {
-        return "Unknown error";
+    case DetectedKvmBackend::Aten: {
+        AtenViewOptions view_options;
+        view_options.login = options.login;
+        view_options.idle_timeout_seconds = options.idle_timeout_seconds;
+        view_options.shared = options.aten_shared;
+        return make_aten_view(view_options);
     }
+    case DetectedKvmBackend::Pikvm: {
+        PikvmViewOptions view_options;
+        view_options.login = options.login;
+        view_options.idle_timeout_seconds = options.idle_timeout_seconds;
+        view_options.video_decode = options.pikvm_video_decode;
+        return make_pikvm_view(view_options);
+    }
+    case DetectedKvmBackend::Unknown:
+        break;
+    }
+    return nullptr;
 }
 
-struct DetectionWork {
+// Async backend detection driven inside the shared viewer window: a worker runs
+// the HTTPS probe while the harness shows the connecting console; the window's
+// frameTick polls for completion, then attaches the detected view (or fails).
+// The worker holds only a raw pointer back to this state; the destructor joins it
+// before the members are destroyed, so the pointer can never dangle.
+struct AutoDetection {
     AutoViewOptions options;
     std::atomic_bool done{false};
-    DetectedKvmBackend backend = DetectedKvmBackend::Unknown;
-    std::exception_ptr exception;
-};
-
-struct DetectionConsole {
-    SDL_Window* window = nullptr;
-    SDL_Renderer* renderer = nullptr;
-    ConsoleScreen screen;
-
-    void render() const
-    {
-        render_view_console(renderer, window, screen);
-    }
-
-    static bool SDLCALL on_event_watch(void* userdata, SDL_Event* event)
-    {
-        if (event != nullptr &&
-            (event->type == SDL_EVENT_WINDOW_RESIZED ||
-             event->type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED ||
-             event->type == SDL_EVENT_WINDOW_EXPOSED)) {
-            static_cast<DetectionConsole*>(userdata)->render();
-        }
-        return true;
-    }
-};
-
-// Shows the connecting/detecting console while detect_kvm_backend() runs on a
-// worker thread. Returns the detected backend, or nullopt if the user closed
-// the window. Detection failures show the error console with R-to-retry.
-std::optional<DetectedKvmBackend> run_auto_detection(const ViewWindow& view_window, AutoViewOptions& options)
-{
-    if (!options.login.tls_session_cache) {
-        options.login.tls_session_cache = std::make_shared<TlsSessionCache>(16);
-    }
-
-    DetectionConsole console;
-    console.window = view_window.window;
-    console.renderer = SDL_CreateRenderer(view_window.window, nullptr);
-    if (console.renderer == nullptr) {
-        throw std::runtime_error(std::string("SDL_CreateRenderer: ") + SDL_GetError());
-    }
-    SDL_AddEventWatch(DetectionConsole::on_event_watch, &console);
-
-    const std::string host = options.login.base_url.host;
-
-    std::shared_ptr<DetectionWork> work;
+    std::optional<DetectedKvmBackend> backend;
+    std::exception_ptr error;
     std::thread worker;
+    bool handled = false;
 
-    const auto start_worker = [&work, &worker, &options]() {
-        work = std::make_shared<DetectionWork>();
-        work->options = options; // shares the TLS session cache shared_ptr
-        std::shared_ptr<DetectionWork> handle = work;
-        worker = std::thread([handle]() {
+    ~AutoDetection()
+    {
+        if (worker.joinable()) {
+            worker.join();
+        }
+    }
+};
+
+} // namespace
+
+void run_auto_view(const AutoViewOptions& options)
+{
+    // One window for both phases: the harness owns the QApplication + window and
+    // shows the connecting console; detection runs once the surface is up (so cert
+    // prompts parent on the window), then the detected view attaches in place.
+    run_viewer({options.login.base_url.host, options.login.host_id}, [options](ViewerHost& host) {
+        auto detection = std::make_shared<AutoDetection>();
+        detection->options = options;
+        if (!detection->options.login.tls_session_cache) {
+            detection->options.login.tls_session_cache = std::make_shared<TlsSessionCache>(16);
+        }
+
+        AutoDetection* state = detection.get();
+        detection->worker = std::thread([state]() {
             try {
-                const KvmBackendFingerprint fingerprint = detect_kvm_backend(handle->options.login);
+                const KvmBackendFingerprint fingerprint = detect_kvm_backend(state->options.login);
                 if (fingerprint.backend == DetectedKvmBackend::Unknown) {
                     throw UserError(detection_failure_message());
                 }
@@ -259,167 +256,38 @@ std::optional<DetectedKvmBackend> run_auto_detection(const ViewWindow& view_wind
                            << " backend=" << backend_name(fingerprint.backend)
                            << " score=" << fingerprint.score
                            << " reason=" << join_reasons(fingerprint.reasons);
-                handle->backend = fingerprint.backend;
+                state->backend = fingerprint.backend;
             } catch (...) {
-                handle->exception = std::current_exception();
+                state->error = std::current_exception();
             }
-            handle->done.store(true);
+            state->done.store(true);
         });
-    };
 
-    std::optional<DetectedKvmBackend> resolved;
-    bool errored = false;
-    std::string error_detail;
-    std::uint64_t last_render = 0;
-    bool running = true;
-
-    start_worker();
-
-    while (running) {
-        if (errored) {
-            console.screen.severity = ConsoleSeverity::Error;
-            console.screen.headline = "Connection failed";
-            console.screen.detail = error_detail;
-            console.screen.hint = "Press R to reconnect      Esc to close";
-        } else {
-            console.screen.severity = ConsoleSeverity::Info;
-            console.screen.headline = "Connecting to " + host + "...";
-            console.screen.detail.clear();
-            console.screen.hint = "Esc to cancel";
-        }
-
-        bool retry_requested = false;
-        SDL_Event event{};
-        bool have_event = SDL_WaitEventTimeout(&event, 16);
-        while (have_event) {
-            if (event.type == SDL_EVENT_QUIT ||
-                event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED) {
-                running = false;
-            } else if (event.type == SDL_EVENT_KEY_DOWN) {
-                if (event.key.scancode == SDL_SCANCODE_ESCAPE) {
-                    running = false;
-                } else if (errored && event.key.scancode == SDL_SCANCODE_R) {
-                    retry_requested = true;
+        // Poll the worker on the window's tick; attach the detected view (or
+        // surface the failure) once it finishes. Esc/close while detecting is
+        // handled by the harness, since no view is attached yet.
+        QObject::connect(&host.window(), &ViewerWindow::frameTick, &host.window(), [detection, &host]() {
+            if (detection->handled || !detection->done.load()) {
+                return;
+            }
+            detection->handled = true;
+            if (detection->worker.joinable()) {
+                detection->worker.join();
+            }
+            if (detection->error) {
+                host.fail(detection->error);
+                return;
+            }
+            // Runs inside the event loop: keep a view-constructor throw out of Qt.
+            try {
+                if (detection->backend) {
+                    host.attach_view(make_detected_view(*detection->backend, detection->options));
                 }
+            } catch (...) {
+                host.fail(std::current_exception());
             }
-            have_event = SDL_PollEvent(&event);
-        }
-
-        if (!running) {
-            break;
-        }
-
-        if (retry_requested) {
-            if (worker.joinable()) {
-                worker.join();
-            }
-            errored = false;
-            error_detail.clear();
-            last_render = 0;
-            start_worker();
-            continue;
-        }
-
-        const std::uint64_t ticks = SDL_GetTicks();
-        if (last_render == 0 || ticks - last_render >= 150) {
-            last_render = ticks;
-            console.render();
-        }
-
-        if (!errored && work->done.load()) {
-            if (worker.joinable()) {
-                worker.join();
-            }
-            if (work->exception) {
-                errored = true;
-                error_detail = message_from_exception(work->exception);
-                last_render = 0;
-            } else {
-                resolved = work->backend;
-                running = false;
-            }
-        }
-    }
-
-    // If the user aborted while a probe is still in flight, detach it (the HTTP
-    // request has its own timeout) instead of blocking the window on join.
-    if (worker.joinable()) {
-        if (work && !work->done.load()) {
-            worker.detach();
-        } else {
-            worker.join();
-        }
-    }
-
-    SDL_RemoveEventWatch(DetectionConsole::on_event_watch, &console);
-    SDL_DestroyRenderer(console.renderer);
-
-    return resolved;
-}
-
-} // namespace
-
-void run_auto_view(const AutoViewOptions& options)
-{
-    // Create the window up front so detection runs on-screen (with the same
-    // console + retry as a live session), then hand the window to the detected
-    // backend, which takes over SDL ownership.
-    ViewWindow view_window = make_view_window(options.login.host_id);
-
-    const auto destroy_window = [&view_window, &options]() {
-        if (view_window.window != nullptr) {
-            // Remember the window position even if detection failed/was aborted.
-            save_view_window_geometry(view_window.window, options.login.host_id);
-            SDL_DestroyWindow(view_window.window);
-            view_window.window = nullptr;
-        }
-        SDL_Quit();
-    };
-
-    AutoViewOptions detected_options = options;
-    std::optional<DetectedKvmBackend> backend;
-    try {
-        backend = run_auto_detection(view_window, detected_options);
-    } catch (...) {
-        destroy_window();
-        throw;
-    }
-
-    if (!backend) {
-        destroy_window(); // user closed during detection
-        return;
-    }
-
-    // From here the concrete view adopts the window and owns its teardown.
-    switch (*backend) {
-    case DetectedKvmBackend::Megarac: {
-        MegaracViewOptions view_options;
-        view_options.login = std::move(detected_options.login);
-        view_options.idle_timeout_seconds = detected_options.idle_timeout_seconds;
-        run_megarac_view(view_options, &view_window);
-        return;
-    }
-    case DetectedKvmBackend::Aten: {
-        AtenViewOptions view_options;
-        view_options.login = std::move(detected_options.login);
-        view_options.idle_timeout_seconds = detected_options.idle_timeout_seconds;
-        view_options.shared = detected_options.aten_shared;
-        run_aten_view(view_options, &view_window);
-        return;
-    }
-    case DetectedKvmBackend::Pikvm: {
-        PikvmViewOptions view_options;
-        view_options.login = std::move(detected_options.login);
-        view_options.idle_timeout_seconds = detected_options.idle_timeout_seconds;
-        view_options.video_decode = detected_options.pikvm_video_decode;
-        run_pikvm_view(view_options, &view_window);
-        return;
-    }
-    case DetectedKvmBackend::Unknown:
-        break;
-    }
-
-    destroy_window();
+        });
+    });
 }
 
 } // namespace hitsc

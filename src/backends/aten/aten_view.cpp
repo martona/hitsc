@@ -1,15 +1,20 @@
 #include "aten_view.hpp"
 
-#include "backends/aspeed/aspeed_view_renderer.hpp"
+#include "backends/aspeed/aspeed_decoder.hpp"
+#include "backends/aspeed/aspeed_presenter.hpp"
 #include "aten_network.hpp"
 #include "aten_protocol.hpp"
 #include "diagnostics.hpp"
+#include "gui/viewer/qt_viewer_host.hpp"
+#include "hardware_cursor.hpp"
 #include "view_input.hpp"
 
-#include <SDL3/SDL.h>
+#include <QImage>
+#include <QPainter>
 
 #include <atomic>
 #include <cstdint>
+#include <cstring>
 #include <exception>
 #include <iostream>
 #include <memory>
@@ -23,11 +28,11 @@ extern std::atomic_bool g_aten_full_framebuffer_refresh_requested;
 
 namespace {
 
-std::optional<std::uint32_t> aten_keyboard_usage_from_sdl_scancode(SDL_Scancode scancode)
+std::optional<std::uint32_t> aten_keyboard_usage_from_scancode(KvmScancode scancode)
 {
     const auto usage = static_cast<int>(scancode);
-    if ((usage >= SDL_SCANCODE_A && usage <= SDL_SCANCODE_APPLICATION) ||
-        (usage >= SDL_SCANCODE_KP_EQUALS && usage <= SDL_SCANCODE_RGUI)) {
+    if ((usage >= static_cast<int>(KvmScancode::A) && usage <= static_cast<int>(KvmScancode::APPLICATION)) ||
+        (usage >= static_cast<int>(KvmScancode::KP_EQUALS) && usage <= static_cast<int>(KvmScancode::RGUI))) {
         return static_cast<std::uint32_t>(usage);
     }
 
@@ -37,13 +42,13 @@ std::optional<std::uint32_t> aten_keyboard_usage_from_sdl_scancode(SDL_Scancode 
 std::uint8_t aten_button_mask(std::uint32_t buttons)
 {
     std::uint8_t mask = 0;
-    if (buttons & (1u << SDL_BUTTON_LEFT)) {
+    if (buttons & (1u << static_cast<unsigned>(KvmMouseButton::LEFT))) {
         mask |= 1;
     }
-    if (buttons & (1u << SDL_BUTTON_MIDDLE)) {
+    if (buttons & (1u << static_cast<unsigned>(KvmMouseButton::MIDDLE))) {
         mask |= 2;
     }
-    if (buttons & (1u << SDL_BUTTON_RIGHT)) {
+    if (buttons & (1u << static_cast<unsigned>(KvmMouseButton::RIGHT))) {
         mask |= 4;
     }
     return mask;
@@ -56,14 +61,14 @@ public:
     {
     }
 
-    bool accepts_button(std::uint8_t button) const override
+    bool accepts_button(KvmMouseButton button) const override
     {
-        return button == SDL_BUTTON_LEFT || button == SDL_BUTTON_MIDDLE || button == SDL_BUTTON_RIGHT;
+        return button == KvmMouseButton::LEFT || button == KvmMouseButton::MIDDLE || button == KvmMouseButton::RIGHT;
     }
 
-    bool accepts_key(SDL_Scancode scancode) const override
+    bool accepts_key(KvmScancode scancode) const override
     {
-        return aten_keyboard_usage_from_sdl_scancode(scancode).has_value();
+        return aten_keyboard_usage_from_scancode(scancode).has_value();
     }
 
     void encode_pointer(const PointerState& state, const PointerChange& change) override
@@ -85,13 +90,13 @@ public:
 
     void encode_keyboard(const KeyboardState&, const KeyChange& change) override
     {
-        for (const SDL_Scancode scancode : change.released) {
-            if (const auto usage = aten_keyboard_usage_from_sdl_scancode(scancode)) {
+        for (const KvmScancode scancode : change.released) {
+            if (const auto usage = aten_keyboard_usage_from_scancode(scancode)) {
                 state_.input.enqueue(make_aten_key_event(*usage, false));
             }
         }
-        for (const SDL_Scancode scancode : change.pressed) {
-            if (const auto usage = aten_keyboard_usage_from_sdl_scancode(scancode)) {
+        for (const KvmScancode scancode : change.pressed) {
+            if (const auto usage = aten_keyboard_usage_from_scancode(scancode)) {
                 state_.input.enqueue(make_aten_key_event(*usage, true));
             }
         }
@@ -110,26 +115,14 @@ public:
 
 private:
     AtenView(const AtenViewOptions& options, std::shared_ptr<AtenViewState> state)
-        : KvmViewBase(*state, options.login.base_url.host, options.login.host_id, "aten", [state] {
+        : KvmViewBase(*state, options.login.base_url.host, "aten", [state] {
               state->input.clear();
           })
         , options_(options)
         , state_(std::move(state))
         , encoder_(*state_)
-        , input_(encoder_, [this] { return frame_geometry(); })
+        , input_(encoder_, [] { return std::optional<FrameGeometry>{}; })
     {
-    }
-
-    std::optional<FrameGeometry> frame_geometry() const
-    {
-        const AspeedPresentationSlot* active = aspeed_.active_slot();
-        if (active == nullptr) {
-            return std::nullopt;
-        }
-        return FrameGeometry{
-            active->width,
-            active->height,
-            current_target_rect(active->width, active->height)};
     }
 
     void start_network(KvmNetworkWorker& network) override
@@ -141,27 +134,25 @@ private:
         });
     }
 
-    void before_sdl_cleanup() override
-    {
-        input_.reset();
-        aspeed_.destroy();
-    }
-
     void reset_for_reconnect() override
     {
         state_->frames.clear();
         state_->cursors.clear();
         state_->input.clear();
-        aspeed_.destroy();
-        aspeed_.reset_sequences();
         input_.reset();
+        hosted_frame_ = QImage();
+        hosted_clean_rgba_.clear();
+        hosted_clean_width_ = 0;
+        hosted_clean_height_ = 0;
+        hosted_cursor_ = HardwareCursor{};
+        has_hosted_cursor_ = false;
+        hosted_last_sequence_ = 0;
+        hosted_cursor_sequence_ = 0;
     }
 
     void on_minimized() override
     {
         state_->frames.clear();
-        aspeed_.destroy();
-        aspeed_.reset_sequences();
     }
 
     void on_restored() override
@@ -174,59 +165,144 @@ private:
         input_.release_all_keys();
     }
 
-    void handle_event(const SDL_Event& event, bool&) override
+    KvmInputController* hosted_input_controller() override
     {
-        input_.handle_event(event);
+        return &input_;
     }
 
-    void render_visible(bool& render_needed, bool& first_render) override
+    std::optional<QImage> latest_frame_image() override
     {
-        bool presented_new_frame = false;
-        aspeed_.update(
-            renderer(),
-            state_->frames,
-            state_->cursors,
-            "ATEN",
-            options_.login.vverbose,
-            render_needed,
-            presented_new_frame);
+        bool recomposite = false;
 
-        if (!render_needed) {
-            return;
+        // BMC hardware-cursor packets arrive faster than video frames; cache the
+        // latest cursor so the sprite tracks at tick rate, not frame rate.
+        if (const std::shared_ptr<const HardwareCursor> cursor =
+                state_->cursors.latest(hosted_cursor_sequence_)) {
+            hosted_cursor_ = *cursor;
+            hosted_cursor_sequence_ = cursor->sequence;
+            has_hosted_cursor_ = true;
+            recomposite = true;
         }
 
-        clear_background();
-        if (const AspeedPresentationSlot* active = aspeed_.active_slot();
-            active != nullptr && active->texture != nullptr) {
-            aspeed_.render(renderer(), current_target_rect(active->width, active->height));
-        }
-        present();
-
-        if (presented_new_frame) {
-            if (const AspeedPresentationSlot* active = aspeed_.active_slot()) {
-                frame_presented(active->width, active->height);
+        const std::shared_ptr<const AtenCompressedFrame> frame =
+            state_->frames.latest(hosted_last_sequence_);
+        if (frame) {
+            hosted_last_sequence_ = frame->sequence;
+            if (decode_hosted_frame(*frame)) {
+                frame_presented(frame->width, frame->height);
+                recomposite = true;
             }
         }
-        first_render = false;
+
+        if (recomposite && !hosted_clean_rgba_.empty()) {
+            if (QImage composed = compose_hosted_frame(); !composed.isNull()) {
+                hosted_frame_ = std::move(composed);
+            }
+        }
+        if (hosted_frame_.isNull()) {
+            return std::nullopt;
+        }
+        return hosted_frame_;
+    }
+
+    std::optional<std::pair<int, int>> latest_frame_size() override
+    {
+        if (const std::shared_ptr<const AtenCompressedFrame> frame = state_->frames.latest(0)) {
+            return std::make_pair(frame->width, frame->height);
+        }
+        if (!hosted_frame_.isNull()) {
+            return std::make_pair(hosted_frame_.width(), hosted_frame_.height());
+        }
+        return std::nullopt;
+    }
+
+    // Delta-decode the ASPEED frame into hosted_clean_rgba_ (the seed for the
+    // next delta): decode_rgba seeds from the previous clean frame, or from white
+    // when dimensions change / on the first frame. The cursor is composited later
+    // in compose_hosted_frame so the seed never carries the sprite. Returns false
+    // on bad dimensions or decode failure. The decoder is stateless.
+    bool decode_hosted_frame(const AtenCompressedFrame& frame)
+    {
+        if (frame.width <= 0 || frame.height <= 0) {
+            return false;
+        }
+        const std::size_t size = aspeed_frame_rgba_size(frame.width, frame.height);
+        const bool reuse_previous = hosted_clean_width_ == frame.width
+            && hosted_clean_height_ == frame.height
+            && hosted_clean_rgba_.size() == size;
+        try {
+            hosted_clean_rgba_ = hosted_decoder_.decode_rgba(
+                frame.decode_options,
+                frame.compressed,
+                reuse_previous ? &hosted_clean_rgba_ : nullptr);
+        } catch (...) {
+            return false;
+        }
+        hosted_clean_width_ = frame.width;
+        hosted_clean_height_ = frame.height;
+        return true;
+    }
+
+    // Copy the clean frame into a fresh RGBX8888 QImage and blend the BMC cursor
+    // sprite on top (SourceOver via the sprite's straight alpha; the RGBX
+    // destination stays opaque). We must not paint into hosted_clean_rgba_ — it is
+    // the delta seed for the next frame. The sprite goes at (cursor.x, cursor.y):
+    // make_cursor_image already bakes the pattern x/y_offset into the sampled
+    // sprite, so its top-left maps to (cursor.x, cursor.y).
+    QImage compose_hosted_frame() const
+    {
+        const std::size_t size = aspeed_frame_rgba_size(hosted_clean_width_, hosted_clean_height_);
+        QImage image(hosted_clean_width_, hosted_clean_height_, QImage::Format_RGBX8888);
+        if (hosted_clean_rgba_.size() != size
+            || static_cast<std::size_t>(image.bytesPerLine()) * static_cast<std::size_t>(hosted_clean_height_) != size) {
+            return {};
+        }
+        std::memcpy(image.bits(), hosted_clean_rgba_.data(), size);
+
+        if (has_hosted_cursor_ && hosted_cursor_.visible) {
+            const CursorImage cursor_image = make_cursor_image(
+                hosted_cursor_, hosted_clean_rgba_, hosted_clean_width_, hosted_clean_height_);
+            if (!cursor_image.rgba.empty() && cursor_image.width > 0 && cursor_image.height > 0) {
+                const QImage sprite(
+                    reinterpret_cast<const uchar*>(cursor_image.rgba.data()),
+                    cursor_image.width,
+                    cursor_image.height,
+                    QImage::Format_RGBA8888);
+                QPainter painter(&image);
+                painter.drawImage(QPoint(hosted_cursor_.x, hosted_cursor_.y), sprite);
+            }
+        }
+        return image;
     }
 
     AtenViewOptions options_;
     std::shared_ptr<AtenViewState> state_;
-    AspeedViewRenderer aspeed_;
     AtenInputEncoder encoder_;
     KvmInputController input_;
+    QImage hosted_frame_;                          // displayed: clean frame + BMC cursor
+    std::vector<std::uint8_t> hosted_clean_rgba_;  // clean decoded RGBA; delta seed (no cursor)
+    int hosted_clean_width_ = 0;
+    int hosted_clean_height_ = 0;
+    HardwareCursor hosted_cursor_;
+    bool has_hosted_cursor_ = false;
+    std::uint64_t hosted_last_sequence_ = 0;
+    std::uint64_t hosted_cursor_sequence_ = 0;
+    AspeedDecoder hosted_decoder_;
 };
 
 } // namespace
 
-void run_aten_view(const AtenViewOptions& options, const ViewWindow* handoff)
+std::unique_ptr<KvmViewBase> make_aten_view(const AtenViewOptions& options)
+{
+    return std::make_unique<AtenView>(options);
+}
+
+void run_aten_view(const AtenViewOptions& options)
 {
     try {
-        AtenView view(options);
-        if (handoff != nullptr) {
-            view.adopt_sdl(*handoff);
-        }
-        view.run();
+        run_viewer({options.login.base_url.host, options.login.host_id}, [options](ViewerHost& host) {
+            host.attach_view(make_aten_view(options));
+        });
     } catch (...) {
         print_current_exception_with_stack(std::cerr, "aten view ui thread");
         throw;

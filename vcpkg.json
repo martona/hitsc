@@ -41,7 +41,6 @@
       ]
     },
     "qtdeclarative",
-    "sdl3",
     "zlib"
   ]
 }

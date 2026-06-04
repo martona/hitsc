@@ -93,7 +93,7 @@ jobs:
           $dump = & cmd.exe /d /s /c "call `"$vcvars`" amd64 >nul && dumpbin /dependents `"$exe`""
           $dump
 
-          $blocked = $dump | Select-String -Pattern "VCRUNTIME|MSVCP|ucrtbase|boost_.*\.dll|SDL3\.dll|libssl|libcrypto|zlib" -CaseSensitive:$false
+          $blocked = $dump | Select-String -Pattern "VCRUNTIME|MSVCP|ucrtbase|boost_.*\.dll|libssl|libcrypto|zlib" -CaseSensitive:$false
           if ($blocked) {
             throw "Release exe imports non-system runtime/dependency DLLs: $($blocked -join '; ')"
           }

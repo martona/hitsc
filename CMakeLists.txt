@@ -22,8 +22,7 @@ find_package(CLI11 CONFIG REQUIRED)
 find_package(FFMPEG REQUIRED)
 find_package(OpenSSL REQUIRED)
 set(QT_SKIP_SETUP_DEPLOYMENT ON)
-find_package(Qt6 REQUIRED COMPONENTS Core Gui Qml Quick QuickControls2 QuickLayouts)
-find_package(SDL3 CONFIG REQUIRED)
+find_package(Qt6 REQUIRED COMPONENTS Core Gui Qml Quick QuickControls2 QuickLayouts ShaderTools Widgets)
 find_package(ZLIB REQUIRED)
 
 qt_policy(SET QTP0001 NEW)
@@ -61,6 +60,10 @@ add_executable(
   src/backends/aspeed/aspeed_decoder.cpp
   src/backends/aspeed/aspeed_presenter.cpp
   src/bmc_session.cpp
+  src/cert_prompt.cpp
+  src/cert_prompt.hpp
+  src/cert_trust.cpp
+  src/cert_trust.hpp
   src/cli.cpp
   src/console.cpp
   src/cookie_jar.cpp
@@ -82,6 +85,8 @@ add_executable(
   src/gui/launcher_theme.hpp
   src/gui/launcher_types.cpp
   src/log.cpp
+  src/gui/screen_geometry.cpp
+  src/gui/screen_geometry.hpp
   src/gui/window_placement.cpp
   src/gui/window_placement.hpp
   src/gui/window_prefs_store.cpp
@@ -93,7 +98,6 @@ add_executable(
   src/backends/megarac/megarac_view.cpp
   src/main.cpp
   src/hardware_cursor.cpp
-  src/hardware_cursor_presenter.cpp
   src/backends/megarac/megarac_hid.cpp
   src/backends/megarac/megarac_view_session.cpp
   src/backends/megarac/megarac_protocol.cpp
@@ -111,14 +115,34 @@ add_executable(
   src/trace.cpp
   src/url.cpp
   src/view_base.cpp
-  src/view_console.cpp
-  src/view_console.hpp
+  src/console_screen.hpp
+  src/gui/viewer/qt_console.cpp
+  src/gui/viewer/qt_console.hpp
+  src/gui/viewer/viewer_surface.cpp
+  src/gui/viewer/viewer_surface.hpp
+  src/gui/viewer/viewer_window.cpp
+  src/gui/viewer/viewer_window.hpp
+  src/gui/viewer/qt_viewer_host.cpp
+  src/gui/viewer/qt_viewer_host.hpp
   src/view_input.cpp
   src/view_input.hpp
   src/view_status.cpp
 )
 
 target_compile_features(hitsc PRIVATE cxx_std_20)
+
+# Bake the QRhi video-quad shaders to .qsb and embed them under :/hitsc/shaders/.
+qt_add_shaders(hitsc "hitsc_viewer_shaders"
+  PREFIX "/hitsc/shaders"
+  FILES
+    src/gui/viewer/viewer_quad.vert
+    src/gui/viewer/viewer_quad.frag
+    src/gui/viewer/viewer_nv12.frag
+  OUTPUTS
+    viewer_quad.vert.qsb
+    viewer_quad.frag.qsb
+    viewer_nv12.frag.qsb
+)
 
 add_subdirectory(src/gui)
 
@@ -128,7 +152,6 @@ target_compile_definitions(
     BOOST_ASIO_NO_DEPRECATED
     BOOST_BEAST_USE_STD_STRING_VIEW
     NOMINMAX
-    SDL_MAIN_HANDLED
     WIN32_LEAN_AND_MEAN
     _CRT_SECURE_NO_WARNINGS
     _WIN32_WINNT=0x0A00
@@ -185,11 +208,12 @@ target_link_libraries(
     OpenSSL::Crypto
     Qt6::Core
     Qt6::Gui
+    Qt6::GuiPrivate
     Qt6::Qml
     Qt6::Quick
     Qt6::QuickControls2
     Qt6::QuickLayouts
-    SDL3::SDL3
+    Qt6::Widgets
     hitsc_launcher_qml
     ZLIB::ZLIB
 )
@@ -198,7 +222,7 @@ if(WIN32)
   enable_language(RC)
   target_sources(hitsc PRIVATE src/resources/hitsc.rc)
 
-  target_link_libraries(hitsc PRIVATE Crypt32 D3d11 Dbghelp Dwmapi Dxgi Iphlpapi Ws2_32)
+  target_link_libraries(hitsc PRIVATE Comctl32 Crypt32 D3d11 Dbghelp Dwmapi Dxgi Iphlpapi Ws2_32)
   set_target_properties(hitsc PROPERTIES WIN32_EXECUTABLE TRUE)
 
   add_executable(

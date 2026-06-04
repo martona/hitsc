@@ -14,7 +14,15 @@ struct AspeedDecodeOptions {
     unsigned chroma_table_selector = 0;
     unsigned advance_table_selector = 0;
     unsigned advance_chroma_table_selector = 0;
+    // 1 => dequantize chroma with the luminance tables instead of the chrominance
+    // tables (ASPEED JPEGYUVTableMapping). MegaRAC sets this per frame; 0 elsewhere.
+    unsigned yuv_table_mapping = 0;
     bool use_separate_chroma_selectors = false;
+    // Host (Source) resolution from the frame header. Diagnostic for now: the
+    // reference decoder strides output by Source while gridding macroblocks by
+    // Destination (width/height above). 0 => unknown / same as Destination.
+    int source_width = 0;
+    int source_height = 0;
 };
 
 class AspeedDecoder {

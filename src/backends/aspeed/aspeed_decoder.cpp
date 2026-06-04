@@ -1,8 +1,21 @@
+// Diagnostic toggle: uncomment to log per-frame ASPEED decode telemetry to
+// stderr and ./hitsc_aspeed_debug.log — Source vs Destination dims, the 4-bit
+// block-code histogram, and how each frame terminated (clean FRAME_END vs the
+// runaway guard, which signals a bitstream desync). See the hitsc-megarac-decode
+// investigation notes. Leave commented for normal builds.
+// #define HITSC_ASPEED_DEBUG 1
+
 #include "aspeed_decoder.hpp"
 
 #include <limits>
 #include <mutex>
 #include <stdexcept>
+
+#ifdef HITSC_ASPEED_DEBUG
+#include <fstream>
+#include <iostream>
+#include <sstream>
+#endif
 
 extern "C" {
 void init(void);
@@ -25,7 +38,17 @@ void decode_ext(
     unsigned selector,
     unsigned chroma_selector,
     unsigned advance_selector,
-    unsigned advance_chroma_selector);
+    unsigned advance_chroma_selector,
+    unsigned mapping);
+
+#ifdef HITSC_ASPEED_DEBUG
+extern int g_aspeed_block_code_counts[16];
+extern int g_aspeed_iterations;
+extern int g_aspeed_termination;
+extern int g_aspeed_final_mbx;
+extern int g_aspeed_final_mby;
+extern int g_aspeed_bad_selector;
+#endif
 }
 
 namespace hitsc {
@@ -125,7 +148,42 @@ void AspeedDecoder::decode_rgba_into(
         options.jpeg_table_selector,
         chroma_selector,
         options.advance_table_selector,
-        advance_chroma_selector);
+        advance_chroma_selector,
+        options.yuv_table_mapping);
+
+#ifdef HITSC_ASPEED_DEBUG
+    {
+        static const char* const kTermName[3] = {"FRAME_END", "RUNAWAY_GUARD", "BUFFER_END"};
+        std::ostringstream line;
+        line << "[aspeed] dest=" << options.width << "x" << options.height
+             << " src=" << options.source_width << "x" << options.source_height
+             << " mode420=" << options.mode420
+             << " sel=" << options.jpeg_table_selector
+             << " chroma=" << chroma_selector
+             << " adv=" << options.advance_table_selector
+             << " advchroma=" << advance_chroma_selector
+             << " map=" << options.yuv_table_mapping
+             << " bytes=" << compressed.size()
+             << " term="
+             << (g_aspeed_termination >= 0 && g_aspeed_termination <= 2
+                     ? kTermName[g_aspeed_termination]
+                     : "?")
+             << " iters=" << g_aspeed_iterations
+             << " last_mb=" << g_aspeed_final_mbx << "," << g_aspeed_final_mby
+             << " bad_sel=" << g_aspeed_bad_selector << " codes=[";
+        for (int i = 0; i < 16; ++i) {
+            if (g_aspeed_block_code_counts[i] != 0) {
+                line << i << ":" << g_aspeed_block_code_counts[i] << " ";
+            }
+        }
+        line << "]";
+        std::cerr << line.str() << std::endl;
+        std::ofstream log_file("hitsc_aspeed_debug.log", std::ios::app);
+        if (log_file) {
+            log_file << line.str() << "\n";
+        }
+    }
+#endif
 }
 
 } // namespace hitsc

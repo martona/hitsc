@@ -8,17 +8,20 @@ extern "C" {
 
 #include <memory>
 #include <mutex>
-#include <string>
 
 struct AVBufferRef;
 struct AVCodec;
 struct AVFrame;
-struct SDL_Renderer;
-struct SDL_Texture;
-struct SDL_Window;
+struct ID3D11Device;
+struct ID3D11Texture2D;
 
 namespace hitsc {
 
+// Hardware H.264 decode bound to an EXISTING ID3D11Device (QRhi's), so decoded
+// NV12 textures live on the same device QRhi renders with and can be imported
+// zero-copy. One recursive_mutex is shared as FFmpeg's D3D11VA lock callback AND
+// the renderer's lock (held across the render frame) -- both are required to keep
+// the decoder's device work from racing the renderer's (see [[hitsc-viewer-threading]]).
 class PikvmVideoHardware {
 public:
     virtual ~PikvmVideoHardware() = default;
@@ -28,25 +31,18 @@ public:
     virtual bool codec_supported(const AVCodec* codec) const = 0;
     virtual AVBufferRef* create_device_context() const = 0;
     virtual PikvmVideoFrame reference_frame(const AVFrame& frame) const = 0;
+
     virtual std::unique_lock<std::recursive_mutex> lock() const = 0;
+    virtual std::shared_ptr<std::recursive_mutex> lock_handle() const = 0;
 
-    virtual bool frame_can_wrap_direct(const PikvmVideoFrame& frame) const = 0;
-    virtual const void* frame_source_id(const PikvmVideoFrame& frame) const = 0;
-    virtual SDL_Texture* try_create_wrapped_texture(
-        SDL_Renderer* renderer,
-        const PikvmVideoFrame& frame,
-        std::string& error) const = 0;
-    virtual void copy_frame_to_texture(SDL_Texture* texture, const PikvmVideoFrame& frame) const = 0;
-    virtual bool texture_can_receive_copy(SDL_Texture* texture) const = 0;
+    // The decoder's NV12 texture array + the slice index backing this frame.
+    virtual ID3D11Texture2D* frame_texture(const PikvmVideoFrame& frame) const = 0;
+    virtual int frame_array_slice(const PikvmVideoFrame& frame) const = 0;
 };
 
-struct PikvmVideoHardwareRenderer {
-    SDL_Renderer* renderer = nullptr;
-    std::shared_ptr<PikvmVideoHardware> hardware;
-};
-
-PikvmVideoHardwareRenderer try_create_pikvm_video_hardware_renderer(
-    SDL_Window* window,
-    bool verbose);
+// Bind D3D11VA hardware decode to `device` (QRhi's). Enables D3D11 multithread
+// protection on it. Returns null when hardware decode isn't usable (non-Windows,
+// null device, or a software/WARP adapter) so the caller falls back to software.
+std::shared_ptr<PikvmVideoHardware> make_pikvm_d3d11_hardware(ID3D11Device* device, bool verbose);
 
 } // namespace hitsc

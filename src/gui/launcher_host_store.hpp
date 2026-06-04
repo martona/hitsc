@@ -8,6 +8,7 @@
 #include <QString>
 
 #include <optional>
+#include <string>
 
 namespace hitsc {
 
@@ -31,6 +32,12 @@ public:
     // Per-host viewer-window geometry, stored alongside the host record.
     void save_window_rect(const QString& host_id, const QRect& rect) const;
     std::optional<QRect> load_window_rect(const QString& host_id) const;
+
+    // Per-host pinned certificate (SHA-256, canonical upper-hex, no separators),
+    // stored alongside the host record. Created/replaced only by explicit user
+    // consent; removed automatically when the host is deleted.
+    void save_pinned_cert(const QString& host_id, const std::string& sha256_hex) const;
+    std::optional<std::string> load_pinned_cert(const QString& host_id) const;
 
     const QString& root_path() const;
 

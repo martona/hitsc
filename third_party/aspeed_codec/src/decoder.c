@@ -96,6 +96,18 @@ static int mbwidth, mbheight;
 // compressed image's width, height
 static unsigned int height, width;
 
+// --- HITSC decode diagnostics ----------------------------------------------
+// Populated by DecodeBuffer and the quant-table loaders each frame so the C++
+// wrapper (aspeed_decoder.cpp) can log per-frame decode telemetry without
+// re-parsing the bitstream. The decoder runs single-threaded under the wrapper's
+// decode mutex, so plain globals are safe. Not `static` => visible via `extern`.
+int g_aspeed_block_code_counts[16]; // histogram of the 4-bit block headers
+int g_aspeed_iterations;            // block iterations consumed this frame
+int g_aspeed_termination;           // 0=FRAME_END_CODE, 1=runaway guard, 2=ran off input
+int g_aspeed_final_mbx;
+int g_aspeed_final_mby;
+int g_aspeed_bad_selector;          // a quant selector fell outside the 0..11 range
+
 static void InitBuffer()
 {
     //For 2Pass
@@ -217,8 +229,9 @@ static void load_quant_table(long* quant_table)
     float scalefactor[8] = { 1.0f, 1.387039845f, 1.306562965f, 1.175875602f,
                              1.0f, 0.785694958f, 0.541196100f, 0.275899379f };
     BYTE j = 0, row, col;
-    BYTE *std_luminance_qt;
+    BYTE *std_luminance_qt = Tbl_000Y; // default guards an out-of-range selector
 
+    if (selector > 11) g_aspeed_bad_selector = 1;
     // Load quantization coefficients from JPG file, scale them for DCT and reorder
     // from zig-zag order
     switch (selector) {
@@ -273,8 +286,9 @@ static void load_quant_tableCb(long* quant_table)
     float scalefactor[8] = { 1.0f, 1.387039845f, 1.306562965f, 1.175875602f,
                              1.0f, 0.785694958f, 0.541196100f, 0.275899379f };
     BYTE j = 0, row, col;
-    BYTE *std_chrominance_qt;
+    BYTE *std_chrominance_qt = (Mapping == 1) ? Tbl_000Y : Tbl_000UV; // default guards out-of-range
 
+    if (chroma_selector > 11) g_aspeed_bad_selector = 1;
     // Load quantization coefficients from JPG file, scale them for DCT and reorder
     // from zig-zag order
     if (Mapping == 1) {
@@ -371,8 +385,9 @@ static void load_advance_quant_table(long* quant_table)
     float scalefactor[8] = { 1.0f, 1.387039845f, 1.306562965f, 1.175875602f,
                              1.0f, 0.785694958f, 0.541196100f, 0.275899379f };
     BYTE j = 0, row, col;
-    BYTE *std_luminance_qt;
+    BYTE *std_luminance_qt = Tbl_000Y; // default guards an out-of-range selector
 
+    if (advance_selector > 11) g_aspeed_bad_selector = 1;
     // Load quantization coefficients from JPG file, scale them for DCT and reorder
     // from zig-zag order
     switch (advance_selector) {
@@ -429,8 +444,9 @@ static void load_advance_quant_tableCb(long* quant_table)
     float scalefactor[8] = { 1.0f, 1.387039845f, 1.306562965f, 1.175875602f,
                              1.0f, 0.785694958f, 0.541196100f, 0.275899379f };
     BYTE j = 0, row, col;
-    BYTE *std_chrominance_qt;
+    BYTE *std_chrominance_qt = (Mapping == 1) ? Tbl_000Y : Tbl_000UV; // default guards out-of-range
 
+    if (advance_chroma_selector > 11) g_aspeed_bad_selector = 1;
     // Load quantization coefficients from JPG file, scale them for DCT and reorder
     // from zig-zag order
     if (Mapping == 1) {
@@ -816,7 +832,7 @@ static void InverseDCT(short* coef, BYTE* data, BYTE nBlock)
         if (inptr[DCTSIZE * 1] == 0 && inptr[DCTSIZE * 2] == 0 &&
             inptr[DCTSIZE * 3] == 0 && inptr[DCTSIZE * 4] == 0 &&
             inptr[DCTSIZE * 5] == 0 && inptr[DCTSIZE * 6] == 0 &&
-            inptr[DCTSIZE * 7]) {
+            inptr[DCTSIZE * 7] == 0) {
             wsptr[DCTSIZE * 0] = wsptr[DCTSIZE * 1] = wsptr[DCTSIZE * 2] =
                                  wsptr[DCTSIZE * 3] = wsptr[DCTSIZE * 4] =
                                  wsptr[DCTSIZE * 5] = wsptr[DCTSIZE * 6] =
@@ -1052,10 +1068,22 @@ static void DecodeBuffer(int len, BYTE *out_buf)
 
     VQInitialize(&vq);
 
+    memset(g_aspeed_block_code_counts, 0, sizeof(g_aspeed_block_code_counts));
+    g_aspeed_iterations = 0;
+    g_aspeed_termination = 2;
+    g_aspeed_final_mbx = 0;
+    g_aspeed_final_mby = 0;
+
     do {
         if (++iterations > max_iterations) {
+            g_aspeed_termination = 1;
+            g_aspeed_iterations = iterations;
+            g_aspeed_final_mbx = mbx;
+            g_aspeed_final_mby = mby;
             return;
         }
+
+        g_aspeed_block_code_counts[(cur_data >> 28) & BLOCK_HEADER_MASK]++;
 
         switch (((cur_data >> 28) & (long)BLOCK_HEADER_MASK)) {
         case JPEG_NO_SKIP_CODE:
@@ -1066,6 +1094,10 @@ static void DecodeBuffer(int len, BYTE *out_buf)
             break;
         case FRAME_END_CODE:
             //pr_dbg("(%d, %d): end\n", mbx, mby);
+            g_aspeed_termination = 0;
+            g_aspeed_iterations = iterations;
+            g_aspeed_final_mbx = mbx;
+            g_aspeed_final_mby = mby;
             return;
         case JPEG_SKIP_CODE:
             //pr_dbg("(%d, %d): skip\n", mbx, mby);
@@ -1151,6 +1183,11 @@ static void DecodeBuffer(int len, BYTE *out_buf)
             break;
         }
     } while (in_buf_index <= len);
+
+    g_aspeed_termination = 2;
+    g_aspeed_iterations = iterations;
+    g_aspeed_final_mbx = mbx;
+    g_aspeed_final_mby = mby;
 }
 
 EMSCRIPTEN_KEEPALIVE
@@ -1162,12 +1199,14 @@ void init(void)
 
 EMSCRIPTEN_KEEPALIVE
 void decode_ext(unsigned long* _in_buf, int _len, unsigned char* _out_buf, int _width, int _height,
-    unsigned _mode420, unsigned _sel, unsigned _chroma_sel, unsigned _adv_sel, unsigned _adv_chroma_sel)
+    unsigned _mode420, unsigned _sel, unsigned _chroma_sel, unsigned _adv_sel, unsigned _adv_chroma_sel,
+    unsigned _mapping)
 {
     pr_dbg("len(%d) 420(%d) width(%d) height(%d)\n", _len, _mode420, _width, _height);
 
     if (first_frame == 1 || _sel != selector || _chroma_sel != chroma_selector ||
-        _adv_sel != advance_selector || _adv_chroma_sel != advance_chroma_selector) {
+        _adv_sel != advance_selector || _adv_chroma_sel != advance_chroma_selector ||
+        (int)_mapping != Mapping) {
         pr_dbg("init table for sel(%d/%d) adv_sel(%d/%d)\n",
             selector, chroma_selector, advance_selector, advance_chroma_selector);
 
@@ -1175,7 +1214,12 @@ void decode_ext(unsigned long* _in_buf, int _len, unsigned char* _out_buf, int _
         chroma_selector = _chroma_sel;
         advance_selector = _adv_sel;
         advance_chroma_selector = _adv_chroma_sel;
+        // JPEGYUVTableMapping: 1 => chroma uses the luminance quant tables. Part of
+        // the reload key above so a mapping flip (same selectors) reloads the
+        // chroma tables. Newer firmware (e.g. SapphireRapids) sets it; Bergamo/ATEN leave 0.
+        Mapping = (int)_mapping;
 
+        g_aspeed_bad_selector = 0;
         load_quant_table(QT[0]);
         load_quant_tableCb(QT[1]);
         // for 2-pass JPEG
@@ -1209,5 +1253,5 @@ EMSCRIPTEN_KEEPALIVE
 void decode(unsigned long* _in_buf, int _len, unsigned char* _out_buf, int _width, int _height,
     unsigned _mode420, unsigned _sel, unsigned _adv_sel)
 {
-    decode_ext(_in_buf, _len, _out_buf, _width, _height, _mode420, _sel, _sel, _adv_sel, _adv_sel);
+    decode_ext(_in_buf, _len, _out_buf, _width, _height, _mode420, _sel, _sel, _adv_sel, _adv_sel, 0);
 }

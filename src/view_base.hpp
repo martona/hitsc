@@ -1,9 +1,10 @@
 #pragma once
 
-#include "view_console.hpp"
+#include "console_screen.hpp"
+#include "view_input_types.hpp"
 #include "view_status.hpp"
 
-#include <SDL3/SDL.h>
+#include <QImage>
 
 #include <atomic>
 #include <cstdint>
@@ -12,27 +13,15 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <utility>
+#include <vector>
 
 namespace hitsc {
 
-struct ViewWindow {
-    SDL_Window* window = nullptr;
-    Uint32 frame_event_type = 0;
-};
-
-// Initialize SDL video, register the per-frame event, and create the view
-// window. Throws on failure (tearing SDL back down if it had been initialized).
-// geometry_key, when non-empty, restores the window's saved per-host position
-// and size (the same key cleanup uses to save it back).
-ViewWindow make_view_window(const std::string& geometry_key = "");
-
-// Persist a window's current position/size under its per-host geometry key.
-// No-op for an empty key or a minimized/maximized window. Used by the views on
-// cleanup and by the auto bootstrap when it closes the window before handoff.
-void save_view_window_geometry(SDL_Window* window, const std::string& geometry_key);
+class KvmInputController;
 
 class ViewStateBase {
 public:
@@ -43,19 +32,12 @@ public:
     void set_force_close(std::function<void()> force_close);
     std::function<void()> force_close_snapshot();
 
-    void set_frame_event_type(Uint32 frame_event_type);
-    bool is_frame_event(Uint32 event_type) const;
-    void clear_frame_event_pending();
-    void push_render_event();
-
     std::mutex control_mutex;
     ViewStatus view_status;
 
 private:
     std::exception_ptr exception_;
     std::function<void()> force_close_;
-    std::atomic_uint32_t frame_event_type_{0};
-    std::atomic_bool frame_event_pending_{false};
 };
 
 template <typename T>
@@ -90,6 +72,67 @@ private:
     std::mutex mutex_;
     std::shared_ptr<const T> latest_;
     std::uint64_t sequence_ = 0;
+};
+
+// Ordered, multi-slot counterpart to LatestMailbox for DIFFERENTIAL video
+// streams (ASPEED dual-JPEG): each frame is a delta on its predecessor — SKIP
+// blocks reuse the prior frame's pixels and PASS2 blocks accumulate onto its
+// stored YUV — so the consumer must decode EVERY frame, in arrival order.
+// Dropping any one (as LatestMailbox does) corrupts the chain until the next
+// keyframe; that is what garbled fast/small hosts whose frames outran the view
+// tick. Use LatestMailbox for already-decoded frames or non-differential data
+// where only the newest matters.
+template <typename T>
+class FrameQueue {
+public:
+    void publish(T value)
+    {
+        std::lock_guard lock(mutex_);
+        value.sequence = ++sequence_;
+        queue_.push_back(std::make_shared<const T>(std::move(value)));
+        if (queue_.size() > kMaxQueued) {
+            // The consumer has fallen catastrophically behind. We cannot silently
+            // skip differential frames, so drop the oldest and flag that a full
+            // keyframe refresh is needed to resync.
+            queue_.pop_front();
+            overflowed_ = true;
+        }
+    }
+
+    // Every frame published since the previous drain, in arrival order.
+    std::vector<std::shared_ptr<const T>> drain()
+    {
+        std::lock_guard lock(mutex_);
+        std::vector<std::shared_ptr<const T>> out(queue_.begin(), queue_.end());
+        queue_.clear();
+        return out;
+    }
+
+    // True (once) if frames were dropped on overflow since the last check.
+    bool overflowed()
+    {
+        std::lock_guard lock(mutex_);
+        const bool overflowed = overflowed_;
+        overflowed_ = false;
+        return overflowed;
+    }
+
+    void clear()
+    {
+        std::lock_guard lock(mutex_);
+        queue_.clear();
+        overflowed_ = false;
+    }
+
+private:
+    // Bounds memory if the view thread stalls (e.g. a long modal). Large enough
+    // that normal bursts (a few frames per tick) never trip it.
+    static constexpr std::size_t kMaxQueued = 240;
+
+    std::mutex mutex_;
+    std::deque<std::shared_ptr<const T>> queue_;
+    std::uint64_t sequence_ = 0;
+    bool overflowed_ = false;
 };
 
 template <typename Work>
@@ -179,7 +222,6 @@ public:
     KvmViewBase(
         ViewStateBase& state,
         std::string host,
-        std::string geometry_key,
         std::string log_name,
         std::function<void()> network_cleanup);
     virtual ~KvmViewBase() = default;
@@ -187,33 +229,57 @@ public:
     KvmViewBase(const KvmViewBase&) = delete;
     KvmViewBase& operator=(const KvmViewBase&) = delete;
 
-    void run();
+    // -----------------------------------------------------------------------
+    // Qt-native entry. The Qt viewer host (run_viewer) drives these.
+    // -----------------------------------------------------------------------
+    void hosted_start_network();  // start the network worker
+    void hosted_stop_network();   // stop it (idempotent)
+    void hosted_poll();           // per-tick: detect session end, record error
+    bool hosted_session_ended() const { return session_ended_; }
+    bool hosted_connected() const;  // live KVM session (render_state.connected)
+    void hosted_retry();          // 'R' on the disconnected console
 
-    // Adopt a pre-created window/SDL context (the auto-detect bootstrap creates
-    // the window before the backend is known) instead of creating one. The view
-    // then owns SDL teardown. Call before run().
-    void adopt_sdl(const ViewWindow& view_window);
+    std::string hosted_title() const;
+
+    // What the surface should display now: a console screen, or nullopt meaning
+    // "show the latest video frame" via latest_frame_image().
+    std::optional<ConsoleScreen> hosted_console_screen() const;
+    virtual std::optional<QImage> latest_frame_image() { return std::nullopt; }
+    // Cheap current-frame dimensions for hosted pointer mapping (no conversion).
+    virtual std::optional<std::pair<int, int>> latest_frame_size() { return std::nullopt; }
+
+    // Zero-copy hardware path (pikvm D3D11VA). The surface hands its QRhi
+    // ID3D11Device via set_rhi_d3d11_device once RHI is up; latest_hardware_frame
+    // then yields decoded NV12 textures to import. Default: software-only.
+    virtual std::optional<HardwareVideoFrame> latest_hardware_frame() { return std::nullopt; }
+    virtual void set_rhi_d3d11_device(void* d3d11_device) { (void)d3d11_device; }
+
+    // Window lifecycle.
+    void hosted_minimized();
+    void hosted_restored();
+    void hosted_focus_lost();
+    void hosted_close();
+
+    // Input feed (Qt surface/window -> the backend's controller).
+    void feed_key(const KvmKeyEvent& key);
+    void feed_pointer_button(const KvmPointerButton& button);
+    void feed_pointer_motion(const KvmPointerMotion& motion);
+    void feed_pointer_wheel(const KvmPointerWheel& wheel);
+
+    // The Qt surface reports its current (logical) size so hosted pointer mapping
+    // can centre the frame within it.
+    void hosted_set_surface_size(int width, int height);
 
 protected:
-    SDL_Window* window() const;
-    SDL_Renderer* renderer() const;
-
-    static SDL_FRect centered_target_rect(
+    // Aspect-fit a frame within a surface of the given size (used for hosted
+    // pointer mapping).
+    static TargetRect centered_target_rect(
         int window_width,
         int window_height,
         int frame_width,
         int frame_height);
-    static SDL_FRect current_target_rect(SDL_Window* window, int frame_width, int frame_height);
 
-    SDL_FRect current_target_rect(int frame_width, int frame_height) const;
-    void clear_background() const;
-    void present() const;
     void frame_presented(int width, int height);
-    void refresh_title();
-
-    virtual SDL_Renderer* create_renderer(SDL_Window* window);
-    virtual void destroy_renderer(SDL_Renderer* renderer);
-    virtual void before_sdl_cleanup() = 0;
 
     virtual void start_network(KvmNetworkWorker& network) = 0;
 
@@ -226,35 +292,24 @@ protected:
     // user-initiated reconnect starts clean. Default is a no-op.
     virtual void reset_for_reconnect() {}
 
-    virtual void handle_event(const SDL_Event& event, bool& render_needed) = 0;
-    virtual void render_visible(bool& render_needed, bool& first_render) = 0;
+    // Qt-hosted input routing: a backend returns its KvmInputController so the
+    // base's feed_*() can drive it. Default null = no hosted input.
+    virtual KvmInputController* hosted_input_controller() { return nullptr; }
 
 private:
-    void initialize_sdl();
-    void cleanup_sdl();
-    void event_loop();
     void do_retry();
-    void render_frame(bool force);
     bool build_console_screen(const ViewRenderState& render_state, ConsoleScreen& screen) const;
-    static bool SDLCALL on_event_watch(void* userdata, SDL_Event* event);
 
     ViewStateBase& state_;
     KvmNetworkWorker network_;
     std::string host_;
-    std::string geometry_key_;
     std::string log_name_;
-    SDL_Window* window_ = nullptr;
-    SDL_Renderer* renderer_ = nullptr;
-    bool sdl_initialized_ = false;
     bool network_started_ = false;
-    bool adopted_ = false;
-    SDL_Window* adopted_window_ = nullptr;
-    Uint32 adopted_frame_event_type_ = 0;
-    bool first_render_ = true;
     bool session_ended_ = false;
     bool had_error_ = false;
     std::string error_message_;
-    std::uint64_t last_console_render_ = 0;
+    int hosted_surface_w_ = 0;
+    int hosted_surface_h_ = 0;
 };
 
 } // namespace hitsc

@@ -40,253 +40,253 @@ void append_ascii(std::vector<std::uint8_t>& bytes, std::string_view text)
 
 } // namespace
 
-std::optional<std::string_view> pikvm_key_code_from_sdl_scancode(SDL_Scancode scancode)
+std::optional<std::string_view> pikvm_key_code_from_scancode(KvmScancode scancode)
 {
     switch (scancode) {
-    case SDL_SCANCODE_A:
+    case KvmScancode::A:
         return "KeyA";
-    case SDL_SCANCODE_B:
+    case KvmScancode::B:
         return "KeyB";
-    case SDL_SCANCODE_C:
+    case KvmScancode::C:
         return "KeyC";
-    case SDL_SCANCODE_D:
+    case KvmScancode::D:
         return "KeyD";
-    case SDL_SCANCODE_E:
+    case KvmScancode::E:
         return "KeyE";
-    case SDL_SCANCODE_F:
+    case KvmScancode::F:
         return "KeyF";
-    case SDL_SCANCODE_G:
+    case KvmScancode::G:
         return "KeyG";
-    case SDL_SCANCODE_H:
+    case KvmScancode::H:
         return "KeyH";
-    case SDL_SCANCODE_I:
+    case KvmScancode::I:
         return "KeyI";
-    case SDL_SCANCODE_J:
+    case KvmScancode::J:
         return "KeyJ";
-    case SDL_SCANCODE_K:
+    case KvmScancode::K:
         return "KeyK";
-    case SDL_SCANCODE_L:
+    case KvmScancode::L:
         return "KeyL";
-    case SDL_SCANCODE_M:
+    case KvmScancode::M:
         return "KeyM";
-    case SDL_SCANCODE_N:
+    case KvmScancode::N:
         return "KeyN";
-    case SDL_SCANCODE_O:
+    case KvmScancode::O:
         return "KeyO";
-    case SDL_SCANCODE_P:
+    case KvmScancode::P:
         return "KeyP";
-    case SDL_SCANCODE_Q:
+    case KvmScancode::Q:
         return "KeyQ";
-    case SDL_SCANCODE_R:
+    case KvmScancode::R:
         return "KeyR";
-    case SDL_SCANCODE_S:
+    case KvmScancode::S:
         return "KeyS";
-    case SDL_SCANCODE_T:
+    case KvmScancode::T:
         return "KeyT";
-    case SDL_SCANCODE_U:
+    case KvmScancode::U:
         return "KeyU";
-    case SDL_SCANCODE_V:
+    case KvmScancode::V:
         return "KeyV";
-    case SDL_SCANCODE_W:
+    case KvmScancode::W:
         return "KeyW";
-    case SDL_SCANCODE_X:
+    case KvmScancode::X:
         return "KeyX";
-    case SDL_SCANCODE_Y:
+    case KvmScancode::Y:
         return "KeyY";
-    case SDL_SCANCODE_Z:
+    case KvmScancode::Z:
         return "KeyZ";
 
-    case SDL_SCANCODE_1:
+    case KvmScancode::DIGIT_1:
         return "Digit1";
-    case SDL_SCANCODE_2:
+    case KvmScancode::DIGIT_2:
         return "Digit2";
-    case SDL_SCANCODE_3:
+    case KvmScancode::DIGIT_3:
         return "Digit3";
-    case SDL_SCANCODE_4:
+    case KvmScancode::DIGIT_4:
         return "Digit4";
-    case SDL_SCANCODE_5:
+    case KvmScancode::DIGIT_5:
         return "Digit5";
-    case SDL_SCANCODE_6:
+    case KvmScancode::DIGIT_6:
         return "Digit6";
-    case SDL_SCANCODE_7:
+    case KvmScancode::DIGIT_7:
         return "Digit7";
-    case SDL_SCANCODE_8:
+    case KvmScancode::DIGIT_8:
         return "Digit8";
-    case SDL_SCANCODE_9:
+    case KvmScancode::DIGIT_9:
         return "Digit9";
-    case SDL_SCANCODE_0:
+    case KvmScancode::DIGIT_0:
         return "Digit0";
 
-    case SDL_SCANCODE_RETURN:
+    case KvmScancode::RETURN:
         return "Enter";
-    case SDL_SCANCODE_ESCAPE:
+    case KvmScancode::ESCAPE:
         return "Escape";
-    case SDL_SCANCODE_BACKSPACE:
+    case KvmScancode::BACKSPACE:
         return "Backspace";
-    case SDL_SCANCODE_TAB:
+    case KvmScancode::TAB:
         return "Tab";
-    case SDL_SCANCODE_SPACE:
+    case KvmScancode::SPACE:
         return "Space";
-    case SDL_SCANCODE_MINUS:
+    case KvmScancode::MINUS:
         return "Minus";
-    case SDL_SCANCODE_EQUALS:
+    case KvmScancode::EQUALS:
         return "Equal";
-    case SDL_SCANCODE_LEFTBRACKET:
+    case KvmScancode::LEFTBRACKET:
         return "BracketLeft";
-    case SDL_SCANCODE_RIGHTBRACKET:
+    case KvmScancode::RIGHTBRACKET:
         return "BracketRight";
-    case SDL_SCANCODE_BACKSLASH:
+    case KvmScancode::BACKSLASH:
         return "Backslash";
-    case SDL_SCANCODE_NONUSHASH:
+    case KvmScancode::NONUSHASH:
         return "IntlBackslash";
-    case SDL_SCANCODE_SEMICOLON:
+    case KvmScancode::SEMICOLON:
         return "Semicolon";
-    case SDL_SCANCODE_APOSTROPHE:
+    case KvmScancode::APOSTROPHE:
         return "Quote";
-    case SDL_SCANCODE_GRAVE:
+    case KvmScancode::GRAVE:
         return "Backquote";
-    case SDL_SCANCODE_COMMA:
+    case KvmScancode::COMMA:
         return "Comma";
-    case SDL_SCANCODE_PERIOD:
+    case KvmScancode::PERIOD:
         return "Period";
-    case SDL_SCANCODE_SLASH:
+    case KvmScancode::SLASH:
         return "Slash";
-    case SDL_SCANCODE_CAPSLOCK:
+    case KvmScancode::CAPSLOCK:
         return "CapsLock";
 
-    case SDL_SCANCODE_F1:
+    case KvmScancode::F1:
         return "F1";
-    case SDL_SCANCODE_F2:
+    case KvmScancode::F2:
         return "F2";
-    case SDL_SCANCODE_F3:
+    case KvmScancode::F3:
         return "F3";
-    case SDL_SCANCODE_F4:
+    case KvmScancode::F4:
         return "F4";
-    case SDL_SCANCODE_F5:
+    case KvmScancode::F5:
         return "F5";
-    case SDL_SCANCODE_F6:
+    case KvmScancode::F6:
         return "F6";
-    case SDL_SCANCODE_F7:
+    case KvmScancode::F7:
         return "F7";
-    case SDL_SCANCODE_F8:
+    case KvmScancode::F8:
         return "F8";
-    case SDL_SCANCODE_F9:
+    case KvmScancode::F9:
         return "F9";
-    case SDL_SCANCODE_F10:
+    case KvmScancode::F10:
         return "F10";
-    case SDL_SCANCODE_F11:
+    case KvmScancode::F11:
         return "F11";
-    case SDL_SCANCODE_F12:
+    case KvmScancode::F12:
         return "F12";
 
-    case SDL_SCANCODE_PRINTSCREEN:
+    case KvmScancode::PRINTSCREEN:
         return "PrintScreen";
-    case SDL_SCANCODE_SCROLLLOCK:
+    case KvmScancode::SCROLLLOCK:
         return "ScrollLock";
-    case SDL_SCANCODE_PAUSE:
+    case KvmScancode::PAUSE:
         return "Pause";
-    case SDL_SCANCODE_INSERT:
+    case KvmScancode::INSERT:
         return "Insert";
-    case SDL_SCANCODE_HOME:
+    case KvmScancode::HOME:
         return "Home";
-    case SDL_SCANCODE_PAGEUP:
+    case KvmScancode::PAGEUP:
         return "PageUp";
-    case SDL_SCANCODE_DELETE:
+    case KvmScancode::DELETE_KEY:
         return "Delete";
-    case SDL_SCANCODE_END:
+    case KvmScancode::END:
         return "End";
-    case SDL_SCANCODE_PAGEDOWN:
+    case KvmScancode::PAGEDOWN:
         return "PageDown";
-    case SDL_SCANCODE_RIGHT:
+    case KvmScancode::RIGHT:
         return "ArrowRight";
-    case SDL_SCANCODE_LEFT:
+    case KvmScancode::LEFT:
         return "ArrowLeft";
-    case SDL_SCANCODE_DOWN:
+    case KvmScancode::DOWN:
         return "ArrowDown";
-    case SDL_SCANCODE_UP:
+    case KvmScancode::UP:
         return "ArrowUp";
 
-    case SDL_SCANCODE_NUMLOCKCLEAR:
+    case KvmScancode::NUMLOCKCLEAR:
         return "NumLock";
-    case SDL_SCANCODE_KP_DIVIDE:
+    case KvmScancode::KP_DIVIDE:
         return "NumpadDivide";
-    case SDL_SCANCODE_KP_MULTIPLY:
+    case KvmScancode::KP_MULTIPLY:
         return "NumpadMultiply";
-    case SDL_SCANCODE_KP_MINUS:
+    case KvmScancode::KP_MINUS:
         return "NumpadSubtract";
-    case SDL_SCANCODE_KP_PLUS:
+    case KvmScancode::KP_PLUS:
         return "NumpadAdd";
-    case SDL_SCANCODE_KP_ENTER:
+    case KvmScancode::KP_ENTER:
         return "NumpadEnter";
-    case SDL_SCANCODE_KP_1:
+    case KvmScancode::KP_1:
         return "Numpad1";
-    case SDL_SCANCODE_KP_2:
+    case KvmScancode::KP_2:
         return "Numpad2";
-    case SDL_SCANCODE_KP_3:
+    case KvmScancode::KP_3:
         return "Numpad3";
-    case SDL_SCANCODE_KP_4:
+    case KvmScancode::KP_4:
         return "Numpad4";
-    case SDL_SCANCODE_KP_5:
+    case KvmScancode::KP_5:
         return "Numpad5";
-    case SDL_SCANCODE_KP_6:
+    case KvmScancode::KP_6:
         return "Numpad6";
-    case SDL_SCANCODE_KP_7:
+    case KvmScancode::KP_7:
         return "Numpad7";
-    case SDL_SCANCODE_KP_8:
+    case KvmScancode::KP_8:
         return "Numpad8";
-    case SDL_SCANCODE_KP_9:
+    case KvmScancode::KP_9:
         return "Numpad9";
-    case SDL_SCANCODE_KP_0:
+    case KvmScancode::KP_0:
         return "Numpad0";
-    case SDL_SCANCODE_KP_PERIOD:
+    case KvmScancode::KP_PERIOD:
         return "NumpadDecimal";
-    case SDL_SCANCODE_NONUSBACKSLASH:
+    case KvmScancode::NONUSBACKSLASH:
         return "IntlBackslash";
-    case SDL_SCANCODE_APPLICATION:
+    case KvmScancode::APPLICATION:
         return "ContextMenu";
-    case SDL_SCANCODE_KP_EQUALS:
+    case KvmScancode::KP_EQUALS:
         return "NumpadEqual";
 
-    case SDL_SCANCODE_F13:
+    case KvmScancode::F13:
         return "F13";
-    case SDL_SCANCODE_F14:
+    case KvmScancode::F14:
         return "F14";
-    case SDL_SCANCODE_F15:
+    case KvmScancode::F15:
         return "F15";
-    case SDL_SCANCODE_F16:
+    case KvmScancode::F16:
         return "F16";
-    case SDL_SCANCODE_F17:
+    case KvmScancode::F17:
         return "F17";
-    case SDL_SCANCODE_F18:
+    case KvmScancode::F18:
         return "F18";
-    case SDL_SCANCODE_F19:
+    case KvmScancode::F19:
         return "F19";
-    case SDL_SCANCODE_F20:
+    case KvmScancode::F20:
         return "F20";
-    case SDL_SCANCODE_F21:
+    case KvmScancode::F21:
         return "F21";
-    case SDL_SCANCODE_F22:
+    case KvmScancode::F22:
         return "F22";
-    case SDL_SCANCODE_F23:
+    case KvmScancode::F23:
         return "F23";
-    case SDL_SCANCODE_F24:
+    case KvmScancode::F24:
         return "F24";
 
-    case SDL_SCANCODE_LCTRL:
+    case KvmScancode::LCTRL:
         return "ControlLeft";
-    case SDL_SCANCODE_LSHIFT:
+    case KvmScancode::LSHIFT:
         return "ShiftLeft";
-    case SDL_SCANCODE_LALT:
+    case KvmScancode::LALT:
         return "AltLeft";
-    case SDL_SCANCODE_LGUI:
+    case KvmScancode::LGUI:
         return "MetaLeft";
-    case SDL_SCANCODE_RCTRL:
+    case KvmScancode::RCTRL:
         return "ControlRight";
-    case SDL_SCANCODE_RSHIFT:
+    case KvmScancode::RSHIFT:
         return "ShiftRight";
-    case SDL_SCANCODE_RALT:
+    case KvmScancode::RALT:
         return "AltRight";
-    case SDL_SCANCODE_RGUI:
+    case KvmScancode::RGUI:
         return "MetaRight";
 
     default:
@@ -294,18 +294,18 @@ std::optional<std::string_view> pikvm_key_code_from_sdl_scancode(SDL_Scancode sc
     }
 }
 
-std::optional<std::string_view> pikvm_mouse_button_from_sdl_button(std::uint8_t button)
+std::optional<std::string_view> pikvm_mouse_button_from_button(KvmMouseButton button)
 {
     switch (button) {
-    case SDL_BUTTON_LEFT:
+    case KvmMouseButton::LEFT:
         return "left";
-    case SDL_BUTTON_MIDDLE:
+    case KvmMouseButton::MIDDLE:
         return "middle";
-    case SDL_BUTTON_RIGHT:
+    case KvmMouseButton::RIGHT:
         return "right";
-    case SDL_BUTTON_X1:
+    case KvmMouseButton::X1:
         return "up";
-    case SDL_BUTTON_X2:
+    case KvmMouseButton::X2:
         return "down";
     default:
         return std::nullopt;

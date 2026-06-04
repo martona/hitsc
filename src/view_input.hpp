@@ -1,22 +1,22 @@
 #pragma once
 
-#include <SDL3/SDL.h>
+#include "view_input_types.hpp"
 
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <optional>
+#include <utility>
 #include <vector>
 
 namespace hitsc {
 
 // Shared KVM input plumbing. Everything that is *accidentally* identical across
-// the backends (SDL event decode, coordinate mapping, motion throttle, button
-// and key state tracking, mouse capture, release-on-focus-loss) lives in
-// KvmInputController. Each backend supplies a small KvmInputEncoder that turns
-// the canonical input state into its own wire format -- the only part that is
-// genuinely protocol-specific.
+// the backends (coordinate mapping, motion throttle, button and key state
+// tracking, release-on-focus-loss) lives in KvmInputController. Each backend
+// supplies a small KvmInputEncoder that turns the canonical input state into its
+// own wire format -- the only part that is genuinely protocol-specific.
 
 struct NormalizedPoint {
     double x = 0.0;
@@ -33,7 +33,7 @@ struct FramePixel {
 std::optional<NormalizedPoint> target_normalized_point(
     float window_x,
     float window_y,
-    const SDL_FRect& target,
+    const TargetRect& target,
     bool clamp_to_target);
 
 // Scale a normalized point to integer frame pixels, rounded and clamped.
@@ -53,34 +53,34 @@ bool mouse_motion_throttled(
 struct FrameGeometry {
     int width = 0;
     int height = 0;
-    SDL_FRect target{};
+    TargetRect target{};
 };
 
 struct PointerState {
     NormalizedPoint position;       // always within the target rect
     int frame_width = 0;
     int frame_height = 0;
-    std::uint32_t buttons = 0;      // bit (1u << sdl_button) set per held button
+    std::uint32_t buttons = 0;      // bit (1u << button value) set per held button
 };
 
 struct PointerChange {
     enum class Kind { Move, Button, Wheel };
     Kind kind = Kind::Move;
-    std::uint8_t button = 0;        // Button: the SDL button index that changed
+    KvmMouseButton button = KvmMouseButton::LEFT;  // Button: the button that changed
     bool pressed = false;           // Button: down (true) or up (false)
     float wheel_x = 0.0f;           // Wheel: flip-normalized horizontal delta
     float wheel_y = 0.0f;           // Wheel: flip-normalized vertical delta
 };
 
-using KeyDownState = std::array<bool, SDL_SCANCODE_COUNT>;
+using KeyDownState = std::array<bool, kKvmScancodeCount>;
 
 struct KeyboardState {
     const KeyDownState& down;       // full set of currently-pressed scancodes
 };
 
 struct KeyChange {
-    std::vector<SDL_Scancode> pressed;   // newly down (usually one)
-    std::vector<SDL_Scancode> released;  // newly up (release-all fills this)
+    std::vector<KvmScancode> pressed;   // newly down (usually one)
+    std::vector<KvmScancode> released;  // newly up (release-all fills this)
 };
 
 // The protocol-essential seam. A backend implements this to encode canonical
@@ -89,15 +89,15 @@ class KvmInputEncoder {
 public:
     virtual ~KvmInputEncoder() = default;
 
-    virtual bool accepts_button(std::uint8_t sdl_button) const = 0;
-    virtual bool accepts_key(SDL_Scancode scancode) const = 0;
+    virtual bool accepts_button(KvmMouseButton button) const = 0;
+    virtual bool accepts_key(KvmScancode scancode) const = 0;
 
     virtual void encode_pointer(const PointerState& state, const PointerChange& change) = 0;
     virtual void encode_keyboard(const KeyboardState& state, const KeyChange& change) = 0;
 };
 
-// Owns all the shared input machinery. The view forwards SDL events here and
-// supplies the current frame geometry; the controller drives the encoder.
+// Owns all the shared input machinery. The Qt viewer feeds decoded input here
+// and supplies the current frame geometry; the controller drives the encoder.
 class KvmInputController {
 public:
     KvmInputController(
@@ -107,15 +107,28 @@ public:
     KvmInputController(const KvmInputController&) = delete;
     KvmInputController& operator=(const KvmInputController&) = delete;
 
-    void handle_event(const SDL_Event& event);
     void release_all_keys();   // on focus loss
-    void reset();              // on close/cleanup: drop capture and button state
+    void reset();              // on close/cleanup: drop button state
+
+    // Input entry points: the Qt viewer feeds already-decoded canonical events,
+    // which run through the same throttle/state logic as the rest of the class.
+    void feed_pointer_button(const KvmPointerButton& button) { handle_button(button); }
+    void feed_pointer_motion(const KvmPointerMotion& motion) { handle_motion(motion); }
+    void feed_pointer_wheel(const KvmPointerWheel& wheel) { handle_wheel(wheel); }
+    void feed_key(const KvmKeyEvent& key) { handle_key(key); }
+
+    // Install the frame-geometry source: maps pointer coordinates against the Qt
+    // surface (its current size + the centred frame rect).
+    void set_frame_geometry_source(std::function<std::optional<FrameGeometry>()> source)
+    {
+        frame_geometry_ = std::move(source);
+    }
 
 private:
-    void handle_button(const SDL_MouseButtonEvent& button, bool down);
-    void handle_motion(const SDL_MouseMotionEvent& motion);
-    void handle_wheel(const SDL_MouseWheelEvent& wheel);
-    void handle_key(const SDL_KeyboardEvent& key, bool down);
+    void handle_button(const KvmPointerButton& button);
+    void handle_motion(const KvmPointerMotion& motion);
+    void handle_wheel(const KvmPointerWheel& wheel);
+    void handle_key(const KvmKeyEvent& key);
 
     bool any_button_down() const { return buttons_ != 0; }
 
