@@ -13,6 +13,7 @@
 #include <QApplication>
 #include <QCoreApplication>
 #include <QImage>
+#include <QMessageBox>
 #include <QRect>
 #include <QString>
 
@@ -223,6 +224,18 @@ int run_viewer(const ViewerLaunch& launch, const std::function<void(ViewerHost&)
             host.fail(std::current_exception());
         }
     });
+
+    // If QRhi can't bring up D3D11 at all there's no surface to draw on (not even
+    // the console), so tell the user and close. Queued so the modal dialog runs
+    // after the failed render cycle unwinds rather than inside it.
+    QObject::connect(surface, &ViewerSurface::rhiUnavailable, &window, [&window]() {
+        QMessageBox::critical(
+            &window,
+            QStringLiteral("hitsc"),
+            QStringLiteral("hitsc requires Direct3D 11, which is unavailable on this system. "
+                           "The viewer will now close."));
+        window.close();
+    }, Qt::QueuedConnection);
 
     window.show();
     surface->setFocus();

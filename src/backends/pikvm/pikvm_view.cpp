@@ -594,6 +594,38 @@ private:
             return std::nullopt;
         }
 
+        // Drive swscale's YUV->RGB matrix from the stream's colorspace/range
+        // instead of letting it guess, so software-decoded pikvm video matches the
+        // source (and the hardware NV12 shader). Unspecified -> BT.709 for HD /
+        // BT.601 for SD, the usual heuristic.
+        int source_cs = SWS_CS_ITU601;
+        switch (frame.colorspace) {
+        case AVCOL_SPC_BT709:
+            source_cs = SWS_CS_ITU709;
+            break;
+        case AVCOL_SPC_SMPTE240M:
+            source_cs = SWS_CS_SMPTE240M;
+            break;
+        case AVCOL_SPC_BT2020_NCL:
+        case AVCOL_SPC_BT2020_CL:
+            source_cs = SWS_CS_BT2020;
+            break;
+        case AVCOL_SPC_FCC:
+        case AVCOL_SPC_BT470BG:
+        case AVCOL_SPC_SMPTE170M:
+            source_cs = SWS_CS_ITU601;
+            break;
+        default:
+            source_cs = frame.height >= 720 ? SWS_CS_ITU709 : SWS_CS_ITU601;
+            break;
+        }
+        const int source_range = frame.color_range == AVCOL_RANGE_JPEG ? 1 : 0;
+        sws_setColorspaceDetails(
+            hosted_sws_,
+            sws_getCoefficients(source_cs), source_range,
+            sws_getCoefficients(SWS_CS_DEFAULT), 1,  // RGBA output is full-range
+            0, 1 << 16, 1 << 16);                    // neutral brightness/contrast/saturation
+
         QImage image(frame.width, frame.height, QImage::Format_RGBA8888);
         std::uint8_t* destination_data[4] = {image.bits(), nullptr, nullptr, nullptr};
         int destination_linesize[4] = {static_cast<int>(image.bytesPerLine()), 0, 0, 0};

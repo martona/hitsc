@@ -40,6 +40,10 @@ struct PikvmVideoFrame {
     PikvmVideoPixelFormat format = PikvmVideoPixelFormat::rgba32;
     std::array<const std::uint8_t*, 4> planes{};
     std::array<int, 4> pitches{};
+    // YUV->RGB hints for the i420/nv12 paths, as AVColorSpace / AVColorRange
+    // values (set from the decoded frame; defaults = AVCOL_*_UNSPECIFIED).
+    int colorspace = 2;   // AVCOL_SPC_UNSPECIFIED
+    int color_range = 0;  // AVCOL_RANGE_UNSPECIFIED
     std::vector<std::uint8_t> rgba;
     std::shared_ptr<void> owner;
 };

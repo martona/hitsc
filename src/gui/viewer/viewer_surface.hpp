@@ -53,7 +53,8 @@ signals:
     void pointerMotion(const hitsc::KvmPointerMotion& motion);
     void pointerWheel(const hitsc::KvmPointerWheel& wheel);
     void focusLost();
-    void rhiReady();  // QRhi (and its device) is available
+    void rhiReady();        // QRhi (and its device) is available
+    void rhiUnavailable();  // QRhi could not initialize (no usable D3D11)
 
 protected:
     void initialize(QRhiCommandBuffer* cb) override;
@@ -78,6 +79,7 @@ private:
     std::unique_ptr<QRhiBuffer> vertex_buffer_;
     std::unique_ptr<QRhiSampler> sampler_;
     bool rhi_ready_emitted_ = false;
+    bool rhi_unavailable_emitted_ = false;
 
     // RGBA path (console + software video).
     std::unique_ptr<QRhiTexture> texture_;

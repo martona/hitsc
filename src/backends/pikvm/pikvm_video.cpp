@@ -492,6 +492,8 @@ struct PikvmH264Decoder::Impl {
         output.width = cloned->width;
         output.height = cloned->height;
         output.format = format;
+        output.colorspace = static_cast<int>(cloned->colorspace);
+        output.color_range = static_cast<int>(cloned->color_range);
         for (std::size_t i = 0; i < output.planes.size(); ++i) {
             output.planes[i] = cloned->data[i];
             output.pitches[i] = cloned->linesize[i];

@@ -92,6 +92,17 @@ ViewerSurface::ViewerSurface(QWidget* parent)
     setApi(QRhiWidget::Api::Direct3D11);
     setFocusPolicy(Qt::StrongFocus);
     setMouseTracking(true);
+
+    // QRhiWidget emits renderFailed() when it can't bring up the RHI or a frame
+    // fails. If it never came up at all, D3D11 is unavailable here -> tell the host
+    // once so it can show an error and bail. A failure AFTER a good init is a
+    // device loss, left to the reconnect/restart path.
+    connect(this, &QRhiWidget::renderFailed, this, [this]() {
+        if (!rhi_ready_emitted_ && !rhi_unavailable_emitted_) {
+            rhi_unavailable_emitted_ = true;
+            emit rhiUnavailable();
+        }
+    });
 }
 
 ViewerSurface::~ViewerSurface()
