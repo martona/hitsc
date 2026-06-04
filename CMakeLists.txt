@@ -85,6 +85,8 @@ add_executable(
   src/gui/launcher_theme.hpp
   src/gui/launcher_types.cpp
   src/log.cpp
+  src/gui/screen_geometry.cpp
+  src/gui/screen_geometry.hpp
   src/gui/window_placement.cpp
   src/gui/window_placement.hpp
   src/gui/window_prefs_store.cpp

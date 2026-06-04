@@ -47,7 +47,6 @@ protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
 
 private:
-    static bool is_rect_within_virtual_desktop(const QRect& rect);
     void save_if_visible();
     QString rect_key(const QString& mode) const;
     void apply_mode_geometry(const QString& mode);

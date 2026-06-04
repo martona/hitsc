@@ -1,5 +1,7 @@
 #include "window_placement.hpp"
 
+#include "screen_geometry.hpp"
+
 #include <QEvent>
 #include <QGuiApplication>
 #include <QPoint>
@@ -121,7 +123,7 @@ void WindowPlacementController::apply_mode_geometry(const QString& mode)
     if (mode == QStringLiteral("mini")) {
         // Fixed-size, non-resizable mini window; only the position is restored.
         const QRect target =
-            (saved && is_rect_within_virtual_desktop(QRect(saved->topLeft(), kMiniSize)))
+            (saved && rect_within_virtual_desktop(QRect(saved->topLeft(), kMiniSize)))
             ? QRect(saved->topLeft(), kMiniSize)
             : centered_rect(kMiniSize);
         window_->setMinimumSize(kMiniSize);
@@ -130,7 +132,7 @@ void WindowPlacementController::apply_mode_geometry(const QString& mode)
     } else {
         window_->setMaximumSize(QSize(kWindowSizeMax, kWindowSizeMax));
         window_->setMinimumSize(kExpandedMinSize);
-        if (saved && is_rect_within_virtual_desktop(*saved)) {
+        if (saved && rect_within_virtual_desktop(*saved)) {
             window_->setGeometry(*saved);
         } else {
             window_->setGeometry(centered_rect(kExpandedDefaultSize));
@@ -151,26 +153,6 @@ bool WindowPlacementController::eventFilter(QObject* watched, QEvent* event)
     }
 
     return QObject::eventFilter(watched, event);
-}
-
-bool WindowPlacementController::is_rect_within_virtual_desktop(const QRect& rect)
-{
-    if (rect.width() <= 0 || rect.height() <= 0) {
-        return false;
-    }
-
-    QRect virtual_desktop;
-    for (QScreen* screen : QGuiApplication::screens()) {
-        if (screen == nullptr) {
-            continue;
-        }
-
-        virtual_desktop = virtual_desktop.isNull()
-            ? screen->geometry()
-            : virtual_desktop.united(screen->geometry());
-    }
-
-    return !virtual_desktop.isNull() && virtual_desktop.contains(rect);
 }
 
 void WindowPlacementController::save_if_visible()

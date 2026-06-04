@@ -4,6 +4,7 @@
 #include "cert_trust.hpp"
 #include "console_screen.hpp"
 #include "gui/launcher_host_store.hpp"
+#include "gui/screen_geometry.hpp"
 #include "gui/viewer/viewer_surface.hpp"
 #include "gui/viewer/viewer_window.hpp"
 #include "view_base.hpp"
@@ -97,13 +98,12 @@ int run_viewer(const ViewerLaunch& launch, const std::function<void(ViewerHost&)
     const std::string host_id = launch.host_id;
     const std::string host_label = launch.host_label;
 
-    // Restore the saved per-host geometry.
-    // TODO: guard against a rect on a monitor that is no longer present (via
-    // QGuiApplication::screens()).
+    // Restore the saved per-host geometry, ignoring a rect whose monitor is no
+    // longer present (so the window never opens off-screen).
     if (!host_id.empty()) {
         const HostStore store;
         if (const std::optional<QRect> rect = store.load_window_rect(QString::fromStdString(host_id))) {
-            if (rect->width() > 0 && rect->height() > 0) {
+            if (rect_within_virtual_desktop(*rect)) {
                 window.setGeometry(*rect);
             }
         }
