@@ -4,12 +4,14 @@
 #include "backends/aspeed/aspeed_presenter.hpp"
 #include "diagnostics.hpp"
 #include "gui/viewer/qt_viewer_host.hpp"
+#include "hardware_cursor.hpp"
 #include "megarac_hid.hpp"
 #include "megarac_protocol.hpp"
 #include "megarac_view_session.hpp"
 #include "view_input.hpp"
 
 #include <QImage>
+#include <QPainter>
 
 #include <atomic>
 #include <cstddef>
@@ -19,7 +21,6 @@
 #include <iostream>
 #include <memory>
 #include <optional>
-#include <span>
 #include <utility>
 #include <vector>
 
@@ -189,7 +190,13 @@ private:
         state_->input.clear();
         input_.reset();
         hosted_frame_ = QImage();
+        hosted_clean_rgba_.clear();
+        hosted_clean_width_ = 0;
+        hosted_clean_height_ = 0;
+        hosted_cursor_ = HardwareCursor{};
+        has_hosted_cursor_ = false;
         hosted_last_sequence_ = 0;
+        hosted_cursor_sequence_ = 0;
     }
 
     void on_minimized() override
@@ -215,14 +222,32 @@ private:
 
     std::optional<QImage> latest_frame_image() override
     {
+        bool recomposite = false;
+
+        // BMC hardware-cursor packets arrive faster than video frames; cache the
+        // latest cursor so the sprite tracks at tick rate, not frame rate.
+        if (const std::shared_ptr<const HardwareCursor> cursor =
+                state_->cursors.latest(hosted_cursor_sequence_)) {
+            hosted_cursor_ = *cursor;
+            hosted_cursor_sequence_ = cursor->sequence;
+            has_hosted_cursor_ = true;
+            recomposite = true;
+        }
+
         const std::shared_ptr<const MegaracCompressedFrame> frame =
             state_->frames.latest(hosted_last_sequence_);
         if (frame) {
             hosted_last_sequence_ = frame->sequence;
-            if (std::optional<QImage> image = decode_hosted_frame(*frame)) {
-                hosted_frame_ = std::move(*image);
+            if (decode_hosted_frame(*frame)) {
                 frame_presented(frame->width, frame->height);
                 state_->video_feedback_presented_frames.fetch_add(1, std::memory_order_relaxed);
+                recomposite = true;
+            }
+        }
+
+        if (recomposite && !hosted_clean_rgba_.empty()) {
+            if (QImage composed = compose_hosted_frame(); !composed.isNull()) {
+                hosted_frame_ = std::move(composed);
             }
         }
         if (hosted_frame_.isNull()) {
@@ -242,33 +267,53 @@ private:
         return std::nullopt;
     }
 
-    // See AtenView::decode_hosted_frame: ASPEED delta decode -> opaque RGBA
-    // QImage seeded from the previous frame. Cursor overlay deferred.
-    std::optional<QImage> decode_hosted_frame(const MegaracCompressedFrame& frame)
+    // See AtenView::decode_hosted_frame / compose_hosted_frame. Delta-decode into
+    // hosted_clean_rgba_ (the cursor-free delta seed); the BMC cursor is blended
+    // on top later so the seed never carries the sprite.
+    bool decode_hosted_frame(const MegaracCompressedFrame& frame)
     {
         if (frame.width <= 0 || frame.height <= 0) {
-            return std::nullopt;
+            return false;
         }
         const std::size_t size = aspeed_frame_rgba_size(frame.width, frame.height);
-        QImage image(frame.width, frame.height, QImage::Format_RGBX8888);
-        if (static_cast<std::size_t>(image.bytesPerLine()) * static_cast<std::size_t>(frame.height) != size) {
-            return std::nullopt;
-        }
-        if (!hosted_frame_.isNull()
-            && hosted_frame_.width() == frame.width
-            && hosted_frame_.height() == frame.height
-            && hosted_frame_.format() == QImage::Format_RGBX8888) {
-            std::memcpy(image.bits(), hosted_frame_.constBits(), size);
-        } else {
-            image.fill(Qt::white);
-        }
+        const bool reuse_previous = hosted_clean_width_ == frame.width
+            && hosted_clean_height_ == frame.height
+            && hosted_clean_rgba_.size() == size;
         try {
-            hosted_decoder_.decode_rgba_into(
+            hosted_clean_rgba_ = hosted_decoder_.decode_rgba(
                 frame.decode_options,
                 frame.compressed,
-                std::span<std::uint8_t>(image.bits(), size));
+                reuse_previous ? &hosted_clean_rgba_ : nullptr);
         } catch (...) {
-            return std::nullopt;
+            return false;
+        }
+        hosted_clean_width_ = frame.width;
+        hosted_clean_height_ = frame.height;
+        return true;
+    }
+
+    QImage compose_hosted_frame() const
+    {
+        const std::size_t size = aspeed_frame_rgba_size(hosted_clean_width_, hosted_clean_height_);
+        QImage image(hosted_clean_width_, hosted_clean_height_, QImage::Format_RGBX8888);
+        if (hosted_clean_rgba_.size() != size
+            || static_cast<std::size_t>(image.bytesPerLine()) * static_cast<std::size_t>(hosted_clean_height_) != size) {
+            return {};
+        }
+        std::memcpy(image.bits(), hosted_clean_rgba_.data(), size);
+
+        if (has_hosted_cursor_ && hosted_cursor_.visible) {
+            const CursorImage cursor_image = make_cursor_image(
+                hosted_cursor_, hosted_clean_rgba_, hosted_clean_width_, hosted_clean_height_);
+            if (!cursor_image.rgba.empty() && cursor_image.width > 0 && cursor_image.height > 0) {
+                const QImage sprite(
+                    reinterpret_cast<const uchar*>(cursor_image.rgba.data()),
+                    cursor_image.width,
+                    cursor_image.height,
+                    QImage::Format_RGBA8888);
+                QPainter painter(&image);
+                painter.drawImage(QPoint(hosted_cursor_.x, hosted_cursor_.y), sprite);
+            }
         }
         return image;
     }
@@ -277,8 +322,14 @@ private:
     std::shared_ptr<MegaracViewSessionState> state_;
     MegaracInputEncoder encoder_;
     KvmInputController input_;
-    QImage hosted_frame_;
+    QImage hosted_frame_;                          // displayed: clean frame + BMC cursor
+    std::vector<std::uint8_t> hosted_clean_rgba_;  // clean decoded RGBA; delta seed (no cursor)
+    int hosted_clean_width_ = 0;
+    int hosted_clean_height_ = 0;
+    HardwareCursor hosted_cursor_;
+    bool has_hosted_cursor_ = false;
     std::uint64_t hosted_last_sequence_ = 0;
+    std::uint64_t hosted_cursor_sequence_ = 0;
     AspeedDecoder hosted_decoder_;
 };
 

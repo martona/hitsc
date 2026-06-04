@@ -6,9 +6,11 @@
 #include "aten_protocol.hpp"
 #include "diagnostics.hpp"
 #include "gui/viewer/qt_viewer_host.hpp"
+#include "hardware_cursor.hpp"
 #include "view_input.hpp"
 
 #include <QImage>
+#include <QPainter>
 
 #include <atomic>
 #include <cstdint>
@@ -17,7 +19,6 @@
 #include <iostream>
 #include <memory>
 #include <optional>
-#include <span>
 #include <utility>
 #include <vector>
 
@@ -140,7 +141,13 @@ private:
         state_->input.clear();
         input_.reset();
         hosted_frame_ = QImage();
+        hosted_clean_rgba_.clear();
+        hosted_clean_width_ = 0;
+        hosted_clean_height_ = 0;
+        hosted_cursor_ = HardwareCursor{};
+        has_hosted_cursor_ = false;
         hosted_last_sequence_ = 0;
+        hosted_cursor_sequence_ = 0;
     }
 
     void on_minimized() override
@@ -165,13 +172,31 @@ private:
 
     std::optional<QImage> latest_frame_image() override
     {
+        bool recomposite = false;
+
+        // BMC hardware-cursor packets arrive faster than video frames; cache the
+        // latest cursor so the sprite tracks at tick rate, not frame rate.
+        if (const std::shared_ptr<const HardwareCursor> cursor =
+                state_->cursors.latest(hosted_cursor_sequence_)) {
+            hosted_cursor_ = *cursor;
+            hosted_cursor_sequence_ = cursor->sequence;
+            has_hosted_cursor_ = true;
+            recomposite = true;
+        }
+
         const std::shared_ptr<const AtenCompressedFrame> frame =
             state_->frames.latest(hosted_last_sequence_);
         if (frame) {
             hosted_last_sequence_ = frame->sequence;
-            if (std::optional<QImage> image = decode_hosted_frame(*frame)) {
-                hosted_frame_ = std::move(*image);
+            if (decode_hosted_frame(*frame)) {
                 frame_presented(frame->width, frame->height);
+                recomposite = true;
+            }
+        }
+
+        if (recomposite && !hosted_clean_rgba_.empty()) {
+            if (QImage composed = compose_hosted_frame(); !composed.isNull()) {
+                hosted_frame_ = std::move(composed);
             }
         }
         if (hosted_frame_.isNull()) {
@@ -191,37 +216,61 @@ private:
         return std::nullopt;
     }
 
-    // Decode an ASPEED compressed frame to an opaque RGBA QImage for the Qt
-    // surface, replicating the presenter's delta model: seed from the previous
-    // frame (or white) then decode the update on top. RGBX8888 ignores the alpha
-    // byte so the frame always renders opaque. The decoder is stateless, so a
-    // private instance is fine. (Hardware-cursor overlay is deferred to the GPU/
-    // overlay work; this shows guest video + accepts input.)
-    std::optional<QImage> decode_hosted_frame(const AtenCompressedFrame& frame)
+    // Delta-decode the ASPEED frame into hosted_clean_rgba_ (the seed for the
+    // next delta): decode_rgba seeds from the previous clean frame, or from white
+    // when dimensions change / on the first frame. The cursor is composited later
+    // in compose_hosted_frame so the seed never carries the sprite. Returns false
+    // on bad dimensions or decode failure. The decoder is stateless.
+    bool decode_hosted_frame(const AtenCompressedFrame& frame)
     {
         if (frame.width <= 0 || frame.height <= 0) {
-            return std::nullopt;
+            return false;
         }
         const std::size_t size = aspeed_frame_rgba_size(frame.width, frame.height);
-        QImage image(frame.width, frame.height, QImage::Format_RGBX8888);
-        if (static_cast<std::size_t>(image.bytesPerLine()) * static_cast<std::size_t>(frame.height) != size) {
-            return std::nullopt;
-        }
-        if (!hosted_frame_.isNull()
-            && hosted_frame_.width() == frame.width
-            && hosted_frame_.height() == frame.height
-            && hosted_frame_.format() == QImage::Format_RGBX8888) {
-            std::memcpy(image.bits(), hosted_frame_.constBits(), size);
-        } else {
-            image.fill(Qt::white);
-        }
+        const bool reuse_previous = hosted_clean_width_ == frame.width
+            && hosted_clean_height_ == frame.height
+            && hosted_clean_rgba_.size() == size;
         try {
-            hosted_decoder_.decode_rgba_into(
+            hosted_clean_rgba_ = hosted_decoder_.decode_rgba(
                 frame.decode_options,
                 frame.compressed,
-                std::span<std::uint8_t>(image.bits(), size));
+                reuse_previous ? &hosted_clean_rgba_ : nullptr);
         } catch (...) {
-            return std::nullopt;
+            return false;
+        }
+        hosted_clean_width_ = frame.width;
+        hosted_clean_height_ = frame.height;
+        return true;
+    }
+
+    // Copy the clean frame into a fresh RGBX8888 QImage and blend the BMC cursor
+    // sprite on top (SourceOver via the sprite's straight alpha; the RGBX
+    // destination stays opaque). We must not paint into hosted_clean_rgba_ — it is
+    // the delta seed for the next frame. The sprite goes at (cursor.x, cursor.y):
+    // make_cursor_image already bakes the pattern x/y_offset into the sampled
+    // sprite, matching the old SDL HardwareCursorPresenter.
+    QImage compose_hosted_frame() const
+    {
+        const std::size_t size = aspeed_frame_rgba_size(hosted_clean_width_, hosted_clean_height_);
+        QImage image(hosted_clean_width_, hosted_clean_height_, QImage::Format_RGBX8888);
+        if (hosted_clean_rgba_.size() != size
+            || static_cast<std::size_t>(image.bytesPerLine()) * static_cast<std::size_t>(hosted_clean_height_) != size) {
+            return {};
+        }
+        std::memcpy(image.bits(), hosted_clean_rgba_.data(), size);
+
+        if (has_hosted_cursor_ && hosted_cursor_.visible) {
+            const CursorImage cursor_image = make_cursor_image(
+                hosted_cursor_, hosted_clean_rgba_, hosted_clean_width_, hosted_clean_height_);
+            if (!cursor_image.rgba.empty() && cursor_image.width > 0 && cursor_image.height > 0) {
+                const QImage sprite(
+                    reinterpret_cast<const uchar*>(cursor_image.rgba.data()),
+                    cursor_image.width,
+                    cursor_image.height,
+                    QImage::Format_RGBA8888);
+                QPainter painter(&image);
+                painter.drawImage(QPoint(hosted_cursor_.x, hosted_cursor_.y), sprite);
+            }
         }
         return image;
     }
@@ -230,8 +279,14 @@ private:
     std::shared_ptr<AtenViewState> state_;
     AtenInputEncoder encoder_;
     KvmInputController input_;
-    QImage hosted_frame_;
+    QImage hosted_frame_;                          // displayed: clean frame + BMC cursor
+    std::vector<std::uint8_t> hosted_clean_rgba_;  // clean decoded RGBA; delta seed (no cursor)
+    int hosted_clean_width_ = 0;
+    int hosted_clean_height_ = 0;
+    HardwareCursor hosted_cursor_;
+    bool has_hosted_cursor_ = false;
     std::uint64_t hosted_last_sequence_ = 0;
+    std::uint64_t hosted_cursor_sequence_ = 0;
     AspeedDecoder hosted_decoder_;
 };
 
