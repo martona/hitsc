@@ -14,6 +14,9 @@ struct AspeedDecodeOptions {
     unsigned chroma_table_selector = 0;
     unsigned advance_table_selector = 0;
     unsigned advance_chroma_table_selector = 0;
+    // 1 => dequantize chroma with the luminance tables instead of the chrominance
+    // tables (ASPEED JPEGYUVTableMapping). MegaRAC sets this per frame; 0 elsewhere.
+    unsigned yuv_table_mapping = 0;
     bool use_separate_chroma_selectors = false;
 };
 

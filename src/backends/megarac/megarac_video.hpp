@@ -13,6 +13,7 @@ struct MegaracVideoFrame {
     int height = 0;
     std::uint8_t compression_mode = 0;
     std::uint8_t jpeg_table_selector = 0;
+    std::uint8_t jpeg_yuv_table_mapping = 0;
     std::uint8_t advance_table_selector = 0;
     std::uint8_t rc4_enable = 0;
     std::uint8_t mode420 = 0;

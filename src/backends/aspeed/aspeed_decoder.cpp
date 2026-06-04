@@ -25,7 +25,8 @@ void decode_ext(
     unsigned selector,
     unsigned chroma_selector,
     unsigned advance_selector,
-    unsigned advance_chroma_selector);
+    unsigned advance_chroma_selector,
+    unsigned mapping);
 }
 
 namespace hitsc {
@@ -125,7 +126,8 @@ void AspeedDecoder::decode_rgba_into(
         options.jpeg_table_selector,
         chroma_selector,
         options.advance_table_selector,
-        advance_chroma_selector);
+        advance_chroma_selector,
+        options.yuv_table_mapping);
 }
 
 } // namespace hitsc

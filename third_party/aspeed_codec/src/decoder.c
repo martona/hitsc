@@ -1162,12 +1162,14 @@ void init(void)
 
 EMSCRIPTEN_KEEPALIVE
 void decode_ext(unsigned long* _in_buf, int _len, unsigned char* _out_buf, int _width, int _height,
-    unsigned _mode420, unsigned _sel, unsigned _chroma_sel, unsigned _adv_sel, unsigned _adv_chroma_sel)
+    unsigned _mode420, unsigned _sel, unsigned _chroma_sel, unsigned _adv_sel, unsigned _adv_chroma_sel,
+    unsigned _mapping)
 {
     pr_dbg("len(%d) 420(%d) width(%d) height(%d)\n", _len, _mode420, _width, _height);
 
     if (first_frame == 1 || _sel != selector || _chroma_sel != chroma_selector ||
-        _adv_sel != advance_selector || _adv_chroma_sel != advance_chroma_selector) {
+        _adv_sel != advance_selector || _adv_chroma_sel != advance_chroma_selector ||
+        (int)_mapping != Mapping) {
         pr_dbg("init table for sel(%d/%d) adv_sel(%d/%d)\n",
             selector, chroma_selector, advance_selector, advance_chroma_selector);
 
@@ -1175,6 +1177,10 @@ void decode_ext(unsigned long* _in_buf, int _len, unsigned char* _out_buf, int _
         chroma_selector = _chroma_sel;
         advance_selector = _adv_sel;
         advance_chroma_selector = _adv_chroma_sel;
+        // JPEGYUVTableMapping: 1 => chroma uses the luminance quant tables. Part of
+        // the reload key above so a mapping flip (same selectors) reloads the
+        // chroma tables. Newer firmware (e.g. SapphireRapids) sets it; Bergamo/ATEN leave 0.
+        Mapping = (int)_mapping;
 
         load_quant_table(QT[0]);
         load_quant_tableCb(QT[1]);
@@ -1209,5 +1215,5 @@ EMSCRIPTEN_KEEPALIVE
 void decode(unsigned long* _in_buf, int _len, unsigned char* _out_buf, int _width, int _height,
     unsigned _mode420, unsigned _sel, unsigned _adv_sel)
 {
-    decode_ext(_in_buf, _len, _out_buf, _width, _height, _mode420, _sel, _sel, _adv_sel, _adv_sel);
+    decode_ext(_in_buf, _len, _out_buf, _width, _height, _mode420, _sel, _sel, _adv_sel, _adv_sel, 0);
 }

@@ -31,6 +31,7 @@ std::optional<MegaracVideoFrame> MegaracVideoAssembler::ingest(const std::vector
         current_.height = load_le16(packet_payload, header_base + 15);
         current_.compression_mode = packet_payload[header_base + 42];
         current_.jpeg_table_selector = packet_payload[header_base + 44];
+        current_.jpeg_yuv_table_mapping = packet_payload[header_base + 45];
         current_.advance_table_selector = packet_payload[header_base + 47];
         current_.rc4_enable = packet_payload[header_base + 53];
         current_.mode420 = packet_payload[header_base + 55];
@@ -107,6 +108,7 @@ AspeedDecodeOptions make_megarac_aspeed_decode_options(const MegaracVideoFrame& 
     options.height = frame.height;
     options.mode420 = frame.mode420;
     options.jpeg_table_selector = frame.jpeg_table_selector;
+    options.yuv_table_mapping = frame.jpeg_yuv_table_mapping;
     options.advance_table_selector = frame.advance_table_selector;
     return options;
 }
