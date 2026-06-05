@@ -37,6 +37,7 @@ private:
     std::string dimensions_text() const;
     std::string bandwidth_text() const;
     std::string fps_text() const;
+    std::string cpu_text() const;
     std::string state_text() const;
 
     std::mutex mutex_;
@@ -51,6 +52,8 @@ private:
     std::uint64_t bucket_frames_ = 0;
     double kbps_ = 0.0;
     double fps_ = 0.0;
+    double cpu_percent_ = 0.0;       // this process's CPU use over the last window, % of the whole machine
+    double last_cpu_seconds_ = -1.0; // previous process-CPU-time sample (-1 = none yet)
 };
 
 } // namespace hitsc
