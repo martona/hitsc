@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Controls.Fusion
 import QtQuick.Layouts
 import QtQuick.Shapes
+import QtQuick.Window
 
 ApplicationWindow {
     id: root
@@ -51,6 +52,51 @@ ApplicationWindow {
             console.error(result.error)
     }
 
+    function toggleMaximized() {
+        root.visibility = root.visibility === Window.Maximized ? Window.Windowed : Window.Maximized
+    }
+
+    // A single Win11-style caption button. Registered with QWindowKit as a system
+    // button in launcher_gui.cpp (which keeps onClicked working — see the QWindowKit
+    // QtQuick example). Glyphs come from the Segoe MDL2 Assets icon font.
+    component CaptionButton: Button {
+        id: capBtn
+
+        property string sym: ""
+        property bool isClose: false
+        property color fg: "black"
+        property bool dark: false
+
+        Layout.fillHeight: true
+        implicitWidth: 46
+        focusPolicy: Qt.NoFocus
+        leftPadding: 0
+        rightPadding: 0
+        topPadding: 0
+        bottomPadding: 0
+        leftInset: 0
+        rightInset: 0
+        topInset: 0
+        bottomInset: 0
+
+        background: Rectangle {
+            color: capBtn.hovered
+                ? (capBtn.isClose
+                    ? "#c42b1c"
+                    : Qt.rgba(capBtn.fg.r, capBtn.fg.g, capBtn.fg.b, capBtn.dark ? 0.12 : 0.10))
+                : "transparent"
+        }
+
+        contentItem: Label {
+            text: capBtn.sym
+            font.family: "Segoe MDL2 Assets"
+            font.pixelSize: 10
+            horizontalAlignment: Text.AlignHCenter
+            verticalAlignment: Text.AlignVCenter
+            color: (capBtn.isClose && capBtn.hovered) ? "white" : capBtn.fg
+        }
+    }
+
     color: theme.window
     palette.window: theme.window
     palette.windowText: theme.text
@@ -64,6 +110,7 @@ ApplicationWindow {
     palette.placeholderText: theme.mutedText
 
     header: ToolBar {
+        objectName: "titleBar"
         palette: root.palette
 
         background: Rectangle {
@@ -79,11 +126,23 @@ ApplicationWindow {
 
         RowLayout {
             anchors.fill: parent
-            anchors.leftMargin: 10
-            anchors.rightMargin: 10
+            anchors.leftMargin: 8
+            spacing: 0
+
+            Image {
+                objectName: "windowIcon"
+                source: "qrc:/icons/hitsc-32.png"
+                fillMode: Image.PreserveAspectFit
+                mipmap: true
+                Layout.alignment: Qt.AlignVCenter
+                Layout.preferredWidth: 18
+                Layout.preferredHeight: 18
+                Layout.rightMargin: 6
+            }
 
             ToolButton {
                 id: menuButton
+                objectName: "menuButton"
 
                 Layout.preferredWidth: 40
                 Layout.preferredHeight: 32
@@ -111,16 +170,14 @@ ApplicationWindow {
                 }
             }
 
-            Item {
-                Layout.fillWidth: true
-            }
-
             ToolButton {
                 id: viewToggleButton
+                objectName: "viewToggleButton"
 
                 Layout.preferredWidth: 40
                 Layout.preferredHeight: 32
                 Layout.alignment: Qt.AlignVCenter
+                Layout.rightMargin: 6
                 palette: root.palette
 
                 onClicked: windowPlacement.setMode(root.viewMode === "mini" ? "expanded" : "mini")
@@ -156,6 +213,45 @@ ApplicationWindow {
                         border.width: 2
                     }
                 }
+            }
+
+            Label {
+                text: root.title
+                color: theme.text
+                verticalAlignment: Text.AlignVCenter
+                font.pixelSize: 13
+                Layout.alignment: Qt.AlignVCenter
+                Layout.leftMargin: 2
+            }
+
+            Item {
+                Layout.fillWidth: true
+            }
+
+            CaptionButton {
+                objectName: "minButton"
+                sym: String.fromCharCode(0xE921)
+                fg: theme.text
+                dark: theme.darkMode
+                onClicked: root.showMinimized()
+            }
+
+            CaptionButton {
+                objectName: "maxButton"
+                visible: root.viewMode !== "mini"
+                sym: root.visibility === Window.Maximized ? String.fromCharCode(0xE923) : String.fromCharCode(0xE922)
+                fg: theme.text
+                dark: theme.darkMode
+                onClicked: root.toggleMaximized()
+            }
+
+            CaptionButton {
+                objectName: "closeButton"
+                sym: String.fromCharCode(0xE8BB)
+                isClose: true
+                fg: theme.text
+                dark: theme.darkMode
+                onClicked: root.close()
             }
         }
 

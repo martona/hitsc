@@ -1,12 +1,20 @@
 #include "gui/viewer/viewer_window.hpp"
 
+#include "gui/launcher_theme.hpp"
 #include "gui/viewer/viewer_surface.hpp"
+#include "gui/viewer/viewer_title_bar.hpp"
+
+#include <QWKWidgets/widgetwindowagent.h>
 
 #include <QAbstractNativeEventFilter>
 #include <QCloseEvent>
 #include <QCoreApplication>
 #include <QEvent>
+#include <QGuiApplication>
+#include <QIcon>
+#include <QStyleHints>
 #include <QTimer>
+#include <QVariant>
 #include <QWindowStateChangeEvent>
 
 #ifdef _WIN32
@@ -207,8 +215,39 @@ private:
 ViewerWindow::ViewerWindow(const QString& title, QWidget* parent)
     : QMainWindow(parent)
 {
-    setWindowTitle(title);
+    setWindowIcon(QIcon(QStringLiteral(":/icons/hitsc-256.png")));
     resize(1280, 720);  // sane default; saved placement is wired in the entry point
+
+    // Take the non-client frame from the OS and draw our own caption. QWindowKit
+    // keeps the native behaviors (snap, drop shadow, resize borders, Win11
+    // snap-layouts, system menu); we only supply the title-bar content.
+    window_agent_ = new QWK::WidgetWindowAgent(this);
+    window_agent_->setup(this);
+
+    title_bar_ = new ViewerTitleBar(this);
+    setMenuWidget(title_bar_);  // QMainWindow menu slot: full width, above the surface
+
+    window_agent_->setTitleBar(title_bar_);
+    window_agent_->setSystemButton(QWK::WindowAgentBase::WindowIcon, title_bar_->icon_button());
+    window_agent_->setSystemButton(QWK::WindowAgentBase::Minimize, title_bar_->min_button());
+    window_agent_->setSystemButton(QWK::WindowAgentBase::Maximize, title_bar_->max_button());
+    window_agent_->setSystemButton(QWK::WindowAgentBase::Close, title_bar_->close_button());
+
+    connect(title_bar_, &ViewerTitleBar::minimizeRequested, this, &QWidget::showMinimized);
+    connect(title_bar_, &ViewerTitleBar::maximizeRestoreRequested, this, [this] {
+        if (isMaximized()) {
+            showNormal();
+        } else {
+            showMaximized();
+        }
+    });
+    connect(title_bar_, &ViewerTitleBar::closeRequested, this, &QWidget::close);
+
+    set_title(title);
+
+    apply_caption_theme();
+    connect(QGuiApplication::styleHints(), &QStyleHints::colorSchemeChanged, this,
+            [this](Qt::ColorScheme) { apply_caption_theme(); });
 
     surface_ = new ViewerSurface(this);
     setCentralWidget(surface_);
@@ -235,6 +274,26 @@ ViewerWindow::~ViewerWindow()
     }
 }
 
+void ViewerWindow::set_title(const QString& title)
+{
+    setWindowTitle(title);  // taskbar / Alt-Tab
+    if (title_bar_ != nullptr) {
+        title_bar_->set_title(title);
+    }
+}
+
+void ViewerWindow::apply_caption_theme()
+{
+    const bool dark = launcher_should_use_dark_theme(QGuiApplication::styleHints()->colorScheme());
+    if (title_bar_ != nullptr) {
+        title_bar_->apply_theme(dark);
+    }
+    if (window_agent_ != nullptr) {
+        // Dark-mode the 1px system border QWindowKit keeps + the DWM bits.
+        window_agent_->setWindowAttribute(QStringLiteral("dark-mode"), dark);
+    }
+}
+
 void ViewerWindow::closeEvent(QCloseEvent* event)
 {
     emit closeRequested();
@@ -251,6 +310,9 @@ void ViewerWindow::changeEvent(QEvent* event)
             emit minimized();
         } else if (!is_minimized && was_minimized) {
             emit restored();
+        }
+        if (title_bar_ != nullptr) {
+            title_bar_->set_maximized(isMaximized());
         }
     }
     QMainWindow::changeEvent(event);

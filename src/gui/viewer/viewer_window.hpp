@@ -11,9 +11,14 @@ class QCloseEvent;
 class QEvent;
 class QTimer;
 
+namespace QWK {
+class WidgetWindowAgent;
+}
+
 namespace hitsc {
 
 class ViewerSurface;
+class ViewerTitleBar;
 
 // The top-level Qt-native viewer window. Owns the ViewerSurface (its central
 // widget) plus the things that have to live above the surface:
@@ -37,6 +42,9 @@ public:
 
     ViewerSurface* surface() const { return surface_; }
 
+    // Set the caption text (and the OS window title used by the taskbar / Alt-Tab).
+    void set_title(const QString& title);
+
 signals:
     void keyEvent(const hitsc::KvmKeyEvent& key);  // raw-scancode key (Win32 filter)
     void frameTick();                              // ~16 ms repaint cadence
@@ -49,6 +57,10 @@ protected:
     void changeEvent(QEvent* event) override;
 
 private:
+    void apply_caption_theme();
+
+    QWK::WidgetWindowAgent* window_agent_ = nullptr;
+    ViewerTitleBar* title_bar_ = nullptr;
     ViewerSurface* surface_ = nullptr;
     QTimer* frame_timer_ = nullptr;
     std::unique_ptr<QAbstractNativeEventFilter> key_filter_;

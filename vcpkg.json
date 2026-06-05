@@ -41,6 +41,7 @@
       ]
     },
     "qtdeclarative",
+    "qwindowkit",
     "zlib"
   ]
 }

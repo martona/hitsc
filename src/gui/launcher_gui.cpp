@@ -11,19 +11,22 @@
 #include <QPalette>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
+#include <QQuickItem>
 #include <QQuickStyle>
 #include <QQuickWindow>
 #include <QSize>
 #include <QStyleHints>
 #include <QUrl>
+#include <QVariant>
 #include <QWindow>
+
+#include <QWKQuick/quickwindowagent.h>
 
 #include <cstdlib>
 
 #ifdef _WIN32
 #include <QAbstractNativeEventFilter>
 
-#include <dwmapi.h>
 #include <windows.h>
 #endif
 
@@ -156,21 +159,6 @@ private:
     COLORREF color_ = RGB(31, 32, 36);
 };
 
-void apply_title_bar_theme(QWindow* window, Qt::ColorScheme color_scheme)
-{
-    if (window == nullptr) {
-        return;
-    }
-
-    const BOOL use_dark_title_bar = launcher_should_use_dark_theme(color_scheme) ? TRUE : FALSE;
-    const HWND hwnd = reinterpret_cast<HWND>(window->winId());
-    constexpr DWORD kDwmWindowAttributeUseImmersiveDarkMode = 20;
-    DwmSetWindowAttribute(
-        hwnd,
-        kDwmWindowAttributeUseImmersiveDarkMode,
-        &use_dark_title_bar,
-        sizeof(use_dark_title_bar));
-}
 #endif
 
 } // namespace
@@ -208,6 +196,40 @@ int run_launcher_gui(int argc, char* argv[], VerbosityOptions verbosity)
     }
     apply_window_clear_color(root_window, app.palette().color(QPalette::Window));
 
+    // Take the non-client frame from the OS and draw our own caption (QWindowKit
+    // keeps native snap/shadow/resize). The caption is the QML ToolBar tagged
+    // objectName "titleBar"; its interactive children are registered so clicks
+    // reach them instead of dragging the window.
+    auto* quick_window = qobject_cast<QQuickWindow*>(engine.rootObjects().first());
+    auto* window_agent = new QWK::QuickWindowAgent(quick_window);
+    if (quick_window != nullptr) {
+        window_agent->setup(quick_window);
+        if (auto* title_bar = quick_window->findChild<QQuickItem*>(QStringLiteral("titleBar"))) {
+            window_agent->setTitleBar(title_bar);
+            if (auto* item = quick_window->findChild<QQuickItem*>(QStringLiteral("windowIcon"))) {
+                window_agent->setSystemButton(QWK::WindowAgentBase::WindowIcon, item);
+            }
+            if (auto* item = quick_window->findChild<QQuickItem*>(QStringLiteral("menuButton"))) {
+                window_agent->setHitTestVisible(item, true);
+            }
+            if (auto* item = quick_window->findChild<QQuickItem*>(QStringLiteral("viewToggleButton"))) {
+                window_agent->setHitTestVisible(item, true);
+            }
+            if (auto* item = quick_window->findChild<QQuickItem*>(QStringLiteral("minButton"))) {
+                window_agent->setSystemButton(QWK::WindowAgentBase::Minimize, item);
+            }
+            if (auto* item = quick_window->findChild<QQuickItem*>(QStringLiteral("maxButton"))) {
+                window_agent->setSystemButton(QWK::WindowAgentBase::Maximize, item);
+            }
+            if (auto* item = quick_window->findChild<QQuickItem*>(QStringLiteral("closeButton"))) {
+                window_agent->setSystemButton(QWK::WindowAgentBase::Close, item);
+            }
+        }
+        window_agent->setWindowAttribute(
+            QStringLiteral("dark-mode"),
+            launcher_should_use_dark_theme(app.styleHints()->colorScheme()));
+    }
+
     window_placement.attach(root_window);
     window_placement.restore();
 
@@ -222,28 +244,30 @@ int run_launcher_gui(int argc, char* argv[], VerbosityOptions verbosity)
     background_erase_filter.set_window(root_window);
     background_erase_filter.set_color(app.palette().color(QPalette::Window));
     app.installNativeEventFilter(&background_erase_filter);
-    apply_title_bar_theme(root_window, app.styleHints()->colorScheme());
     QObject::connect(
         app.styleHints(),
         &QStyleHints::colorSchemeChanged,
         &app,
-        [&app, light_palette, root_window, &launcher_theme, &background_erase_filter](
+        [&app, light_palette, root_window, &launcher_theme, &background_erase_filter, window_agent](
             Qt::ColorScheme color_scheme) {
             apply_application_theme(app, light_palette, color_scheme);
             launcher_theme.setColorScheme(color_scheme);
             apply_window_clear_color(root_window, app.palette().color(QPalette::Window));
             background_erase_filter.set_color(app.palette().color(QPalette::Window));
-            apply_title_bar_theme(root_window, color_scheme);
+            window_agent->setWindowAttribute(
+                QStringLiteral("dark-mode"), launcher_should_use_dark_theme(color_scheme));
         });
 #else
     QObject::connect(
         app.styleHints(),
         &QStyleHints::colorSchemeChanged,
         &app,
-        [&app, light_palette, root_window, &launcher_theme](Qt::ColorScheme color_scheme) {
+        [&app, light_palette, root_window, &launcher_theme, window_agent](Qt::ColorScheme color_scheme) {
             apply_application_theme(app, light_palette, color_scheme);
             launcher_theme.setColorScheme(color_scheme);
             apply_window_clear_color(root_window, app.palette().color(QPalette::Window));
+            window_agent->setWindowAttribute(
+                QStringLiteral("dark-mode"), launcher_should_use_dark_theme(color_scheme));
         });
 #endif
 

@@ -22,8 +22,10 @@ find_package(CLI11 CONFIG REQUIRED)
 find_package(FFMPEG REQUIRED)
 find_package(OpenSSL REQUIRED)
 set(QT_SKIP_SETUP_DEPLOYMENT ON)
-find_package(Qt6 REQUIRED COMPONENTS Core Gui Qml Quick QuickControls2 QuickLayouts ShaderTools Widgets)
+find_package(Qt6 REQUIRED COMPONENTS Core Gui Qml Quick QuickControls2 QuickLayouts ShaderTools Widgets
+  CorePrivate GuiPrivate WidgetsPrivate QuickPrivate)  # *Private: QWindowKit's exported targets link them
 find_package(ZLIB REQUIRED)
+find_package(QWindowKit CONFIG REQUIRED COMPONENTS Core Widgets Quick)
 
 qt_policy(SET QTP0001 NEW)
 qt_policy(SET QTP0004 NEW)
@@ -123,6 +125,8 @@ add_executable(
   src/gui/viewer/viewer_surface.hpp
   src/gui/viewer/viewer_window.cpp
   src/gui/viewer/viewer_window.hpp
+  src/gui/viewer/viewer_title_bar.cpp
+  src/gui/viewer/viewer_title_bar.hpp
   src/gui/viewer/qt_viewer_host.cpp
   src/gui/viewer/qt_viewer_host.hpp
   src/gui/viewer/main_thread_sampler.cpp
@@ -219,6 +223,8 @@ target_link_libraries(
     Qt6::QuickControls2
     Qt6::QuickLayouts
     Qt6::Widgets
+    QWindowKit::Widgets
+    QWindowKit::Quick
     hitsc_launcher_qml
     ZLIB::ZLIB
 )

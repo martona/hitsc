@@ -220,7 +220,7 @@ int run_viewer(const ViewerLaunch& launch, const std::function<void(ViewerHost&)
             const QString title = QString::fromStdString(view->hosted_title());
             if (title != last_title) {
                 last_title = title;
-                window.setWindowTitle(title);
+                window.set_title(title);
             }
         });
 
