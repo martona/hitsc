@@ -730,12 +730,9 @@ private:
                        << " first-block=0x" << std::hex << static_cast<int>(block_header) << std::dec;
         }
 
-        MegaracCompressedFrame compressed_frame;
+        AspeedCompressedFrame compressed_frame;
         compressed_frame.width = frame->width;
         compressed_frame.height = frame->height;
-        compressed_frame.frame_number = next_frame_number;
-        compressed_frame.compression_mode = frame->compression_mode;
-        compressed_frame.first_block_header = block_header;
         compressed_frame.decode_options = make_megarac_aspeed_decode_options(*frame);
         compressed_frame.compressed = std::move(frame->compressed);
         compressed_frame.received_at = std::chrono::steady_clock::now();

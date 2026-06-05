@@ -75,40 +75,51 @@ AspeedDecoder::AspeedDecoder()
     std::call_once(g_aspeed_init_once, [] { init(); });
 }
 
-std::vector<std::uint8_t> AspeedDecoder::decode_rgba(
+AspeedDecodedDelta AspeedDecoder::decode(
     const AspeedDecodeOptions& options,
     const std::vector<std::uint8_t>& compressed,
-    const std::vector<std::uint8_t>* previous_rgba)
+    int width,
+    int height)
 {
-    if (options.width <= 0 || options.height <= 0) {
-        throw std::invalid_argument("ASPEED frame has invalid dimensions");
+    AspeedDecodedDelta delta;
+    if (width <= 0 || height <= 0) {
+        return delta;  // ok stays false
     }
-    if (options.width > 8192 || options.height > 8192) {
-        throw std::invalid_argument("ASPEED frame dimensions are implausibly large");
+    const std::size_t size =
+        static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4;
+    const bool reuse =
+        clean_width_ == width && clean_height_ == height && clean_rgba_.size() == size;
+    if (!reuse) {
+        // First frame / resolution change: seed white (so SKIP blocks have something
+        // to keep) and force a full upload.
+        clean_rgba_.assign(size, 0xff);
+        delta.full = true;
     }
-    if (compressed.empty()) {
-        throw std::invalid_argument("ASPEED compressed frame is empty");
+    AspeedDirtyRect rect;
+    try {
+        // decode_into validates before writing, so a bad frame throws without
+        // half-updating the framebuffer (on reuse the prior frame is preserved).
+        decode_into(options, compressed, clean_rgba_, &rect);
+    } catch (...) {
+        return delta;  // ok stays false
     }
-    if (compressed.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
-        throw std::invalid_argument("ASPEED compressed frame is too large");
+    clean_width_ = width;
+    clean_height_ = height;
+    delta.ok = true;
+    if (!delta.full) {
+        delta.rect = rect;
     }
-
-    const std::size_t output_size =
-        static_cast<std::size_t>(options.width) * static_cast<std::size_t>(options.height) * 4;
-    std::vector<std::uint8_t> output(output_size, 0xff);
-    if (previous_rgba != nullptr) {
-        if (previous_rgba->size() != output_size) {
-            throw std::invalid_argument("previous ASPEED frame buffer size does not match dimensions");
-        }
-        output = *previous_rgba;
-    }
-
-    decode_rgba_into(options, compressed, output);
-
-    return output;
+    return delta;
 }
 
-void AspeedDecoder::decode_rgba_into(
+void AspeedDecoder::reset()
+{
+    clean_rgba_.clear();
+    clean_width_ = 0;
+    clean_height_ = 0;
+}
+
+void AspeedDecoder::decode_into(
     const AspeedDecodeOptions& options,
     const std::vector<std::uint8_t>& compressed,
     std::span<std::uint8_t> output_rgba,

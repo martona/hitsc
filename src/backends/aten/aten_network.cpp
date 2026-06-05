@@ -761,10 +761,9 @@ private:
         static_frame_count_ = 0; // a real (different) frame -- resume full-rate polling
 
         blank_screen_packets_ = 0;
-        AtenCompressedFrame frame;
+        AspeedCompressedFrame frame;
         frame.width = rect.width;
         frame.height = rect.height;
-        frame.update_number = updates_;
         frame.decode_options = make_aten_aspeed_decode_options(rect.width, rect.height, ast);
         frame.compressed.assign(payload.begin() + 4, payload.end());
         frame.received_at = std::chrono::steady_clock::now();

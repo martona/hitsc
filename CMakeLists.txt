@@ -59,6 +59,7 @@ add_executable(
   src/backends/aten/aten_view.cpp
   src/backends/aspeed/aspeed_decoder.cpp
   src/backends/aspeed/aspeed_presenter.cpp
+  src/backends/aspeed/aspeed_view.cpp
   src/bmc_session.cpp
   src/cert_prompt.cpp
   src/cert_prompt.hpp

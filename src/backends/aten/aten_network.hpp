@@ -1,5 +1,7 @@
 #pragma once
 
+#include "backends/aspeed/aspeed_view_state.hpp"
+
 #include "aten_protocol.hpp"
 #include "hardware_cursor.hpp"
 #include "options.hpp"
@@ -13,21 +15,7 @@
 
 namespace hitsc {
 
-struct AtenCompressedFrame {
-    int width = 0;
-    int height = 0;
-    std::uint64_t sequence = 0;
-    int update_number = 0;
-    AspeedDecodeOptions decode_options;
-    std::vector<std::uint8_t> compressed;
-    std::chrono::steady_clock::time_point received_at;
-    std::chrono::steady_clock::time_point published_at;
-    std::size_t websocket_bytes = 0;
-};
-
-struct AtenViewState : ViewStateBase {
-    FrameQueue<AtenCompressedFrame> frames; // differential stream: never drop
-    LatestMailbox<HardwareCursor> cursors;
+struct AtenViewState : AspeedViewState {
     InputQueue<std::vector<std::uint8_t>> input;
 };
 

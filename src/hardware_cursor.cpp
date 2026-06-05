@@ -127,7 +127,7 @@ std::optional<MegaracHardwareCursor> parse_hardware_cursor_packet(
 
 CursorImage make_cursor_image(
     const HardwareCursor& cursor,
-    const std::vector<std::uint8_t>& framebuffer,
+    std::span<const std::uint8_t> framebuffer,
     int frame_width,
     int frame_height)
 {
