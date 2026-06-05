@@ -202,12 +202,18 @@ private:
             g_aten_full_framebuffer_refresh_requested.store(true);
         }
 
+        bool updated = false;
         if (recomposite && !hosted_clean_rgba_.empty()) {
             if (QImage composed = compose_hosted_frame(); !composed.isNull()) {
                 hosted_frame_ = std::move(composed);
+                updated = true;
             }
         }
-        if (hosted_frame_.isNull()) {
+        // Only hand the surface a frame when we actually produced a NEW one this
+        // tick. Returning the cached image every tick made the host re-push it,
+        // which re-ran the format-convert + full GPU upload of an unchanged frame
+        // ~60x/s. nullopt => the surface keeps its texture and re-draws it for free.
+        if (!updated) {
             return std::nullopt;
         }
         return hosted_frame_;
@@ -224,11 +230,11 @@ private:
         return std::nullopt;
     }
 
-    // Delta-decode the ASPEED frame into hosted_clean_rgba_ (the seed for the
-    // next delta): decode_rgba seeds from the previous clean frame, or from white
-    // when dimensions change / on the first frame. The cursor is composited later
-    // in compose_hosted_frame so the seed never carries the sprite. Returns false
-    // on bad dimensions or decode failure. The decoder is stateless.
+    // Delta-decode the ASPEED frame IN PLACE into hosted_clean_rgba_ (the seed for
+    // the next delta): SKIP blocks keep the previous bytes, changed blocks overwrite;
+    // the buffer is seeded white on the first frame / a resolution change. The cursor
+    // is composited later in compose_hosted_frame so the seed never carries the
+    // sprite. Returns false on bad dimensions or decode failure. The decoder is stateless.
     bool decode_hosted_frame(const AtenCompressedFrame& frame)
     {
         if (frame.width <= 0 || frame.height <= 0) {
@@ -238,11 +244,18 @@ private:
         const bool reuse_previous = hosted_clean_width_ == frame.width
             && hosted_clean_height_ == frame.height
             && hosted_clean_rgba_.size() == size;
+        if (!reuse_previous) {
+            // First frame / resolution change: seed the delta buffer white so SKIP
+            // blocks have something to keep.
+            hosted_clean_rgba_.assign(size, 0xff);
+        }
+        // Decode IN PLACE into the persistent delta buffer (SKIP blocks leave their
+        // bytes, changed blocks overwrite) -- avoids decode_rgba's wasted full-buffer
+        // 0xff fill + full copy of the previous frame (~2 full-frame writes/frame).
+        // decode_rgba_into validates before writing, so a bad frame throws without
+        // half-updating the buffer.
         try {
-            hosted_clean_rgba_ = hosted_decoder_.decode_rgba(
-                frame.decode_options,
-                frame.compressed,
-                reuse_previous ? &hosted_clean_rgba_ : nullptr);
+            hosted_decoder_.decode_rgba_into(frame.decode_options, frame.compressed, hosted_clean_rgba_);
         } catch (...) {
             return false;
         }
@@ -251,8 +264,8 @@ private:
         return true;
     }
 
-    // Copy the clean frame into a fresh RGBX8888 QImage and blend the BMC cursor
-    // sprite on top (SourceOver via the sprite's straight alpha; the RGBX
+    // Copy the clean frame into a fresh RGBA8888 QImage and blend the BMC cursor
+    // sprite on top (SourceOver via the sprite's straight alpha; the
     // destination stays opaque). We must not paint into hosted_clean_rgba_ — it is
     // the delta seed for the next frame. The sprite goes at (cursor.x, cursor.y):
     // make_cursor_image already bakes the pattern x/y_offset into the sampled
@@ -260,7 +273,7 @@ private:
     QImage compose_hosted_frame() const
     {
         const std::size_t size = aspeed_frame_rgba_size(hosted_clean_width_, hosted_clean_height_);
-        QImage image(hosted_clean_width_, hosted_clean_height_, QImage::Format_RGBX8888);
+        QImage image(hosted_clean_width_, hosted_clean_height_, QImage::Format_RGBA8888);
         if (hosted_clean_rgba_.size() != size
             || static_cast<std::size_t>(image.bytesPerLine()) * static_cast<std::size_t>(hosted_clean_height_) != size) {
             return {};

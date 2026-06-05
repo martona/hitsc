@@ -267,12 +267,18 @@ private:
                 MegaracInputWork{kCmdGetFullScreen, make_simple_packet(kCmdGetFullScreen, 1)});
         }
 
+        bool updated = false;
         if (recomposite && !hosted_clean_rgba_.empty()) {
             if (QImage composed = compose_hosted_frame(); !composed.isNull()) {
                 hosted_frame_ = std::move(composed);
+                updated = true;
             }
         }
-        if (hosted_frame_.isNull()) {
+        // Only hand the surface a frame when we actually produced a NEW one this
+        // tick. Returning the cached image every tick made the host re-push it,
+        // which re-ran the format-convert + full GPU upload of an unchanged frame
+        // ~60x/s. nullopt => the surface keeps its texture and re-draws it for free.
+        if (!updated) {
             return std::nullopt;
         }
         return hosted_frame_;
@@ -301,11 +307,18 @@ private:
         const bool reuse_previous = hosted_clean_width_ == frame.width
             && hosted_clean_height_ == frame.height
             && hosted_clean_rgba_.size() == size;
+        if (!reuse_previous) {
+            // First frame / resolution change: seed the delta buffer white so SKIP
+            // blocks have something to keep.
+            hosted_clean_rgba_.assign(size, 0xff);
+        }
+        // Decode IN PLACE into the persistent delta buffer (SKIP blocks leave their
+        // bytes, changed blocks overwrite) -- avoids decode_rgba's wasted full-buffer
+        // 0xff fill + full copy of the previous frame (~2 full-frame writes/frame).
+        // decode_rgba_into validates before writing, so a bad frame throws without
+        // half-updating the buffer.
         try {
-            hosted_clean_rgba_ = hosted_decoder_.decode_rgba(
-                frame.decode_options,
-                frame.compressed,
-                reuse_previous ? &hosted_clean_rgba_ : nullptr);
+            hosted_decoder_.decode_rgba_into(frame.decode_options, frame.compressed, hosted_clean_rgba_);
         } catch (...) {
             return false;
         }
@@ -317,7 +330,7 @@ private:
     QImage compose_hosted_frame() const
     {
         const std::size_t size = aspeed_frame_rgba_size(hosted_clean_width_, hosted_clean_height_);
-        QImage image(hosted_clean_width_, hosted_clean_height_, QImage::Format_RGBX8888);
+        QImage image(hosted_clean_width_, hosted_clean_height_, QImage::Format_RGBA8888);
         if (hosted_clean_rgba_.size() != size
             || static_cast<std::size_t>(image.bytesPerLine()) * static_cast<std::size_t>(hosted_clean_height_) != size) {
             return {};
