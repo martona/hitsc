@@ -5,6 +5,7 @@
 #include "view_status.hpp"
 
 #include <QImage>
+#include <QRect>
 
 #include <atomic>
 #include <cstdint>
@@ -236,6 +237,10 @@ struct CursorOverlay {
 struct SoftwareFrame {
     std::optional<QImage> base;
     std::optional<CursorOverlay> cursor;
+    // When base is set: the sub-region of base that changed, so the surface can
+    // patch only that rectangle into its persistent texture. Absent => upload the
+    // whole base (first frame, resolution change, or a resync after frames dropped).
+    std::optional<QRect> dirty;
 };
 
 class KvmViewBase {

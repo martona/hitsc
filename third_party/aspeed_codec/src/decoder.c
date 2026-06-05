@@ -107,6 +107,11 @@ int g_aspeed_termination;           // 0=FRAME_END_CODE, 1=runaway guard, 2=ran 
 int g_aspeed_final_mbx;
 int g_aspeed_final_mby;
 int g_aspeed_bad_selector;          // a quant selector fell outside the 0..11 range
+// Pixel-space bounding box of the macroblocks actually written this frame, for a
+// partial GPU texture upload. Accumulated in YUVToRGB / YUVToRGBPass2 (every pixel
+// write funnels through those), reset per frame in DecodeBuffer. Empty when
+// x1 <= x0 || y1 <= y0 (no blocks written, e.g. a frame that is just FRAME_END).
+int g_aspeed_dirty_x0, g_aspeed_dirty_y0, g_aspeed_dirty_x1, g_aspeed_dirty_y1;
 
 static void InitBuffer()
 {
@@ -639,6 +644,14 @@ static void YUVToRGB(
             pos += width;
         }
     }
+
+    // Grow the per-frame dirty bbox by this block's clamped pixel extent.
+    if (tmp_x > 0 && tmp_y > 0) {
+        if (pixel_x < g_aspeed_dirty_x0) g_aspeed_dirty_x0 = pixel_x;
+        if (pixel_y < g_aspeed_dirty_y0) g_aspeed_dirty_y0 = pixel_y;
+        if (pixel_x + tmp_x > g_aspeed_dirty_x1) g_aspeed_dirty_x1 = pixel_x + tmp_x;
+        if (pixel_y + tmp_y > g_aspeed_dirty_y1) g_aspeed_dirty_y1 = pixel_y + tmp_y;
+    }
 }
 
 static void YUVToRGBPass2(
@@ -682,6 +695,14 @@ static void YUVToRGBPass2(
             pByte[n].R = rlimit_tbl[Y_tbl[y] + Cr2R_tbl[cr]];
         }
         pos += width;
+    }
+
+    // Grow the per-frame dirty bbox by this block's clamped pixel extent.
+    if (tmp_x > 0 && tmp_y > 0) {
+        if (pixel_x < g_aspeed_dirty_x0) g_aspeed_dirty_x0 = pixel_x;
+        if (pixel_y < g_aspeed_dirty_y0) g_aspeed_dirty_y0 = pixel_y;
+        if (pixel_x + tmp_x > g_aspeed_dirty_x1) g_aspeed_dirty_x1 = pixel_x + tmp_x;
+        if (pixel_y + tmp_y > g_aspeed_dirty_y1) g_aspeed_dirty_y1 = pixel_y + tmp_y;
     }
 }
 
@@ -1073,6 +1094,12 @@ static void DecodeBuffer(int len, BYTE *out_buf)
     g_aspeed_termination = 2;
     g_aspeed_final_mbx = 0;
     g_aspeed_final_mby = 0;
+    // Empty-sentinel: min starts at the far edge, max at the near edge, so the
+    // first written block collapses it to a real box (and none leaves it empty).
+    g_aspeed_dirty_x0 = (int)width;
+    g_aspeed_dirty_y0 = (int)height;
+    g_aspeed_dirty_x1 = 0;
+    g_aspeed_dirty_y1 = 0;
 
     do {
         if (++iterations > max_iterations) {

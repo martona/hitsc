@@ -10,6 +10,7 @@
 #include "view_input.hpp"
 
 #include <QImage>
+#include <QRect>
 
 #include <atomic>
 #include <cstdint>
@@ -168,7 +169,6 @@ private:
         state_->cursors.clear();
         state_->input.clear();
         input_.reset();
-        hosted_frame_ = QImage();
         hosted_clean_rgba_.clear();
         hosted_clean_width_ = 0;
         hosted_clean_height_ = 0;
@@ -218,27 +218,50 @@ private:
         // frame in arrival order. Skipping any (as the old latest-wins mailbox
         // did) corrupts the SKIP/PASS2 delta chain until the next full refresh.
         bool base_changed = false;
+        bool dirty_full = false;
+        QRect dirty_rect;  // empty until a frame reports a partial change
         const std::vector<std::shared_ptr<const AtenCompressedFrame>> frames =
             state_->frames.drain();
         for (const std::shared_ptr<const AtenCompressedFrame>& frame : frames) {
             hosted_last_sequence_ = frame->sequence;
-            if (decode_hosted_frame(*frame)) {
-                frame_presented(frame->width, frame->height);
-                base_changed = true;
+            const DecodedDelta delta = decode_hosted_frame(*frame);
+            if (!delta.ok) {
+                continue;
+            }
+            frame_presented(frame->width, frame->height);
+            base_changed = true;
+            if (delta.full) {
+                dirty_full = true;  // first frame / resolution change => whole frame
+            } else {
+                dirty_rect = dirty_rect.united(delta.rect);
             }
         }
         if (state_->frames.overflowed()) {
             // Fell too far behind to preserve the delta chain; request a full
-            // framebuffer refresh to resync instead of accumulating garbage.
+            // framebuffer refresh to resync instead of accumulating garbage. The
+            // dropped frames also break the dirty-rect chain, so force a full upload.
             g_aten_full_framebuffer_refresh_requested.store(true);
+            dirty_full = true;
         }
 
         SoftwareFrame out;
-        if (base_changed && !hosted_clean_rgba_.empty()) {
-            if (QImage base = make_base_image(); !base.isNull()) {
-                hosted_frame_ = base;
-                out.base = std::move(base);
-            }
+        // A successful decode with an empty dirty rect is a no-op delta (e.g. a
+        // frame that is just FRAME_END): nothing to upload, so skip the base.
+        const bool nothing_to_draw = base_changed && !dirty_full && dirty_rect.isEmpty();
+        if (base_changed && !nothing_to_draw && hosted_clean_width_ > 0 && hosted_clean_height_ > 0
+            && hosted_clean_rgba_.size()
+                == aspeed_frame_rgba_size(hosted_clean_width_, hosted_clean_height_)) {
+            // Zero-copy: hand the surface a non-owning wrap of the persistent clean
+            // buffer (no per-frame alloc or memcpy). Safe because decode and render
+            // are serialized on the main thread, and the buffer only reallocs on a
+            // resolution change -- which sets dirty_full and recreates the texture
+            // anyway. The surface drops this wrap when it leaves video (show_console).
+            out.base = QImage(
+                reinterpret_cast<const uchar*>(hosted_clean_rgba_.data()),
+                hosted_clean_width_,
+                hosted_clean_height_,
+                QImage::Format_RGBA8888);
+            out.dirty = dirty_full ? std::optional<QRect>{} : std::optional<QRect>{dirty_rect};
         }
         // Rebuild the cursor sprite when it moved OR when the video under it
         // changed: type-non-1 XOR cursors invert the pixels beneath them, so a
@@ -273,21 +296,26 @@ private:
         if (hosted_clean_width_ > 0 && hosted_clean_height_ > 0) {
             return std::make_pair(hosted_clean_width_, hosted_clean_height_);
         }
-        if (!hosted_frame_.isNull()) {
-            return std::make_pair(hosted_frame_.width(), hosted_frame_.height());
-        }
         return std::nullopt;
     }
+
+    // The outcome of decoding one queued frame into hosted_clean_rgba_.
+    struct DecodedDelta {
+        bool ok = false;     // decode succeeded (false => skip this frame)
+        bool full = false;   // whole frame is new (first frame / resolution change)
+        QRect rect;          // else: the region that changed (empty => no-op delta)
+    };
 
     // Delta-decode the ASPEED frame IN PLACE into hosted_clean_rgba_ (the seed for
     // the next delta): SKIP blocks keep the previous bytes, changed blocks overwrite;
     // the buffer is seeded white on the first frame / a resolution change. The cursor
     // is composited later as a separate GPU overlay quad so the seed never carries
-    // the sprite. Returns false on bad dimensions or decode failure. The decoder is stateless.
-    bool decode_hosted_frame(const AtenCompressedFrame& frame)
+    // the sprite. ok=false on bad dimensions or decode failure. The decoder is stateless.
+    DecodedDelta decode_hosted_frame(const AtenCompressedFrame& frame)
     {
+        DecodedDelta delta;
         if (frame.width <= 0 || frame.height <= 0) {
-            return false;
+            return delta;
         }
         const std::size_t size = aspeed_frame_rgba_size(frame.width, frame.height);
         const bool reuse_previous = hosted_clean_width_ == frame.width
@@ -295,39 +323,29 @@ private:
             && hosted_clean_rgba_.size() == size;
         if (!reuse_previous) {
             // First frame / resolution change: seed the delta buffer white so SKIP
-            // blocks have something to keep.
+            // blocks have something to keep, and force a full upload.
             hosted_clean_rgba_.assign(size, 0xff);
+            delta.full = true;
         }
         // Decode IN PLACE into the persistent delta buffer (SKIP blocks leave their
         // bytes, changed blocks overwrite) -- avoids decode_rgba's wasted full-buffer
         // 0xff fill + full copy of the previous frame (~2 full-frame writes/frame).
         // decode_rgba_into validates before writing, so a bad frame throws without
         // half-updating the buffer.
+        AspeedDirtyRect rect;
         try {
-            hosted_decoder_.decode_rgba_into(frame.decode_options, frame.compressed, hosted_clean_rgba_);
+            hosted_decoder_.decode_rgba_into(
+                frame.decode_options, frame.compressed, hosted_clean_rgba_, &rect);
         } catch (...) {
-            return false;
+            return delta;  // ok stays false
         }
         hosted_clean_width_ = frame.width;
         hosted_clean_height_ = frame.height;
-        return true;
-    }
-
-    // Copy the cursor-free clean frame into a fresh RGBA8888 QImage for upload as
-    // the base texture. We must NOT bake the cursor in here -- it is composited as
-    // a separate GPU quad, and hosted_clean_rgba_ is the delta seed for the next
-    // frame (it must never carry the sprite). The data is already opaque, so
-    // Format_RGBA8888 lets the surface upload it with no format conversion.
-    QImage make_base_image() const
-    {
-        const std::size_t size = aspeed_frame_rgba_size(hosted_clean_width_, hosted_clean_height_);
-        QImage image(hosted_clean_width_, hosted_clean_height_, QImage::Format_RGBA8888);
-        if (hosted_clean_rgba_.size() != size
-            || static_cast<std::size_t>(image.bytesPerLine()) * static_cast<std::size_t>(hosted_clean_height_) != size) {
-            return {};
+        delta.ok = true;
+        if (!delta.full && rect.valid) {
+            delta.rect = QRect(rect.x, rect.y, rect.w, rect.h);
         }
-        std::memcpy(image.bits(), hosted_clean_rgba_.data(), size);
-        return image;
+        return delta;
     }
 
     // Build the cursor sprite for the GPU overlay. make_cursor_image bakes the
@@ -361,7 +379,6 @@ private:
     std::shared_ptr<AtenViewState> state_;
     AtenInputEncoder encoder_;
     KvmInputController input_;
-    QImage hosted_frame_;                          // last base frame (cursor is a separate GPU overlay)
     std::vector<std::uint8_t> hosted_clean_rgba_;  // clean decoded RGBA; delta seed (no cursor)
     int hosted_clean_width_ = 0;
     int hosted_clean_height_ = 0;

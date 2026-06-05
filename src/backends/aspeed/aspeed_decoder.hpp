@@ -25,6 +25,17 @@ struct AspeedDecodeOptions {
     int source_height = 0;
 };
 
+// Pixel-space bounding box of the macroblocks a decode actually rewrote, for a
+// partial GPU texture upload. valid == false => no blocks were written this frame
+// (a no-op delta); callers should treat that as "nothing changed".
+struct AspeedDirtyRect {
+    int x = 0;
+    int y = 0;
+    int w = 0;
+    int h = 0;
+    bool valid = false;
+};
+
 class AspeedDecoder {
 public:
     AspeedDecoder();
@@ -34,10 +45,13 @@ public:
         const std::vector<std::uint8_t>& compressed,
         const std::vector<std::uint8_t>* previous_rgba = nullptr);
 
+    // Decode the delta in place into output_rgba. When dirty != nullptr it receives
+    // the bounding box of the pixels written this frame (valid == false if none).
     void decode_rgba_into(
         const AspeedDecodeOptions& options,
         const std::vector<std::uint8_t>& compressed,
-        std::span<std::uint8_t> output_rgba);
+        std::span<std::uint8_t> output_rgba,
+        AspeedDirtyRect* dirty = nullptr);
 };
 
 } // namespace hitsc

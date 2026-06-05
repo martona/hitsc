@@ -41,6 +41,12 @@ void decode_ext(
     unsigned advance_chroma_selector,
     unsigned mapping);
 
+// Always present: the wrapper reads these in release to drive partial uploads.
+extern int g_aspeed_dirty_x0;
+extern int g_aspeed_dirty_y0;
+extern int g_aspeed_dirty_x1;
+extern int g_aspeed_dirty_y1;
+
 #ifdef HITSC_ASPEED_DEBUG
 extern int g_aspeed_block_code_counts[16];
 extern int g_aspeed_iterations;
@@ -105,7 +111,8 @@ std::vector<std::uint8_t> AspeedDecoder::decode_rgba(
 void AspeedDecoder::decode_rgba_into(
     const AspeedDecodeOptions& options,
     const std::vector<std::uint8_t>& compressed,
-    std::span<std::uint8_t> output_rgba)
+    std::span<std::uint8_t> output_rgba,
+    AspeedDirtyRect* dirty)
 {
     if (options.width <= 0 || options.height <= 0) {
         throw std::invalid_argument("ASPEED frame has invalid dimensions");
@@ -150,6 +157,22 @@ void AspeedDecoder::decode_rgba_into(
         options.advance_table_selector,
         advance_chroma_selector,
         options.yuv_table_mapping);
+
+    // Still holding g_aspeed_decode_mutex: read the dirty bbox the decoder just
+    // accumulated before another decode can clobber the globals.
+    if (dirty != nullptr) {
+        if (g_aspeed_dirty_x1 > g_aspeed_dirty_x0 && g_aspeed_dirty_y1 > g_aspeed_dirty_y0) {
+            *dirty = AspeedDirtyRect{
+                g_aspeed_dirty_x0,
+                g_aspeed_dirty_y0,
+                g_aspeed_dirty_x1 - g_aspeed_dirty_x0,
+                g_aspeed_dirty_y1 - g_aspeed_dirty_y0,
+                true,
+            };
+        } else {
+            *dirty = AspeedDirtyRect{};
+        }
+    }
 
 #ifdef HITSC_ASPEED_DEBUG
     {

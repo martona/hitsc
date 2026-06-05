@@ -205,7 +205,7 @@ int run_viewer(const ViewerLaunch& launch, const std::function<void(ViewerHost&)
                 // framebuffer; a cursor-only change just moves/reuploads the tiny
                 // sprite quad. Either may be absent when only the other changed.
                 if (frame->base) {
-                    surface->show_frame(*frame->base);
+                    surface->show_frame(*frame->base, frame->dirty);
                 }
                 if (frame->cursor) {
 #ifdef HITSC_DEBUG_HW_CURSOR_HIDE

@@ -16,6 +16,10 @@
 #include <mutex>
 #include <optional>
 
+#ifdef HITSC_DEBUG_DIRTY_RECT
+#include <cstdio>
+#endif
+
 #ifdef _WIN32
 #include <windows.h>
 #include <d3d11.h>
@@ -119,6 +123,26 @@ ViewerSurface::ViewerSurface(QWidget* parent)
 
 ViewerSurface::~ViewerSurface()
 {
+#ifdef HITSC_DEBUG_DIRTY_RECT
+    const std::uint64_t total = dbg_uploads_full_ + dbg_uploads_partial_;
+    if (total > 0) {
+        const double pct_full =
+            100.0 * static_cast<double>(dbg_uploads_full_) / static_cast<double>(total);
+        const double mean_area = dbg_uploads_partial_ > 0
+            ? 100.0 * dbg_partial_area_sum_ / static_cast<double>(dbg_uploads_partial_)
+            : 0.0;
+        std::fprintf(
+            stderr,
+            "[dirty-rect] %llu uploads: %llu partial / %llu full (%.1f%% full); "
+            "mean partial area %.1f%% (peak %.1f%%)\n",
+            static_cast<unsigned long long>(total),
+            static_cast<unsigned long long>(dbg_uploads_partial_),
+            static_cast<unsigned long long>(dbg_uploads_full_),
+            pct_full,
+            mean_area,
+            100.0 * dbg_partial_area_peak_);
+    }
+#endif
     release_nv12_resources();
 }
 
@@ -130,18 +154,40 @@ void ViewerSurface::show_console(const ConsoleScreen& screen)
     // (video -> console -> video) never flashes the previous session's cursor over
     // the first new frame. The next session re-sends its cursor when one arrives.
     cursor_active_ = false;
+    // image_ may be a non-owning wrap of the view's decode buffer; drop it now that
+    // we're leaving video so a torn-down view never leaves us a dangling pointer.
+    // (render_console_to_image rebuilds image_ as an owning QImage.)
+    image_ = QImage();
+    image_dirty_ = false;
+    image_dirty_full_ = false;
+    image_dirty_rect_ = QRect();
     console_ = screen;
     console_rendered_size_ = QSize();
     update();
 }
 
-void ViewerSurface::show_frame(const QImage& frame)
+void ViewerSurface::show_frame(const QImage& frame, std::optional<QRect> dirty)
 {
     hardware_active_ = false;
     console_active_ = false;
-    image_ = frame.format() == QImage::Format_RGBA8888
-                 ? frame
-                 : frame.convertToFormat(QImage::Format_RGBA8888);
+    const QImage rgba = frame.format() == QImage::Format_RGBA8888
+                            ? frame
+                            : frame.convertToFormat(QImage::Format_RGBA8888);
+
+    // Coalesce with any upload still pending from an earlier call this frame: a size
+    // change or any full (nullopt/empty) request forces a full upload; two partials
+    // union. image_ always becomes the latest pixels regardless.
+    const bool had_pending = image_dirty_;
+    const bool size_changed = had_pending && rgba.size() != image_.size();
+    image_ = rgba;
+    if (!dirty || dirty->isEmpty() || size_changed || (had_pending && image_dirty_full_)) {
+        image_dirty_full_ = true;
+    } else if (!had_pending) {
+        image_dirty_full_ = false;
+        image_dirty_rect_ = *dirty;
+    } else {
+        image_dirty_rect_ = image_dirty_rect_.united(*dirty);
+    }
     image_dirty_ = true;
     update();
 }
@@ -198,6 +244,7 @@ void ViewerSurface::render_console_to_image()
 
     image_ = image;
     image_dirty_ = true;
+    image_dirty_full_ = true;  // a freshly painted full image; never a partial patch
     console_rendered_size_ = logical;
 }
 
@@ -379,6 +426,7 @@ void ViewerSurface::render_image(QRhiCommandBuffer* cb)
     QRhiResourceUpdateBatch* batch = rhi_->nextResourceUpdateBatch();
 
     if (image_dirty_ && !image_.isNull()) {
+        bool must_full = image_dirty_full_;
         if (texture_size_ != image_.size()) {
             texture_.reset(rhi_->newTexture(QRhiTexture::RGBA8, image_.size()));
             texture_->create();
@@ -388,9 +436,44 @@ void ViewerSurface::render_image(QRhiCommandBuffer* cb)
                     0, QRhiShaderResourceBinding::FragmentStage, texture_.get(), sampler_.get()),
             });
             bindings_->create();
+            must_full = true;  // fresh texture has no prior contents to patch onto
         }
-        batch->uploadTexture(texture_.get(), image_);
+        if (must_full) {
+            batch->uploadTexture(texture_.get(), image_);
+        } else {
+            // Patch only the changed rectangle into the persistent texture. Source
+            // and destination top-left are the same frame-pixel point: QRhi reads
+            // that sub-rect of image_ and writes it in place over the prior frame.
+            const QRect r = image_dirty_rect_.intersected(QRect(QPoint(0, 0), image_.size()));
+            if (!r.isEmpty()) {
+                QRhiTextureSubresourceUploadDescription desc(image_);
+                desc.setSourceTopLeft(r.topLeft());
+                desc.setSourceSize(r.size());
+                desc.setDestinationTopLeft(r.topLeft());
+                const QRhiTextureUploadEntry entry(0, 0, desc);
+                batch->uploadTexture(texture_.get(), QRhiTextureUploadDescription(entry));
+            }
+        }
+#ifdef HITSC_DEBUG_DIRTY_RECT
+        if (must_full) {
+            ++dbg_uploads_full_;
+        } else {
+            ++dbg_uploads_partial_;
+            const double frame_px =
+                static_cast<double>(image_.width()) * static_cast<double>(image_.height());
+            const QRect r = image_dirty_rect_.intersected(QRect(QPoint(0, 0), image_.size()));
+            const double frac = frame_px > 0.0
+                ? static_cast<double>(r.width()) * static_cast<double>(r.height()) / frame_px
+                : 0.0;
+            dbg_partial_area_sum_ += frac;
+            if (frac > dbg_partial_area_peak_) {
+                dbg_partial_area_peak_ = frac;
+            }
+        }
+#endif
         image_dirty_ = false;
+        image_dirty_full_ = false;
+        image_dirty_rect_ = QRect();
     }
 
     const bool have_image =

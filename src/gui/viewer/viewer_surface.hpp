@@ -1,13 +1,20 @@
 #pragma once
 
+// Diagnostic toggle: uncomment to print a one-line dirty-rect upload summary
+// (partial vs full counts, mean/peak partial area) when the surface is destroyed.
+// Leave commented for normal builds.
+#define HITSC_DEBUG_DIRTY_RECT 1
+
 #include "console_screen.hpp"    // ConsoleScreen / ConsoleSeverity
 #include "view_input_types.hpp"  // KvmPointer*, KvmMouseButton, HardwareVideoFrame
 
 #include <QImage>
 #include <QPoint>
+#include <QRect>
 #include <QRhiWidget>
 #include <QSize>
 
+#include <cstdint>
 #include <memory>
 #include <optional>
 
@@ -42,7 +49,12 @@ public:
     ~ViewerSurface() override;
 
     void show_console(const ConsoleScreen& screen);
-    void show_frame(const QImage& frame);                  // software / RGBA video (base, no cursor)
+    // Software / RGBA video base. dirty (if set) is the sub-region of frame that
+    // changed since the last call, patched into the persistent texture; absent =>
+    // upload the whole frame. The QImage may be a non-owning wrap of the decoder's
+    // buffer (zero-copy), so it must stay valid until the next render -- guaranteed
+    // because show_frame and render run on the same (main) thread.
+    void show_frame(const QImage& frame, std::optional<QRect> dirty = std::nullopt);
     void show_hardware_frame(const HardwareVideoFrame& frame);  // NV12 zero-copy
 
     // Set/move/hide the BMC hardware-cursor overlay (drawn as a separate blended
@@ -103,6 +115,8 @@ private:
     QSize texture_size_;
     QImage image_;
     bool image_dirty_ = false;
+    bool image_dirty_full_ = false;  // pending upload must cover the whole frame
+    QRect image_dirty_rect_;         // else: accumulated changed region (frame pixels)
     bool console_active_ = true;
     ConsoleScreen console_;
     QSize console_rendered_size_;
@@ -129,6 +143,14 @@ private:
     QSize nv12_size_;
     std::optional<HardwareVideoFrame> hardware_frame_;
     bool hardware_active_ = false;
+
+#ifdef HITSC_DEBUG_DIRTY_RECT
+    // One-line upload-efficiency summary, printed in the destructor.
+    std::uint64_t dbg_uploads_full_ = 0;
+    std::uint64_t dbg_uploads_partial_ = 0;
+    double dbg_partial_area_sum_ = 0.0;   // sum of (dirty px / frame px)
+    double dbg_partial_area_peak_ = 0.0;
+#endif
 };
 
 } // namespace hitsc
