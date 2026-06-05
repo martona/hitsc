@@ -143,6 +143,17 @@ private:
         return &input_;
     }
 
+    std::optional<std::pair<int, int>> hosted_input_resolution() override
+    {
+        // Host resolution from the RFB ServerInit, available before any video frame.
+        const int w = state_->host_input_width.load(std::memory_order_relaxed);
+        const int h = state_->host_input_height.load(std::memory_order_relaxed);
+        if (w > 0 && h > 0) {
+            return std::make_pair(w, h);
+        }
+        return std::nullopt;
+    }
+
     void request_full_refresh() override
     {
         g_aten_full_framebuffer_refresh_requested.store(true);

@@ -174,7 +174,15 @@ void KvmViewBase::hosted_start_network()
     // reset() does not touch the geometry source.)
     if (KvmInputController* controller = hosted_input_controller()) {
         controller->set_frame_geometry_source([this]() -> std::optional<FrameGeometry> {
-            const std::optional<std::pair<int, int>> size = latest_frame_size();
+            std::optional<std::pair<int, int>> size = latest_frame_size();
+            if (!size) {
+                // No decoded frame yet: fall back to the backend's reported/default
+                // resolution so pointer input still maps and reaches the host. This is
+                // what lets a mouse move wake a display-asleep host (the JS client maps
+                // against its ServerInit resolution the same way). Real frame dims take
+                // over via latest_frame_size() as soon as video arrives.
+                size = hosted_input_resolution();
+            }
             if (!size || hosted_surface_w_ <= 0 || hosted_surface_h_ <= 0) {
                 return std::nullopt;
             }

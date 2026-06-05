@@ -488,6 +488,14 @@ private:
         return &input_;
     }
 
+    std::optional<std::pair<int, int>> hosted_input_resolution() override
+    {
+        // Fallback so pointer input maps (and can wake a sleeping host) even if no
+        // frame has arrived. Normally pikvm's retained last-frame dims cover this;
+        // this is the belt-and-suspenders default. Real frame dims override it.
+        return std::make_pair(1920, 1080);
+    }
+
     std::optional<SoftwareFrame> latest_frame() override
     {
         const std::shared_ptr<const PikvmVideoFrame> frame =

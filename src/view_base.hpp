@@ -273,6 +273,11 @@ public:
     virtual std::optional<SoftwareFrame> latest_frame() { return std::nullopt; }
     // Cheap current-frame dimensions for hosted pointer mapping (no conversion).
     virtual std::optional<std::pair<int, int>> latest_frame_size() { return std::nullopt; }
+    // Resolution to assume for pointer mapping when NO video frame has decoded yet
+    // (e.g. the host display is asleep at connect). Lets a mouse move still map and
+    // reach the host, waking it -- the way the JS client does. latest_frame_size()
+    // overrides this the instant real video arrives. Default: none (mouse stays gated).
+    virtual std::optional<std::pair<int, int>> hosted_input_resolution() { return std::nullopt; }
 
     // Zero-copy hardware path (pikvm D3D11VA). The surface hands its QRhi
     // ID3D11Device via set_rhi_d3d11_device once RHI is up; latest_hardware_frame

@@ -1107,6 +1107,13 @@ void run_aten_network_session(
     rfb.write(std::vector<std::uint8_t>{options.shared ? 1U : 0U});
     const bool insyde_extension = security_type == 15 || security_type == 16;
     const AtenRfbServerInit init = read_server_init(rfb, insyde_extension);
+    // Publish the host resolution so pointer input can map (and thus wake a sleeping
+    // host) before any video frame decodes. Height first, width last: a reader that
+    // sees width > 0 also sees height. Video frame dims override this once they arrive.
+    if (init.width > 0 && init.height > 0) {
+        state.host_input_height.store(init.height, std::memory_order_relaxed);
+        state.host_input_width.store(init.width, std::memory_order_relaxed);
+    }
     if (options.login.verbose) {
         log_info() << "aten rfb server-init"
                    << " size=" << init.width << 'x' << init.height

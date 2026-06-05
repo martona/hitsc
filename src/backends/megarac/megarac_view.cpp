@@ -193,6 +193,14 @@ private:
         return &input_;
     }
 
+    std::optional<std::pair<int, int>> hosted_input_resolution() override
+    {
+        // MegaRAC reports resolution only inside the video stream, so before any frame
+        // we assume a default purely so pointer input flows and can wake a display-
+        // asleep host. Real frame dims override this the instant video arrives.
+        return std::make_pair(800, 600);
+    }
+
     void request_full_refresh() override
     {
         state_->input.enqueue(
