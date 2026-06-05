@@ -5,6 +5,7 @@
 #include "console_screen.hpp"
 #include "gui/launcher_host_store.hpp"
 #include "gui/screen_geometry.hpp"
+#include "gui/viewer/main_thread_sampler.hpp"
 #include "gui/viewer/viewer_surface.hpp"
 #include "gui/viewer/viewer_window.hpp"
 #include "view_base.hpp"
@@ -254,6 +255,9 @@ int run_viewer(const ViewerLaunch& launch, const std::function<void(ViewerHost&)
     window.show();
     surface->setFocus();
 
+    // No-op unless HITSC_DEBUG_MAIN_SAMPLER is defined. Constructed on the main
+    // thread so it profiles THIS thread (the Qt UI thread) across the event loop.
+    MainThreadSampler main_thread_sampler;
     const int code = app->exec();
 
     cancel_pending_cert_prompt();

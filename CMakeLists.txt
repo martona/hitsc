@@ -124,6 +124,8 @@ add_executable(
   src/gui/viewer/viewer_window.hpp
   src/gui/viewer/qt_viewer_host.cpp
   src/gui/viewer/qt_viewer_host.hpp
+  src/gui/viewer/main_thread_sampler.cpp
+  src/gui/viewer/main_thread_sampler.hpp
   src/view_input.cpp
   src/view_input.hpp
   src/view_status.cpp
