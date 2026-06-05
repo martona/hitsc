@@ -824,22 +824,24 @@ private:
             cursor_pattern_width_ = hardware_cursor.pattern_width;
             cursor_pattern_height_ = hardware_cursor.pattern_height;
         }
-        const HardwareCursor cursor_for_log = hardware_cursor;
-        state_.cursors.publish(std::move(hardware_cursor));
-
+        // Log before publishing (reads hardware_cursor in place) so we don't deep-
+        // copy the whole struct incl. its pattern on every packet for a line that is
+        // off unless vverbose.
         if (options_.login.vverbose) {
             LogLine line = log_info();
             line << "ATEN cursor"
                  << " xy=" << cursor.x << ',' << cursor.y
                  << " size=" << cursor.width << 'x' << cursor.height
                  << " valid=" << cursor.valid
-                 << " render-visible=" << cursor_for_log.visible
-                 << " render-size=" << cursor_for_log.width << 'x' << cursor_for_log.height;
+                 << " render-visible=" << hardware_cursor.visible
+                 << " render-size=" << hardware_cursor.width << 'x' << hardware_cursor.height;
             if (cursor.valid == 1) {
                 line << " pattern-type=" << cursor.pattern_type
                      << " pattern-bytes=" << cursor.pattern_size;
             }
         }
+
+        state_.cursors.publish(std::move(hardware_cursor));
     }
 
     void log_stats_if_due()

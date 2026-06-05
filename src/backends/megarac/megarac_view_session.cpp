@@ -675,19 +675,22 @@ private:
         if (cursor->pattern_from_packet) {
             cursor_pattern_ = cursor->pattern;
         }
-        const SharedCursor cursor_for_log = *cursor;
-        state_.cursors.publish(std::move(*cursor));
 
+        // Log before publishing so the cursor can be read in place -- no need to
+        // deep-copy the whole struct (incl. its up-to-8 KB pattern vector) on every
+        // packet just for a line that is off unless vverbose.
         if (options_.login.vverbose) {
             log_info() << "hardware cursor"
-                       << " type=" << cursor_for_log.type
-                       << " x=" << cursor_for_log.x
-                       << " y=" << cursor_for_log.y
-                       << " offset=" << cursor_for_log.x_offset << ',' << cursor_for_log.y_offset
-                       << " size=" << cursor_for_log.width << 'x' << cursor_for_log.height
-                       << " pattern=" << (cursor_for_log.has_pattern ? "yes" : "no")
-                       << " checksum=0x" << std::hex << cursor_for_log.checksum << std::dec;
+                       << " type=" << cursor->type
+                       << " x=" << cursor->x
+                       << " y=" << cursor->y
+                       << " offset=" << cursor->x_offset << ',' << cursor->y_offset
+                       << " size=" << cursor->width << 'x' << cursor->height
+                       << " pattern=" << (cursor->has_pattern ? "yes" : "no")
+                       << " checksum=0x" << std::hex << cursor->checksum << std::dec;
         }
+
+        state_.cursors.publish(std::move(*cursor));
     }
 
     void handle_video_packet(const KvmPacket& packet)

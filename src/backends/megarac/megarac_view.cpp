@@ -11,7 +11,6 @@
 #include "view_input.hpp"
 
 #include <QImage>
-#include <QPainter>
 
 #include <atomic>
 #include <cstddef>
@@ -34,6 +33,35 @@ namespace {
 
 constexpr std::uint16_t kCmdSendHidPacket = command_value(MegaracCommand::SendHidPacket);
 constexpr std::uint16_t kCmdGetFullScreen = command_value(MegaracCommand::GetFullScreen);
+
+#ifdef HITSC_DEBUG_HW_CURSOR
+// Debug: true if the sprite carries real cursor content (any pixel-to-pixel
+// variation), false if it is a uniform blob / fully transparent. Distinguishes a
+// live hardware cursor from a degenerate/blank one in the title diagnostic.
+bool cursor_sprite_has_variation(const QImage& sprite)
+{
+    if (sprite.isNull()) {
+        return false;
+    }
+    const QImage rgba = sprite.format() == QImage::Format_RGBA8888
+        ? sprite
+        : sprite.convertToFormat(QImage::Format_RGBA8888);
+    bool seen = false;
+    std::uint32_t first = 0;
+    for (int y = 0; y < rgba.height(); ++y) {
+        const auto* row = reinterpret_cast<const std::uint32_t*>(rgba.constScanLine(y));
+        for (int x = 0; x < rgba.width(); ++x) {
+            if (!seen) {
+                first = row[x];
+                seen = true;
+            } else if (row[x] != first) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+#endif
 
 std::optional<std::uint8_t> keyboard_modifier_bit(KvmScancode scancode)
 {
@@ -225,24 +253,27 @@ private:
         return &input_;
     }
 
-    std::optional<QImage> latest_frame_image() override
+    std::optional<SoftwareFrame> latest_frame() override
     {
-        bool recomposite = false;
-
+#ifdef HITSC_DEBUG_HW_CURSOR
+        const std::uint64_t debug_cursor_seq_before = hosted_cursor_sequence_;
+#endif
         // BMC hardware-cursor packets arrive faster than video frames; cache the
         // latest cursor so the sprite tracks at tick rate, not frame rate.
+        bool cursor_changed = false;
         if (const std::shared_ptr<const HardwareCursor> cursor =
                 state_->cursors.latest(hosted_cursor_sequence_)) {
             hosted_cursor_ = *cursor;
             hosted_cursor_sequence_ = cursor->sequence;
             has_hosted_cursor_ = true;
-            recomposite = true;
+            cursor_changed = true;
         }
 
         // ASPEED is a differential stream (see FrameQueue): decode EVERY queued
         // frame in arrival order. Skipping any (as the old latest-wins mailbox
         // did) corrupts the SKIP/PASS2 delta chain until the next keyframe — the
         // root cause of the fast-host garbling.
+        bool base_changed = false;
         const std::vector<std::shared_ptr<const MegaracCompressedFrame>> frames =
             state_->frames.drain();
 #ifdef HITSC_MEGARAC_FRAME_DEBUG
@@ -257,7 +288,7 @@ private:
             if (decode_hosted_frame(*frame)) {
                 frame_presented(frame->width, frame->height);
                 state_->video_feedback_presented_frames.fetch_add(1, std::memory_order_relaxed);
-                recomposite = true;
+                base_changed = true;
             }
         }
         if (state_->frames.overflowed()) {
@@ -267,21 +298,39 @@ private:
                 MegaracInputWork{kCmdGetFullScreen, make_simple_packet(kCmdGetFullScreen, 1)});
         }
 
-        bool updated = false;
-        if (recomposite && !hosted_clean_rgba_.empty()) {
-            if (QImage composed = compose_hosted_frame(); !composed.isNull()) {
-                hosted_frame_ = std::move(composed);
-                updated = true;
+        SoftwareFrame out;
+        if (base_changed && !hosted_clean_rgba_.empty()) {
+            if (QImage base = make_base_image(); !base.isNull()) {
+                hosted_frame_ = base;
+                out.base = std::move(base);
             }
         }
-        // Only hand the surface a frame when we actually produced a NEW one this
-        // tick. Returning the cached image every tick made the host re-push it,
-        // which re-ran the format-convert + full GPU upload of an unchanged frame
-        // ~60x/s. nullopt => the surface keeps its texture and re-draws it for free.
-        if (!updated) {
+        // Rebuild the cursor sprite when it moved OR when the video under it
+        // changed: type-non-1 XOR cursors invert the pixels beneath them, so a
+        // base change must re-bake the sprite even if the cursor stayed put. The
+        // large base texture stays decoupled -- only the tiny sprite re-uploads.
+        if ((cursor_changed || base_changed) && has_hosted_cursor_) {
+            out.cursor = build_cursor_overlay();
+        }
+
+#ifdef HITSC_DEBUG_HW_CURSOR
+        {
+            const unsigned debug_packets =
+                static_cast<unsigned>(hosted_cursor_sequence_ - debug_cursor_seq_before);
+            const bool debug_valid = out.cursor && !out.cursor->sprite.isNull()
+                && cursor_sprite_has_variation(out.cursor->sprite);
+            state_->view_status.debug_cursor_tick(
+                debug_packets, debug_valid, hosted_cursor_.width, hosted_cursor_.height,
+                hosted_cursor_.x, hosted_cursor_.y, hosted_cursor_.type);
+        }
+#endif
+
+        // nullopt when nothing changed this tick => the surface re-draws its
+        // existing base + cursor textures for free (no convert, no upload).
+        if (!out.base && !out.cursor) {
             return std::nullopt;
         }
-        return hosted_frame_;
+        return out;
     }
 
     std::optional<std::pair<int, int>> latest_frame_size() override
@@ -295,9 +344,9 @@ private:
         return std::nullopt;
     }
 
-    // See AtenView::decode_hosted_frame / compose_hosted_frame. Delta-decode into
-    // hosted_clean_rgba_ (the cursor-free delta seed); the BMC cursor is blended
-    // on top later so the seed never carries the sprite.
+    // See AtenView::decode_hosted_frame / make_base_image. Delta-decode into
+    // hosted_clean_rgba_ (the cursor-free delta seed); the BMC cursor is composited
+    // later as a separate GPU overlay quad so the seed never carries the sprite.
     bool decode_hosted_frame(const MegaracCompressedFrame& frame)
     {
         if (frame.width <= 0 || frame.height <= 0) {
@@ -327,7 +376,10 @@ private:
         return true;
     }
 
-    QImage compose_hosted_frame() const
+    // Copy the cursor-free clean frame into a fresh RGBA8888 QImage for upload as
+    // the base texture (no cursor baked in -- it is a separate GPU overlay quad,
+    // and hosted_clean_rgba_ is the delta seed for the next frame).
+    QImage make_base_image() const
     {
         const std::size_t size = aspeed_frame_rgba_size(hosted_clean_width_, hosted_clean_height_);
         QImage image(hosted_clean_width_, hosted_clean_height_, QImage::Format_RGBA8888);
@@ -336,28 +388,40 @@ private:
             return {};
         }
         std::memcpy(image.bits(), hosted_clean_rgba_.data(), size);
-
-        if (has_hosted_cursor_ && hosted_cursor_.visible) {
-            const CursorImage cursor_image = make_cursor_image(
-                hosted_cursor_, hosted_clean_rgba_, hosted_clean_width_, hosted_clean_height_);
-            if (!cursor_image.rgba.empty() && cursor_image.width > 0 && cursor_image.height > 0) {
-                const QImage sprite(
-                    reinterpret_cast<const uchar*>(cursor_image.rgba.data()),
-                    cursor_image.width,
-                    cursor_image.height,
-                    QImage::Format_RGBA8888);
-                QPainter painter(&image);
-                painter.drawImage(QPoint(hosted_cursor_.x, hosted_cursor_.y), sprite);
-            }
-        }
         return image;
+    }
+
+    // Build the cursor sprite for the GPU overlay. make_cursor_image bakes the
+    // pattern x/y_offset into the sampled sprite (top-left maps to cursor.x/y); for
+    // XOR cursors it reads hosted_clean_rgba_ to invert the background, so this is
+    // rebuilt whenever the base changes. A null sprite => hide.
+    CursorOverlay build_cursor_overlay() const
+    {
+        CursorOverlay overlay;
+        overlay.x = hosted_cursor_.x;
+        overlay.y = hosted_cursor_.y;
+        if (!hosted_cursor_.visible) {
+            return overlay;  // empty sprite => hide
+        }
+        const CursorImage cursor_image = make_cursor_image(
+            hosted_cursor_, hosted_clean_rgba_, hosted_clean_width_, hosted_clean_height_);
+        if (cursor_image.rgba.empty() || cursor_image.width <= 0 || cursor_image.height <= 0) {
+            return overlay;  // nothing to show => hide
+        }
+        const QImage wrapped(
+            reinterpret_cast<const uchar*>(cursor_image.rgba.data()),
+            cursor_image.width,
+            cursor_image.height,
+            QImage::Format_RGBA8888);
+        overlay.sprite = wrapped.copy();  // own the bytes (cursor_image is a local)
+        return overlay;
     }
 
     MegaracViewOptions options_;
     std::shared_ptr<MegaracViewSessionState> state_;
     MegaracInputEncoder encoder_;
     KvmInputController input_;
-    QImage hosted_frame_;                          // displayed: clean frame + BMC cursor
+    QImage hosted_frame_;                          // last base frame (cursor is a separate GPU overlay)
     std::vector<std::uint8_t> hosted_clean_rgba_;  // clean decoded RGBA; delta seed (no cursor)
     int hosted_clean_width_ = 0;
     int hosted_clean_height_ = 0;

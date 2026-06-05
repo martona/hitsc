@@ -199,8 +199,22 @@ int run_viewer(const ViewerLaunch& launch, const std::function<void(ViewerHost&)
                 surface->show_console(*console);
             } else if (const std::optional<HardwareVideoFrame> hw = view->latest_hardware_frame()) {
                 surface->show_hardware_frame(*hw);
-            } else if (const std::optional<QImage> frame = view->latest_frame_image()) {
-                surface->show_frame(*frame);
+            } else if (const std::optional<SoftwareFrame> frame = view->latest_frame()) {
+                // base and cursor update independently: a new base re-uploads the
+                // framebuffer; a cursor-only change just moves/reuploads the tiny
+                // sprite quad. Either may be absent when only the other changed.
+                if (frame->base) {
+                    surface->show_frame(*frame->base);
+                }
+                if (frame->cursor) {
+#ifdef HITSC_DEBUG_HW_CURSOR_HIDE
+                    // Overlay suppressed: if a cursor still appears on screen, it's
+                    // baked into the BMC's JPEG video rather than drawn by us.
+                    surface->update_cursor(QImage(), 0, 0);
+#else
+                    surface->update_cursor(frame->cursor->sprite, frame->cursor->x, frame->cursor->y);
+#endif
+                }
             }
             const QString title = QString::fromStdString(view->hosted_title());
             if (title != last_title) {

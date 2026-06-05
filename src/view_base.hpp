@@ -217,6 +217,27 @@ private:
     std::thread thread_;
 };
 
+// A cursor sprite to overlay on the video, in base-frame pixel coordinates. The
+// software backends (ASPEED hardware cursor) build it; the surface draws it as a
+// SEPARATE blended GPU quad so cursor motion never re-uploads the (large) base
+// frame. A null/empty sprite means "hide the cursor".
+struct CursorOverlay {
+    QImage sprite;  // RGBA8888, straight (non-premultiplied) alpha; empty => hide
+    int x = 0;      // sprite top-left, in base-frame pixels
+    int y = 0;
+};
+
+// One view tick's software output. Each field is independent:
+//   base   set => a newly composited base frame to upload (nullopt => unchanged)
+//   cursor set => the cursor moved / changed shape / was hidden (nullopt => unchanged)
+// The surface retains whichever field is absent. latest_frame() returns nullopt
+// outright when BOTH are unchanged, so an idle stream re-draws existing textures
+// for free (no convert, no upload).
+struct SoftwareFrame {
+    std::optional<QImage> base;
+    std::optional<CursorOverlay> cursor;
+};
+
 class KvmViewBase {
 public:
     KvmViewBase(
@@ -242,9 +263,9 @@ public:
     std::string hosted_title() const;
 
     // What the surface should display now: a console screen, or nullopt meaning
-    // "show the latest video frame" via latest_frame_image().
+    // "show the latest video frame" via latest_frame().
     std::optional<ConsoleScreen> hosted_console_screen() const;
-    virtual std::optional<QImage> latest_frame_image() { return std::nullopt; }
+    virtual std::optional<SoftwareFrame> latest_frame() { return std::nullopt; }
     // Cheap current-frame dimensions for hosted pointer mapping (no conversion).
     virtual std::optional<std::pair<int, int>> latest_frame_size() { return std::nullopt; }
 

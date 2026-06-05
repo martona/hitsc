@@ -10,7 +10,6 @@
 #include "view_input.hpp"
 
 #include <QImage>
-#include <QPainter>
 
 #include <atomic>
 #include <cstdint>
@@ -27,6 +26,35 @@ namespace hitsc {
 extern std::atomic_bool g_aten_full_framebuffer_refresh_requested;
 
 namespace {
+
+#ifdef HITSC_DEBUG_HW_CURSOR
+// Debug: true if the sprite carries real cursor content (any pixel-to-pixel
+// variation), false if it is a uniform blob / fully transparent. Distinguishes a
+// live hardware cursor from a degenerate/blank one in the title diagnostic.
+bool cursor_sprite_has_variation(const QImage& sprite)
+{
+    if (sprite.isNull()) {
+        return false;
+    }
+    const QImage rgba = sprite.format() == QImage::Format_RGBA8888
+        ? sprite
+        : sprite.convertToFormat(QImage::Format_RGBA8888);
+    bool seen = false;
+    std::uint32_t first = 0;
+    for (int y = 0; y < rgba.height(); ++y) {
+        const auto* row = reinterpret_cast<const std::uint32_t*>(rgba.constScanLine(y));
+        for (int x = 0; x < rgba.width(); ++x) {
+            if (!seen) {
+                first = row[x];
+                seen = true;
+            } else if (row[x] != first) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+#endif
 
 std::optional<std::uint32_t> aten_keyboard_usage_from_scancode(KvmScancode scancode)
 {
@@ -170,30 +198,33 @@ private:
         return &input_;
     }
 
-    std::optional<QImage> latest_frame_image() override
+    std::optional<SoftwareFrame> latest_frame() override
     {
-        bool recomposite = false;
-
+#ifdef HITSC_DEBUG_HW_CURSOR
+        const std::uint64_t debug_cursor_seq_before = hosted_cursor_sequence_;
+#endif
         // BMC hardware-cursor packets arrive faster than video frames; cache the
         // latest cursor so the sprite tracks at tick rate, not frame rate.
+        bool cursor_changed = false;
         if (const std::shared_ptr<const HardwareCursor> cursor =
                 state_->cursors.latest(hosted_cursor_sequence_)) {
             hosted_cursor_ = *cursor;
             hosted_cursor_sequence_ = cursor->sequence;
             has_hosted_cursor_ = true;
-            recomposite = true;
+            cursor_changed = true;
         }
 
         // ASPEED is a differential stream (see FrameQueue): decode EVERY queued
         // frame in arrival order. Skipping any (as the old latest-wins mailbox
         // did) corrupts the SKIP/PASS2 delta chain until the next full refresh.
+        bool base_changed = false;
         const std::vector<std::shared_ptr<const AtenCompressedFrame>> frames =
             state_->frames.drain();
         for (const std::shared_ptr<const AtenCompressedFrame>& frame : frames) {
             hosted_last_sequence_ = frame->sequence;
             if (decode_hosted_frame(*frame)) {
                 frame_presented(frame->width, frame->height);
-                recomposite = true;
+                base_changed = true;
             }
         }
         if (state_->frames.overflowed()) {
@@ -202,21 +233,39 @@ private:
             g_aten_full_framebuffer_refresh_requested.store(true);
         }
 
-        bool updated = false;
-        if (recomposite && !hosted_clean_rgba_.empty()) {
-            if (QImage composed = compose_hosted_frame(); !composed.isNull()) {
-                hosted_frame_ = std::move(composed);
-                updated = true;
+        SoftwareFrame out;
+        if (base_changed && !hosted_clean_rgba_.empty()) {
+            if (QImage base = make_base_image(); !base.isNull()) {
+                hosted_frame_ = base;
+                out.base = std::move(base);
             }
         }
-        // Only hand the surface a frame when we actually produced a NEW one this
-        // tick. Returning the cached image every tick made the host re-push it,
-        // which re-ran the format-convert + full GPU upload of an unchanged frame
-        // ~60x/s. nullopt => the surface keeps its texture and re-draws it for free.
-        if (!updated) {
+        // Rebuild the cursor sprite when it moved OR when the video under it
+        // changed: type-non-1 XOR cursors invert the pixels beneath them, so a
+        // base change must re-bake the sprite even if the cursor stayed put. The
+        // large base texture stays decoupled -- only the tiny sprite re-uploads.
+        if ((cursor_changed || base_changed) && has_hosted_cursor_) {
+            out.cursor = build_cursor_overlay();
+        }
+
+#ifdef HITSC_DEBUG_HW_CURSOR
+        {
+            const unsigned debug_packets =
+                static_cast<unsigned>(hosted_cursor_sequence_ - debug_cursor_seq_before);
+            const bool debug_valid = out.cursor && !out.cursor->sprite.isNull()
+                && cursor_sprite_has_variation(out.cursor->sprite);
+            state_->view_status.debug_cursor_tick(
+                debug_packets, debug_valid, hosted_cursor_.width, hosted_cursor_.height,
+                hosted_cursor_.x, hosted_cursor_.y, hosted_cursor_.type);
+        }
+#endif
+
+        // nullopt when nothing changed this tick => the surface re-draws its
+        // existing base + cursor textures for free (no convert, no upload).
+        if (!out.base && !out.cursor) {
             return std::nullopt;
         }
-        return hosted_frame_;
+        return out;
     }
 
     std::optional<std::pair<int, int>> latest_frame_size() override
@@ -233,8 +282,8 @@ private:
     // Delta-decode the ASPEED frame IN PLACE into hosted_clean_rgba_ (the seed for
     // the next delta): SKIP blocks keep the previous bytes, changed blocks overwrite;
     // the buffer is seeded white on the first frame / a resolution change. The cursor
-    // is composited later in compose_hosted_frame so the seed never carries the
-    // sprite. Returns false on bad dimensions or decode failure. The decoder is stateless.
+    // is composited later as a separate GPU overlay quad so the seed never carries
+    // the sprite. Returns false on bad dimensions or decode failure. The decoder is stateless.
     bool decode_hosted_frame(const AtenCompressedFrame& frame)
     {
         if (frame.width <= 0 || frame.height <= 0) {
@@ -264,13 +313,12 @@ private:
         return true;
     }
 
-    // Copy the clean frame into a fresh RGBA8888 QImage and blend the BMC cursor
-    // sprite on top (SourceOver via the sprite's straight alpha; the
-    // destination stays opaque). We must not paint into hosted_clean_rgba_ — it is
-    // the delta seed for the next frame. The sprite goes at (cursor.x, cursor.y):
-    // make_cursor_image already bakes the pattern x/y_offset into the sampled
-    // sprite, so its top-left maps to (cursor.x, cursor.y).
-    QImage compose_hosted_frame() const
+    // Copy the cursor-free clean frame into a fresh RGBA8888 QImage for upload as
+    // the base texture. We must NOT bake the cursor in here -- it is composited as
+    // a separate GPU quad, and hosted_clean_rgba_ is the delta seed for the next
+    // frame (it must never carry the sprite). The data is already opaque, so
+    // Format_RGBA8888 lets the surface upload it with no format conversion.
+    QImage make_base_image() const
     {
         const std::size_t size = aspeed_frame_rgba_size(hosted_clean_width_, hosted_clean_height_);
         QImage image(hosted_clean_width_, hosted_clean_height_, QImage::Format_RGBA8888);
@@ -279,28 +327,41 @@ private:
             return {};
         }
         std::memcpy(image.bits(), hosted_clean_rgba_.data(), size);
-
-        if (has_hosted_cursor_ && hosted_cursor_.visible) {
-            const CursorImage cursor_image = make_cursor_image(
-                hosted_cursor_, hosted_clean_rgba_, hosted_clean_width_, hosted_clean_height_);
-            if (!cursor_image.rgba.empty() && cursor_image.width > 0 && cursor_image.height > 0) {
-                const QImage sprite(
-                    reinterpret_cast<const uchar*>(cursor_image.rgba.data()),
-                    cursor_image.width,
-                    cursor_image.height,
-                    QImage::Format_RGBA8888);
-                QPainter painter(&image);
-                painter.drawImage(QPoint(hosted_cursor_.x, hosted_cursor_.y), sprite);
-            }
-        }
         return image;
+    }
+
+    // Build the cursor sprite for the GPU overlay. make_cursor_image bakes the
+    // pattern x/y_offset into the sampled sprite, so its top-left maps to
+    // (cursor.x, cursor.y). type-non-1 XOR cursors read hosted_clean_rgba_ to
+    // invert the background, which is why latest_frame() rebuilds this whenever the
+    // base changes. A null sprite (CursorOverlay default) tells the surface to hide.
+    CursorOverlay build_cursor_overlay() const
+    {
+        CursorOverlay overlay;
+        overlay.x = hosted_cursor_.x;
+        overlay.y = hosted_cursor_.y;
+        if (!hosted_cursor_.visible) {
+            return overlay;  // empty sprite => hide
+        }
+        const CursorImage cursor_image = make_cursor_image(
+            hosted_cursor_, hosted_clean_rgba_, hosted_clean_width_, hosted_clean_height_);
+        if (cursor_image.rgba.empty() || cursor_image.width <= 0 || cursor_image.height <= 0) {
+            return overlay;  // nothing to show => hide
+        }
+        const QImage wrapped(
+            reinterpret_cast<const uchar*>(cursor_image.rgba.data()),
+            cursor_image.width,
+            cursor_image.height,
+            QImage::Format_RGBA8888);
+        overlay.sprite = wrapped.copy();  // own the bytes (cursor_image is a local)
+        return overlay;
     }
 
     AtenViewOptions options_;
     std::shared_ptr<AtenViewState> state_;
     AtenInputEncoder encoder_;
     KvmInputController input_;
-    QImage hosted_frame_;                          // displayed: clean frame + BMC cursor
+    QImage hosted_frame_;                          // last base frame (cursor is a separate GPU overlay)
     std::vector<std::uint8_t> hosted_clean_rgba_;  // clean decoded RGBA; delta seed (no cursor)
     int hosted_clean_width_ = 0;
     int hosted_clean_height_ = 0;

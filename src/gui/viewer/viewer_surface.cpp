@@ -61,10 +61,22 @@ std::unique_ptr<QRhiGraphicsPipeline> make_quad_pipeline(
     QRhi* rhi,
     QRhiRenderTarget* render_target,
     const QString& frag_qsb,
-    QRhiShaderResourceBindings* bindings)
+    QRhiShaderResourceBindings* bindings,
+    bool blend = false)
 {
     std::unique_ptr<QRhiGraphicsPipeline> pipeline(rhi->newGraphicsPipeline());
     pipeline->setTopology(QRhiGraphicsPipeline::TriangleStrip);
+    if (blend) {
+        // Straight (non-premultiplied) alpha over the opaque base: the cursor
+        // sprite stores real alpha, so src * a + dst * (1 - a).
+        QRhiGraphicsPipeline::TargetBlend target_blend;
+        target_blend.enable = true;
+        target_blend.srcColor = QRhiGraphicsPipeline::SrcAlpha;
+        target_blend.dstColor = QRhiGraphicsPipeline::OneMinusSrcAlpha;
+        target_blend.srcAlpha = QRhiGraphicsPipeline::One;
+        target_blend.dstAlpha = QRhiGraphicsPipeline::OneMinusSrcAlpha;
+        pipeline->setTargetBlends({target_blend});
+    }
     pipeline->setShaderStages({
         {QRhiShaderStage::Vertex, load_shader(QStringLiteral(":/hitsc/shaders/viewer_quad.vert.qsb"))},
         {QRhiShaderStage::Fragment, load_shader(frag_qsb)},
@@ -114,6 +126,10 @@ void ViewerSurface::show_console(const ConsoleScreen& screen)
 {
     hardware_active_ = false;
     console_active_ = true;
+    // The console has no video cursor; drop any retained sprite so a reconnect
+    // (video -> console -> video) never flashes the previous session's cursor over
+    // the first new frame. The next session re-sends its cursor when one arrives.
+    cursor_active_ = false;
     console_ = screen;
     console_rendered_size_ = QSize();
     update();
@@ -135,6 +151,25 @@ void ViewerSurface::show_hardware_frame(const HardwareVideoFrame& frame)
     hardware_active_ = true;
     console_active_ = false;
     hardware_frame_ = frame;
+    update();
+}
+
+void ViewerSurface::update_cursor(const QImage& sprite, int x, int y)
+{
+    if (sprite.isNull()) {
+        // Hide. Keep the texture around (cheap) so a re-show needs no realloc.
+        if (cursor_active_) {
+            cursor_active_ = false;
+            update();
+        }
+        return;
+    }
+    cursor_sprite_ = sprite.format() == QImage::Format_RGBA8888
+                         ? sprite
+                         : sprite.convertToFormat(QImage::Format_RGBA8888);
+    cursor_pos_ = QPoint(x, y);
+    cursor_active_ = true;
+    cursor_texture_dirty_ = true;
     update();
 }
 
@@ -175,6 +210,11 @@ void ViewerSurface::initialize(QRhiCommandBuffer*)
         texture_.reset();
         vertex_buffer_.reset();
         texture_size_ = QSize();
+        cursor_pipeline_.reset();
+        cursor_bindings_.reset();
+        cursor_texture_.reset();
+        cursor_vertex_buffer_.reset();
+        cursor_texture_size_ = QSize();
         release_nv12_resources();
         rhi_ = rhi();
     }
@@ -183,6 +223,12 @@ void ViewerSurface::initialize(QRhiCommandBuffer*)
         vertex_buffer_.reset(rhi_->newBuffer(
             QRhiBuffer::Dynamic, QRhiBuffer::VertexBuffer, 4 * 4 * sizeof(float)));
         vertex_buffer_->create();
+    }
+
+    if (!cursor_vertex_buffer_) {
+        cursor_vertex_buffer_.reset(rhi_->newBuffer(
+            QRhiBuffer::Dynamic, QRhiBuffer::VertexBuffer, 4 * 4 * sizeof(float)));
+        cursor_vertex_buffer_->create();
     }
 
     if (!sampler_) {
@@ -207,6 +253,23 @@ void ViewerSurface::initialize(QRhiCommandBuffer*)
         pipeline_ = make_quad_pipeline(
             rhi_, renderTarget(), QStringLiteral(":/hitsc/shaders/viewer_quad.frag.qsb"),
             bindings_.get());
+    }
+
+    if (!cursor_pipeline_) {
+        cursor_texture_.reset(rhi_->newTexture(QRhiTexture::RGBA8, QSize(1, 1)));
+        cursor_texture_->create();
+        cursor_texture_size_ = QSize(1, 1);
+
+        cursor_bindings_.reset(rhi_->newShaderResourceBindings());
+        cursor_bindings_->setBindings({
+            QRhiShaderResourceBinding::sampledTexture(
+                0, QRhiShaderResourceBinding::FragmentStage, cursor_texture_.get(), sampler_.get()),
+        });
+        cursor_bindings_->create();
+
+        cursor_pipeline_ = make_quad_pipeline(
+            rhi_, renderTarget(), QStringLiteral(":/hitsc/shaders/viewer_cursor.frag.qsb"),
+            cursor_bindings_.get(), /*blend=*/true);
     }
 
     if (!rhi_ready_emitted_) {
@@ -245,6 +308,50 @@ void ViewerSurface::update_quad_geometry(
         ndc_x(x1), ndc_y(y1), 1.0f, 1.0f,  // bottom-right
     };
     batch->updateDynamicBuffer(vertex_buffer_.get(), 0, sizeof(vertices), vertices);
+}
+
+void ViewerSurface::update_cursor_quad_geometry(
+    QRhiResourceUpdateBatch* batch,
+    int image_width,
+    int image_height,
+    int cursor_x,
+    int cursor_y,
+    int cursor_width,
+    int cursor_height)
+{
+    const QSize output = renderTarget()->pixelSize();
+    const float view_w = static_cast<float>(output.width());
+    const float view_h = static_cast<float>(output.height());
+    const float image_w = static_cast<float>(image_width);
+    const float image_h = static_cast<float>(image_height);
+    if (view_w <= 0.0f || view_h <= 0.0f || image_w <= 0.0f || image_h <= 0.0f
+        || cursor_width <= 0 || cursor_height <= 0) {
+        return;
+    }
+
+    // Identical aspect-fit transform to the base quad, then place the cursor's
+    // pixel rect inside the fitted image rect so the sprite tracks the video.
+    const float scale = std::min(view_w / image_w, view_h / image_h);
+    const float base_w = image_w * scale;
+    const float base_h = image_h * scale;
+    const float base_x0 = (view_w - base_w) / 2.0f;
+    const float base_y0 = (view_h - base_h) / 2.0f;
+
+    const float x0 = base_x0 + static_cast<float>(cursor_x) * scale;
+    const float y0 = base_y0 + static_cast<float>(cursor_y) * scale;
+    const float x1 = x0 + static_cast<float>(cursor_width) * scale;
+    const float y1 = y0 + static_cast<float>(cursor_height) * scale;
+
+    const auto ndc_x = [view_w](float px) { return 2.0f * px / view_w - 1.0f; };
+    const auto ndc_y = [view_h](float py) { return 1.0f - 2.0f * py / view_h; };
+
+    const float vertices[16] = {
+        ndc_x(x0), ndc_y(y0), 0.0f, 0.0f,  // top-left
+        ndc_x(x1), ndc_y(y0), 1.0f, 0.0f,  // top-right
+        ndc_x(x0), ndc_y(y1), 0.0f, 1.0f,  // bottom-left
+        ndc_x(x1), ndc_y(y1), 1.0f, 1.0f,  // bottom-right
+    };
+    batch->updateDynamicBuffer(cursor_vertex_buffer_.get(), 0, sizeof(vertices), vertices);
 }
 
 void ViewerSurface::render(QRhiCommandBuffer* cb)
@@ -292,16 +399,51 @@ void ViewerSurface::render_image(QRhiCommandBuffer* cb)
         update_quad_geometry(batch, image_.width(), image_.height());
     }
 
+    // Cursor overlay: only over live video (not the console), and only once we
+    // have a base to anchor it to. The sprite is tiny, so re-uploading it on every
+    // move is cheap -- the point is that the large base texture stays untouched.
+    const bool draw_cursor = have_image && !console_active_ && cursor_active_
+        && cursor_pipeline_ && !cursor_sprite_.isNull();
+    if (draw_cursor) {
+        if (cursor_texture_dirty_) {
+            if (cursor_texture_size_ != cursor_sprite_.size()) {
+                cursor_texture_.reset(rhi_->newTexture(QRhiTexture::RGBA8, cursor_sprite_.size()));
+                cursor_texture_->create();
+                cursor_texture_size_ = cursor_sprite_.size();
+                cursor_bindings_->setBindings({
+                    QRhiShaderResourceBinding::sampledTexture(
+                        0, QRhiShaderResourceBinding::FragmentStage, cursor_texture_.get(),
+                        sampler_.get()),
+                });
+                cursor_bindings_->create();
+            }
+            batch->uploadTexture(cursor_texture_.get(), cursor_sprite_);
+            cursor_texture_dirty_ = false;
+        }
+        update_cursor_quad_geometry(
+            batch, image_.width(), image_.height(), cursor_pos_.x(), cursor_pos_.y(),
+            cursor_sprite_.width(), cursor_sprite_.height());
+    }
+
     const QColor clear(12, 14, 18);
+    const QSize output = renderTarget()->pixelSize();
+    const QRhiViewport viewport(
+        0.0f, 0.0f, static_cast<float>(output.width()), static_cast<float>(output.height()));
     cb->beginPass(renderTarget(), clear, {1.0f, 0}, batch);
     if (have_image) {
-        const QSize output = renderTarget()->pixelSize();
         cb->setGraphicsPipeline(pipeline_.get());
-        cb->setViewport(QRhiViewport(
-            0.0f, 0.0f, static_cast<float>(output.width()), static_cast<float>(output.height())));
+        cb->setViewport(viewport);
         cb->setShaderResources(bindings_.get());
         const QRhiCommandBuffer::VertexInput vertex_input(vertex_buffer_.get(), 0);
         cb->setVertexInput(0, 1, &vertex_input);
+        cb->draw(4);
+    }
+    if (draw_cursor) {
+        cb->setGraphicsPipeline(cursor_pipeline_.get());
+        cb->setViewport(viewport);
+        cb->setShaderResources(cursor_bindings_.get());
+        const QRhiCommandBuffer::VertexInput cursor_input(cursor_vertex_buffer_.get(), 0);
+        cb->setVertexInput(0, 1, &cursor_input);
         cb->draw(4);
     }
     cb->endPass();
@@ -446,6 +588,11 @@ void ViewerSurface::releaseResources()
     texture_.reset();
     vertex_buffer_.reset();
     texture_size_ = QSize();
+    cursor_pipeline_.reset();
+    cursor_bindings_.reset();
+    cursor_texture_.reset();
+    cursor_vertex_buffer_.reset();
+    cursor_texture_size_ = QSize();
     release_nv12_resources();
     rhi_ = nullptr;
 }

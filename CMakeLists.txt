@@ -137,10 +137,12 @@ qt_add_shaders(hitsc "hitsc_viewer_shaders"
   FILES
     src/gui/viewer/viewer_quad.vert
     src/gui/viewer/viewer_quad.frag
+    src/gui/viewer/viewer_cursor.frag
     src/gui/viewer/viewer_nv12.frag
   OUTPUTS
     viewer_quad.vert.qsb
     viewer_quad.frag.qsb
+    viewer_cursor.frag.qsb
     viewer_nv12.frag.qsb
 )
 

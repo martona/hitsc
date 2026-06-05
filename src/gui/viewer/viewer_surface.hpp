@@ -4,6 +4,7 @@
 #include "view_input_types.hpp"  // KvmPointer*, KvmMouseButton, HardwareVideoFrame
 
 #include <QImage>
+#include <QPoint>
 #include <QRhiWidget>
 #include <QSize>
 
@@ -41,8 +42,14 @@ public:
     ~ViewerSurface() override;
 
     void show_console(const ConsoleScreen& screen);
-    void show_frame(const QImage& frame);                  // software / RGBA video
+    void show_frame(const QImage& frame);                  // software / RGBA video (base, no cursor)
     void show_hardware_frame(const HardwareVideoFrame& frame);  // NV12 zero-copy
+
+    // Set/move/hide the BMC hardware-cursor overlay (drawn as a separate blended
+    // quad over the software video base). A null/empty sprite hides it. Position
+    // is the sprite's top-left in base-frame pixels. Only the software backends
+    // (ASPEED) drive this; pikvm/console leave it unset.
+    void update_cursor(const QImage& sprite, int x, int y);
 
     // QRhi's D3D11 device (ID3D11Device*), or null until RHI is initialized. The
     // entry point hands this to the view (for FFmpeg D3D11VA) once rhiReady fires.
@@ -70,6 +77,14 @@ protected:
 private:
     void render_console_to_image();
     void update_quad_geometry(QRhiResourceUpdateBatch* batch, int image_width, int image_height);
+    void update_cursor_quad_geometry(
+        QRhiResourceUpdateBatch* batch,
+        int image_width,
+        int image_height,
+        int cursor_x,
+        int cursor_y,
+        int cursor_width,
+        int cursor_height);
     void render_image(QRhiCommandBuffer* cb);
     void render_hardware(QRhiCommandBuffer* cb);
     void ensure_nv12_resources(int width, int height);
@@ -91,6 +106,19 @@ private:
     bool console_active_ = true;
     ConsoleScreen console_;
     QSize console_rendered_size_;
+
+    // Cursor overlay (software/ASPEED path): a small straight-alpha sprite drawn
+    // as a second, blended quad on top of the base. Decoupled from the base so a
+    // mouse move re-uploads only the tiny sprite, never the full framebuffer.
+    std::unique_ptr<QRhiTexture> cursor_texture_;
+    std::unique_ptr<QRhiShaderResourceBindings> cursor_bindings_;
+    std::unique_ptr<QRhiGraphicsPipeline> cursor_pipeline_;
+    std::unique_ptr<QRhiBuffer> cursor_vertex_buffer_;
+    QSize cursor_texture_size_;
+    QImage cursor_sprite_;
+    QPoint cursor_pos_;
+    bool cursor_active_ = false;    // a visible cursor sprite is set
+    bool cursor_texture_dirty_ = false;
 
     // NV12 zero-copy path (pikvm hardware).
     std::unique_ptr<QRhiTexture> y_texture_;

@@ -488,7 +488,7 @@ private:
         return &input_;
     }
 
-    std::optional<QImage> latest_frame_image() override
+    std::optional<SoftwareFrame> latest_frame() override
     {
         const std::shared_ptr<const PikvmVideoFrame> frame =
             state_->frames.latest(hosted_last_sequence_);
@@ -502,7 +502,11 @@ private:
         if (hosted_frame_.isNull()) {
             return std::nullopt;
         }
-        return hosted_frame_;
+        // pikvm has no separate hardware-cursor overlay (the MJPEG fallback bakes
+        // the cursor into the frame; the normal h264 path uses latest_hardware_frame).
+        SoftwareFrame out;
+        out.base = hosted_frame_;
+        return out;
     }
 
     std::optional<HardwareVideoFrame> latest_hardware_frame() override

@@ -106,6 +106,26 @@ void ViewStatus::minimize()
     fps_ = 0.0;
 }
 
+#ifdef HITSC_DEBUG_HW_CURSOR
+void ViewStatus::debug_cursor_tick(
+    unsigned packets, bool nonuniform_sprite, int width, int height, int x, int y, int type)
+{
+    std::lock_guard lock(mutex_);
+    bucket_cursor_packets_ += packets;
+    if (nonuniform_sprite) {
+        ++bucket_cursor_valid_;
+    }
+    if (packets > 0) {
+        cursor_ever_ = true;
+    }
+    cursor_w_ = width;
+    cursor_h_ = height;
+    cursor_x_ = x;
+    cursor_y_ = y;
+    cursor_type_ = type;
+}
+#endif
+
 ViewRenderState ViewStatus::render_state()
 {
     std::lock_guard lock(mutex_);
@@ -124,6 +144,9 @@ std::string ViewStatus::title(std::string_view hostname)
         << " | " << fps_text()
         << " | " << cpu_text()
         << " | " << state_text();
+#ifdef HITSC_DEBUG_HW_CURSOR
+    out << " | " << hw_cursor_text();
+#endif
     return out.str();
 }
 
@@ -151,11 +174,20 @@ void ViewStatus::update_rates(Clock::time_point now)
                 : 0.0;
         }
         last_cpu_seconds_ = cpu_now;
+
+#ifdef HITSC_DEBUG_HW_CURSOR
+        cursor_pps_ = static_cast<double>(bucket_cursor_packets_) / seconds;
+        cursor_valid_ps_ = static_cast<double>(bucket_cursor_valid_) / seconds;
+#endif
     }
 
     bucket_started_at_ = now;
     bucket_bytes_ = 0;
     bucket_frames_ = 0;
+#ifdef HITSC_DEBUG_HW_CURSOR
+    bucket_cursor_packets_ = 0;
+    bucket_cursor_valid_ = 0;
+#endif
 }
 
 std::string ViewStatus::dimensions_text() const
@@ -185,6 +217,27 @@ std::string ViewStatus::cpu_text() const
     out << std::fixed << std::setprecision(1) << cpu_percent_ << "% cpu";
     return out.str();
 }
+
+#ifdef HITSC_DEBUG_HW_CURSOR
+std::string ViewStatus::hw_cursor_text() const
+{
+    if (!cursor_ever_) {
+        // No hardware-cursor packet has ever arrived -> any cursor on screen is
+        // baked into the JPEG video by the BMC, not drawn by our overlay.
+        return "hwcur none";
+    }
+    std::ostringstream out;
+    out << "hwcur " << std::fixed << std::setprecision(0) << cursor_pps_ << "/s"
+        << " val " << cursor_valid_ps_ << "/s";
+    if (cursor_w_ > 0 && cursor_h_ > 0) {
+        out << ' ' << cursor_w_ << 'x' << cursor_h_ << '@' << cursor_x_ << ',' << cursor_y_;
+    }
+    if (cursor_type_ >= 0) {
+        out << " t" << cursor_type_;
+    }
+    return out.str();
+}
+#endif
 
 std::string ViewStatus::state_text() const
 {
