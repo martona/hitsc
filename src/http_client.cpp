@@ -241,7 +241,20 @@ struct HttpsClient::Impl {
                 return response;
             } catch (const boost_system::system_error& ex) {
                 close_connection();
-                if (reused_connection && !retried && can_retry_reused_request(method)) {
+                // A reused keep-alive connection that the server closed while idle
+                // surfaces as EOF before any response byte (end_of_stream). The request
+                // was never processed, so retrying once is safe even for non-idempotent
+                // methods (e.g. the power POSTs) -- this is the standard stale-keepalive
+                // recovery. Other (mid-exchange) errors stay gated on idempotency.
+                const boost::system::error_code code = ex.code();
+                const bool connection_closed =
+                    code == http::error::end_of_stream ||
+                    code == ssl::error::stream_truncated ||
+                    code == boost::asio::error::eof ||
+                    code == boost::asio::error::connection_reset ||
+                    code == boost::asio::error::broken_pipe;
+                if (reused_connection && !retried &&
+                    (can_retry_reused_request(method) || connection_closed)) {
                     retried = true;
                     if (verbose_) {
                         log_debug() << "https existing connection failed; reconnecting once"
@@ -256,6 +269,15 @@ struct HttpsClient::Impl {
                 throw;
             }
         }
+    }
+
+    void cancel() noexcept
+    {
+        // Thread-safe (io_context::stop may be called from any thread). Unblocks the
+        // synchronous beast op currently pumping io_ -- the in-flight connect / TLS
+        // handshake / write / read returns with operation_aborted, so request()
+        // throws. Not sticky: connect() calls io_.restart() before the next request.
+        io_.stop();
     }
 
 private:
@@ -413,6 +435,13 @@ StringResponse HttpsClient::request(
     const std::vector<Header>& extra_headers)
 {
     return impl_->request(method, target, body, content_type, cookies, extra_headers);
+}
+
+void HttpsClient::cancel() noexcept
+{
+    if (impl_) {
+        impl_->cancel();
+    }
 }
 
 std::string decode_response_body(const StringResponse& response)

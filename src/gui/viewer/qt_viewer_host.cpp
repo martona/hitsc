@@ -63,6 +63,7 @@ public:
         if (view_ != nullptr) {
             view_->set_rhi_d3d11_device(surface_.d3d11_device());
             view_->hosted_start_network();
+            window_.set_power_controller(view_->power_controller());
         }
     }
 
@@ -259,6 +260,9 @@ int run_viewer(const ViewerLaunch& launch, const std::function<void(ViewerHost&)
     // thread so it profiles THIS thread (the Qt UI thread) across the event loop.
     MainThreadSampler main_thread_sampler;
     const int code = app->exec();
+
+    // Unbind the power control before the view (and its controller) is destroyed.
+    window.set_power_controller(nullptr);
 
     cancel_pending_cert_prompt();
     if (KvmViewBase* view = host.view()) {

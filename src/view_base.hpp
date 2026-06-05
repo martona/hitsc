@@ -1,6 +1,7 @@
 #pragma once
 
 #include "console_screen.hpp"
+#include "power_control.hpp"
 #include "view_input_types.hpp"
 #include "view_status.hpp"
 
@@ -35,6 +36,9 @@ public:
 
     std::mutex control_mutex;
     ViewStatus view_status;
+    // Power display/control bridge (GUI <-> network thread). Fed by the backend's
+    // network session; read/driven by the title-bar power widget via PowerController.
+    PowerChannel power;
 
 private:
     std::exception_ptr exception_;
@@ -278,6 +282,10 @@ public:
     // reach the host, waking it -- the way the JS client does. latest_frame_size()
     // overrides this the instant real video arrives. Default: none (mouse stays gated).
     virtual std::optional<std::pair<int, int>> hosted_input_resolution() { return std::nullopt; }
+
+    // Power display/control for this session, or nullptr if unsupported. The viewer
+    // host binds the title-bar power widget to it; the GUI uses only this interface.
+    virtual PowerController* power_controller() { return nullptr; }
 
     // Zero-copy hardware path (pikvm D3D11VA). The surface hands its QRhi
     // ID3D11Device via set_rhi_d3d11_device once RHI is up; latest_hardware_frame

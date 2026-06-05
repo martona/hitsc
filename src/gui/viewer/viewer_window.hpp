@@ -17,6 +17,9 @@ class WidgetWindowAgent;
 
 namespace hitsc {
 
+class PowerController;
+class ToastManager;
+class ViewerPowerControl;
 class ViewerSurface;
 class ViewerTitleBar;
 
@@ -45,6 +48,10 @@ public:
     // Set the caption text (and the OS window title used by the taskbar / Alt-Tab).
     void set_title(const QString& title);
 
+    // Bind the title-bar power control to the attached view's controller (or null to
+    // hide it). Called by the viewer host when a view attaches / detaches.
+    void set_power_controller(PowerController* controller);
+
 signals:
     void keyEvent(const hitsc::KvmKeyEvent& key);  // raw-scancode key (Win32 filter)
     void frameTick();                              // ~16 ms repaint cadence
@@ -61,6 +68,8 @@ private:
 
     QWK::WidgetWindowAgent* window_agent_ = nullptr;
     ViewerTitleBar* title_bar_ = nullptr;
+    ViewerPowerControl* power_control_ = nullptr;
+    ToastManager* toast_manager_ = nullptr;
     ViewerSurface* surface_ = nullptr;
     QTimer* frame_timer_ = nullptr;
     std::unique_ptr<QAbstractNativeEventFilter> key_filter_;

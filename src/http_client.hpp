@@ -48,6 +48,11 @@ public:
         CookieJar* cookies,
         const std::vector<Header>& extra_headers = {});
 
+    // Abort an in-flight request() from ANOTHER thread (io_context::stop is
+    // thread-safe). Used to make a blocking power POST cancelable for instant exit.
+    // Not sticky: the next request() reconnects normally.
+    void cancel() noexcept;
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

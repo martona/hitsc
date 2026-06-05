@@ -27,10 +27,12 @@ public:
         AspeedViewState& state,
         std::string host,
         std::string log_name,
-        std::function<void()> network_cleanup);
+        std::function<void()> network_cleanup,
+        PowerCapabilities power_caps);
 
     std::optional<SoftwareFrame> latest_frame() override;
     std::optional<std::pair<int, int>> latest_frame_size() override;
+    PowerController* power_controller() override;
 
 protected:
     void reset_for_reconnect() override;
@@ -53,6 +55,7 @@ private:
     CursorOverlay build_cursor_overlay() const;
 
     AspeedViewState& aspeed_state_;
+    ViewPowerController power_controller_;
     AspeedDecoder decoder_;
     HardwareCursor hosted_cursor_;
     bool has_hosted_cursor_ = false;

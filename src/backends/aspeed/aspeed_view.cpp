@@ -48,10 +48,17 @@ AspeedView::AspeedView(
     AspeedViewState& state,
     std::string host,
     std::string log_name,
-    std::function<void()> network_cleanup)
+    std::function<void()> network_cleanup,
+    PowerCapabilities power_caps)
     : KvmViewBase(state, std::move(host), std::move(log_name), std::move(network_cleanup))
     , aspeed_state_(state)
+    , power_controller_(power_caps, state.power)
 {
+}
+
+PowerController* AspeedView::power_controller()
+{
+    return &power_controller_;
 }
 
 std::optional<SoftwareFrame> AspeedView::latest_frame()

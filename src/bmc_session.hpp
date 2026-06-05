@@ -115,6 +115,10 @@ public:
     void force_close_websocket(std::string_view role) noexcept;
     void close_all_websockets() noexcept;
 
+    // Abort an in-flight request() from another thread (for instant teardown of a
+    // blocking power POST). Forwards to the underlying HTTPS client.
+    void cancel_in_flight_request() noexcept;
+
     std::size_t cookie_count() const;
     std::string_view session_token() const;
     void set_cookie(std::string name, std::string value);

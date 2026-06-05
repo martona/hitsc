@@ -7,6 +7,7 @@
 #include "megarac_protocol.hpp"
 #include "megarac_session.hpp"
 #include "megarac_video.hpp"
+#include "power_rest_worker.hpp"
 #include "text.hpp"
 
 #include <boost/asio/bind_executor.hpp>
@@ -90,6 +91,18 @@ struct OutgoingPacket {
     std::vector<std::uint8_t> bytes;
     std::string encoded_text;
 };
+
+// MegaRAC web power command codes: POST /api/actions/power {"power_command":N}.
+int megarac_power_command(PowerAction action)
+{
+    switch (action) {
+    case PowerAction::OffHard:     return 0;
+    case PowerAction::On:          return 1;
+    case PowerAction::OffGraceful: return 5;  // ACPI soft-off
+    case PowerAction::Reset:       return 3;  // hard reset
+    }
+    return 1;
+}
 
 std::string json_string_field(const json::object& object, std::string_view name)
 {
@@ -377,6 +390,7 @@ public:
         : io_(io)
         , strand_(asio::make_strand(io))
         , force_close_timer_(io)
+        , power_poll_timer_(io)
         , ws_(std::move(ws))
         , options_(std::move(options))
         , config_(std::move(config))
@@ -589,6 +603,8 @@ private:
         }
 
         state_.view_status.kvm_display_status(true);
+        query_power_status("validated");
+        schedule_power_poll();
     }
 
     void handle_kvm_sharing(const KvmPacket& packet)
@@ -619,6 +635,22 @@ private:
             log_info() << "requested power status"
                        << " reason=" << reason;
         }
+    }
+
+    // Re-arm a ~5s poll of the host power status (cmd 34) so the title-bar indicator
+    // tracks state changes. Matches the vendor UI's 5s chassis-status poll.
+    void schedule_power_poll()
+    {
+        auto self = shared_from_this();
+        power_poll_timer_.expires_after(std::chrono::seconds(5));
+        power_poll_timer_.async_wait(
+            asio::bind_executor(strand_, [self](beast::error_code error) {
+                if (error || self->closed_ || self->stopping_) {
+                    return;
+                }
+                self->query_power_status("poll");
+                self->schedule_power_poll();
+            }));
     }
 
     void request_full_screen_retry(std::string_view reason)
@@ -653,6 +685,7 @@ private:
     void handle_power_status(std::uint16_t status)
     {
         power_status_ = static_cast<int>(status);
+        state_.power.publish_state(status == 1 ? PowerState::On : PowerState::Off);
         if (options_.login.verbose) {
             log_info() << "power status=" << power_status_;
         }
@@ -898,6 +931,7 @@ private:
 
         closed_ = true;
         force_close_timer_.cancel();
+        power_poll_timer_.cancel();
         state_.input.clear();
         state_.set_force_close({});
         discard_queued_packets_preserving_active_write();
@@ -911,6 +945,7 @@ private:
     asio::io_context& io_;
     asio::strand<asio::io_context::executor_type> strand_;
     asio::steady_timer force_close_timer_;
+    asio::steady_timer power_poll_timer_;
     std::shared_ptr<KvmWebSocket> ws_;
     MegaracViewOptions options_;
     KvmConfig config_;
@@ -995,6 +1030,32 @@ void run_megarac_view_session(const MegaracViewOptions& options, MegaracViewSess
                     session->send_packet(work.type, std::move(work.packet));
                 }
             });
+
+        // Power control rides a dedicated, cancelable REST worker (reusing this login)
+        // so a power POST never stalls the video websocket. Joined before logout.
+        auto power_worker = std::make_shared<PowerRestWorker>(
+            session.web,
+            [csrf = std::string(session.web.session_token())](PowerAction action) {
+                PowerRequestSpec spec;
+                spec.method = http::verb::post;
+                spec.target = "/api/actions/power";
+                spec.content_type = "application/json";
+                spec.body = "{\"power_command\":" + std::to_string(megarac_power_command(action)) + "}";
+                if (!csrf.empty()) {
+                    spec.headers.push_back(Header{http::field::unknown, "X-CSRFTOKEN", csrf});
+                }
+                return spec;
+            },
+            [&state](PowerOutcome outcome) {
+                state.power.publish_outcome(std::move(outcome));
+            });
+        std::weak_ptr<PowerRestWorker> weak_power_worker = power_worker;
+        state.power.install([weak_power_worker](PowerAction action) {
+            if (auto worker = weak_power_worker.lock()) {
+                worker->submit(action);
+            }
+        });
+
         state.set_force_close([weak_session] {
             if (auto session = weak_session.lock()) {
                 session->request_stop();

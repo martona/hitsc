@@ -413,6 +413,20 @@ AtenRfbServerInit read_server_init(RfbHandshakeStream& rfb, bool insyde_extensio
     return init;
 }
 
+// Map a UI power action to the SMC type-26 option byte. These are the ATEN applet's
+// own enum (server-rendered, absent from the JS bundle; NOT the IPMI codes),
+// confirmed on live Supermicro hardware.
+std::uint8_t aten_power_option(PowerAction action)
+{
+    switch (action) {
+    case PowerAction::On:          return 1;
+    case PowerAction::OffHard:     return 0;
+    case PowerAction::OffGraceful: return 3;  // ACPI soft-off
+    case PowerAction::Reset:       return 2;  // warm reset
+    }
+    return 1;
+}
+
 class AtenNetworkRfbSession : public std::enable_shared_from_this<AtenNetworkRfbSession> {
 public:
     AtenNetworkRfbSession(
@@ -430,6 +444,7 @@ public:
         , stop_requested_(stop_requested)
         , strand_(asio::make_strand(io))
         , framebuffer_request_timer_(io)
+        , power_poll_timer_(io)
     {
     }
 
@@ -443,6 +458,15 @@ public:
                 }
             });
 
+        state_.power.install(
+            [weak](PowerAction action) mutable {
+                if (auto self = weak.lock()) {
+                    self->send_packet(make_aten_power_action(aten_power_option(action)));
+                    // ATEN power is fire-and-forget (no ack / no status): confirm on send.
+                    self->state_.power.publish_outcome(PowerOutcome{action, true, 0, "sent"});
+                }
+            });
+
         auto self = shared_from_this();
         asio::dispatch(strand_, [self, initial_bytes = std::move(initial_bytes)]() mutable {
             if (self->closed_ || self->stop_requested_.load()) {
@@ -452,6 +476,8 @@ public:
                 self->parser_.append(std::move(initial_bytes));
             }
             self->queue_framebuffer_update_request();
+            self->queue_write(make_aten_get_mouse_mode());  // initial power-status request
+            self->schedule_power_poll();
             if (self->options_.login.vverbose) {
                 log_info() << "requested ATEN framebuffer update";
             }
@@ -625,6 +651,11 @@ private:
             }
             break;
         case AtenRfbMessageKind::mouse_control:
+            // Msg 53/54/55 piggybacks the host power state on its status byte
+            // (status==1 -> on; the JS toggles powerArea1/2 on it). mode is the mouse
+            // mode, unused here since we always send absolute pointer coords.
+            state_.power.publish_state(
+                message.mouse_status == 1 ? PowerState::On : PowerState::Off);
             if (options_.login.vverbose) {
                 log_info() << "aten rfb mouse/control"
                            << " type=" << static_cast<int>(message.type)
@@ -904,6 +935,27 @@ private:
             }));
     }
 
+    // Poll host power status (~5s) by requesting the mouse mode: the server's reply
+    // (msg 53/54/55) carries the power state in its status byte. The BMC does NOT push
+    // this unsolicited, so we must ask. Works regardless of framebuffer backoff state.
+    void schedule_power_poll()
+    {
+        if (closed_ || stop_requested_.load()) {
+            return;
+        }
+        auto self = shared_from_this();
+        power_poll_timer_.expires_after(std::chrono::seconds(5));
+        power_poll_timer_.async_wait(
+            asio::bind_executor(strand_, [self](beast::error_code error) {
+                if (error == boost::asio::error::operation_aborted || self->closed_ ||
+                    self->stop_requested_.load()) {
+                    return;
+                }
+                self->queue_write(make_aten_get_mouse_mode());
+                self->schedule_power_poll();
+            }));
+    }
+
     void queue_framebuffer_update_request()
     {
         if (closed_ || stop_requested_.load() || framebuffer_request_pending_) {
@@ -984,6 +1036,7 @@ private:
         closed_ = true;
         state_.input.clear();
         framebuffer_request_timer_.cancel();
+        power_poll_timer_.cancel();
         parser_.clear();
 
         beast::error_code error;
@@ -1012,6 +1065,7 @@ private:
     std::atomic_bool& stop_requested_;
     asio::strand<asio::io_context::executor_type> strand_;
     asio::steady_timer framebuffer_request_timer_;
+    asio::steady_timer power_poll_timer_;
     beast::flat_buffer read_buffer_;
     AtenRfbMessageBuffer parser_;
     std::deque<AtenQueuedWrite> write_queue_;

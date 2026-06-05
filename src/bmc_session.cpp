@@ -228,6 +228,13 @@ StringResponse BmcWebSession::request(
         headers);
 }
 
+void BmcWebSession::cancel_in_flight_request() noexcept
+{
+    // Thread-safe; aborts a blocking request() running on another thread (the power
+    // worker) so teardown does not wait on a hung POST.
+    client_.cancel();
+}
+
 BmcWebSocketOpenResult BmcWebSession::open_websocket(BmcWebSocketConnectOptions options)
 {
     auto connection = BmcWebSocketConnectionPtr(new BmcWebSocketConnection(options.role));

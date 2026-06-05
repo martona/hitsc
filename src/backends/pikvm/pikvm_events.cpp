@@ -70,6 +70,7 @@ std::string printable_preview(std::string_view value, std::size_t limit = 120)
 struct PikvmJsonEventSummary {
     std::string event_type;
     std::optional<bool> streamer_source_online;
+    std::optional<bool> atx_power_on;
 };
 
 PikvmJsonEventSummary parse_json_event(std::string_view text)
@@ -89,6 +90,15 @@ PikvmJsonEventSummary parse_json_event(std::string_view text)
                 .at("streamer").as_object()
                 .at("source").as_object()
                 .at("online").as_bool();
+        } else if (result.event_type == "atx") {
+            // kvmd's ATX event is "atx" (NOT "atx_state"); power is event.leds.power
+            // (a bool). When ATX is disabled, enabled=false and leds.power is a
+            // meaningless constant -- leave power Unknown in that case.
+            const json::object& event = object.at("event").as_object();
+            const bool enabled = !event.contains("enabled") || event.at("enabled").as_bool();
+            if (enabled) {
+                result.atx_power_on = event.at("leds").as_object().at("power").as_bool();
+            }
         }
     } catch (const std::exception&) {
     }
@@ -105,11 +115,13 @@ public:
         PikvmViewOptions options,
         const std::atomic_bool& stop_requested,
         std::function<void(bool)> on_display_status,
+        std::function<void(bool)> on_power_status,
         std::function<void(std::exception_ptr)> on_error)
         : ws_(std::move(ws))
         , options_(std::move(options))
         , stop_requested_(stop_requested)
         , on_display_status_(std::move(on_display_status))
+        , on_power_status_(std::move(on_power_status))
         , on_error_(std::move(on_error))
         , force_close_timer_(ws_->get_executor())
     {
@@ -195,6 +207,9 @@ private:
             json_summary = parse_json_event(text);
             if (json_summary->streamer_source_online && on_display_status_) {
                 on_display_status_(*json_summary->streamer_source_online);
+            }
+            if (json_summary->atx_power_on && on_power_status_) {
+                on_power_status_(*json_summary->atx_power_on);
             }
         }
 
@@ -315,6 +330,7 @@ private:
     PikvmViewOptions options_;
     const std::atomic_bool& stop_requested_;
     std::function<void(bool)> on_display_status_;
+    std::function<void(bool)> on_power_status_;
     std::function<void(std::exception_ptr)> on_error_;
     asio::steady_timer force_close_timer_;
     beast::flat_buffer read_buffer_;
@@ -340,6 +356,7 @@ std::shared_ptr<PikvmEventSession> start_pikvm_event_session(
     PikvmViewOptions options,
     const std::atomic_bool& stop_requested,
     std::function<void(bool)> on_display_status,
+    std::function<void(bool)> on_power_status,
     std::function<void(std::exception_ptr)> on_error)
 {
     auto session = std::make_shared<PikvmEventSession>(
@@ -347,6 +364,7 @@ std::shared_ptr<PikvmEventSession> start_pikvm_event_session(
         std::move(options),
         stop_requested,
         std::move(on_display_status),
+        std::move(on_power_status),
         std::move(on_error));
     session->start();
     return session;

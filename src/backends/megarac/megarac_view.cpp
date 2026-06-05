@@ -165,7 +165,8 @@ private:
     MegaracView(const MegaracViewOptions& options, std::shared_ptr<MegaracViewSessionState> state)
         : AspeedView(*state, options.login.base_url.host, "megarac", [state] {
               state->input.clear();
-          })
+              state->power.clear();
+          }, default_bmc_power_caps())
         , options_(options)
         , state_(std::move(state))
         , encoder_(*state_)

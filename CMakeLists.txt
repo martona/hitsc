@@ -72,6 +72,9 @@ add_executable(
   src/cookie_jar.cpp
   src/diagnostics.cpp
   src/http_client.cpp
+  src/power_control.hpp
+  src/power_rest_worker.cpp
+  src/power_rest_worker.hpp
   src/gui/child/launcher_child_command.cpp
   src/gui/child/launcher_child_command.hpp
   src/gui/child/launcher_child_process_manager.cpp
@@ -86,6 +89,8 @@ add_executable(
   src/gui/launcher_reachability_probe.cpp
   src/gui/launcher_theme.cpp
   src/gui/launcher_theme.hpp
+  src/gui/toast.cpp
+  src/gui/toast.hpp
   src/gui/launcher_types.cpp
   src/log.cpp
   src/gui/screen_geometry.cpp
@@ -125,6 +130,8 @@ add_executable(
   src/gui/viewer/viewer_surface.hpp
   src/gui/viewer/viewer_window.cpp
   src/gui/viewer/viewer_window.hpp
+  src/gui/viewer/viewer_power_control.cpp
+  src/gui/viewer/viewer_power_control.hpp
   src/gui/viewer/viewer_title_bar.cpp
   src/gui/viewer/viewer_title_bar.hpp
   src/gui/viewer/qt_viewer_host.cpp

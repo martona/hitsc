@@ -9,6 +9,7 @@
 #include "pikvm_session.hpp"
 #include "pikvm_video.hpp"
 #include "pikvm_video_hardware.hpp"
+#include "power_rest_worker.hpp"
 #include "view_base.hpp"
 #include "view_input.hpp"
 
@@ -104,6 +105,25 @@ void store_pikvm_frame(PikvmViewState& state, PikvmVideoFrame frame)
     state.frames.publish(std::move(frame));
 }
 
+// PiKVM ATX request path for a power action. We match the kvmd WEB UI exactly: every
+// action is an UNCONDITIONAL /api/atx/click (physical front-panel button emulation),
+// never the state-aware /api/atx/power -- which silently no-ops off/off_hard/
+// reset_hard (HTTP 200, no effect) unless kvmd reads the host as ON, the reason
+// off/reset "did nothing" here while the web UI worked. A short power click toggles,
+// so On and Graceful both map to button=power; the popup's state-based enable/disable
+// keeps On usable only when off and Graceful/off/reset only when on. power_long =
+// forced off (long hold), reset = reset.
+std::string pikvm_atx_target(PowerAction action)
+{
+    switch (action) {
+    case PowerAction::On:          return "/api/atx/click?button=power";
+    case PowerAction::OffGraceful: return "/api/atx/click?button=power";
+    case PowerAction::OffHard:     return "/api/atx/click?button=power_long";
+    case PowerAction::Reset:       return "/api/atx/click?button=reset";
+    }
+    return "/api/atx/click?button=power";
+}
+
 struct PikvmControlStopState {
     std::weak_ptr<PikvmEventSession> session;
     std::atomic_bool* stop_requested = nullptr;
@@ -169,6 +189,9 @@ void run_pikvm_control_worker(
                 stop_requested,
                 [&](bool online) {
                     state.view_status.kvm_display_status(online);
+                },
+                [&](bool power_on) {
+                    state.power.publish_state(power_on ? PowerState::On : PowerState::Off);
                 },
                 on_error);
         stop_state->session = event_session;
@@ -242,6 +265,17 @@ void run_pikvm_network_session(
         log_info() << "cookies stored: " << session.web.cookie_count();
     }
 
+    // Diagnostic probe of the host ATX state (logs enabled / leds.power so a stuck or
+    // unwired power-LED is visible). Runs on this thread alone -- no power worker yet,
+    // so it can't race web.request(). The live atx events drive the actual indicator.
+    try {
+        auto atx = session.web.request(http::verb::get, "/api/atx", {}, {});
+        log_info() << "pikvm /api/atx -> HTTP " << atx.result_int()
+                   << " body=" << decode_response_body(atx);
+    } catch (const std::exception& ex) {
+        log_warning() << "pikvm /api/atx probe failed: " << ex.what();
+    }
+
     if (stop_requested.load()) {
         return;
     }
@@ -264,6 +298,26 @@ void run_pikvm_network_session(
     auto video_stop_state = std::make_shared<PikvmVideoStopState>();
     video_stop_state->stop_requested = &stop_requested;
     video_stop_state->web = &session.web;
+
+    // Power control on a dedicated, cancelable REST worker (reuses this login) so a
+    // power POST never stalls the control/video websockets. Joined before logout.
+    auto power_worker = std::make_shared<PowerRestWorker>(
+        session.web,
+        [](PowerAction action) {
+            PowerRequestSpec spec;
+            spec.method = http::verb::post;
+            spec.target = pikvm_atx_target(action);
+            return spec;
+        },
+        [&state](PowerOutcome outcome) {
+            state.power.publish_outcome(std::move(outcome));
+        });
+    std::weak_ptr<PowerRestWorker> weak_power_worker = power_worker;
+    state.power.install([weak_power_worker](PowerAction action) {
+        if (auto worker = weak_power_worker.lock()) {
+            worker->submit(action);
+        }
+    });
 
     std::thread control_thread;
     std::thread video_thread;
@@ -330,6 +384,7 @@ void run_pikvm_network_session(
             video_thread.join();
         }
         state.input.clear();
+        state.power.clear();
         state.set_force_close({});
         throw;
     }
@@ -337,6 +392,7 @@ void run_pikvm_network_session(
     stop_handles->set_control({});
     stop_handles->set_video({});
     state.input.clear();
+    state.power.clear();
     state.set_force_close({});
     if (stop_requested.load()) {
         set_pikvm_status(state, "stopped");
@@ -421,12 +477,14 @@ private:
     PikvmView(const PikvmViewOptions& options, std::shared_ptr<PikvmViewState> state)
         : KvmViewBase(*state, options.login.base_url.host, "pikvm", [state] {
               state->input.clear();
+              state->power.clear();
           })
         , options_(options)
         , network_options_(options)
         , state_(std::move(state))
         , encoder_(*state_)
         , input_(encoder_, [] { return std::optional<FrameGeometry>{}; })
+        , power_controller_(default_bmc_power_caps(), state_->power)
     {
     }
 
@@ -486,6 +544,11 @@ private:
     KvmInputController* hosted_input_controller() override
     {
         return &input_;
+    }
+
+    PowerController* power_controller() override
+    {
+        return &power_controller_;
     }
 
     std::optional<std::pair<int, int>> hosted_input_resolution() override
@@ -660,6 +723,7 @@ private:
     std::shared_ptr<PikvmViewState> state_;
     PikvmInputEncoder encoder_;
     KvmInputController input_;
+    ViewPowerController power_controller_;
     SwsContext* hosted_sws_ = nullptr;
     QImage hosted_frame_;
     std::uint64_t hosted_last_sequence_ = 0;

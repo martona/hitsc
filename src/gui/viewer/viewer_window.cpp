@@ -1,6 +1,8 @@
 #include "gui/viewer/viewer_window.hpp"
 
 #include "gui/launcher_theme.hpp"
+#include "gui/toast.hpp"
+#include "gui/viewer/viewer_power_control.hpp"
 #include "gui/viewer/viewer_surface.hpp"
 #include "gui/viewer/viewer_title_bar.hpp"
 
@@ -11,6 +13,7 @@
 #include <QCoreApplication>
 #include <QEvent>
 #include <QGuiApplication>
+#include <QHBoxLayout>
 #include <QIcon>
 #include <QStyleHints>
 #include <QTimer>
@@ -243,6 +246,14 @@ ViewerWindow::ViewerWindow(const QString& title, QWidget* parent)
     });
     connect(title_bar_, &ViewerTitleBar::closeRequested, this, &QWidget::close);
 
+    // Title-bar power control + a window-level toast host (reusable for future caption
+    // features). The control stays hidden until the viewer host binds a controller.
+    toast_manager_ = new ToastManager(this, this);
+    power_control_ = new ViewerPowerControl(this);
+    power_control_->set_toast_manager(toast_manager_);
+    title_bar_->action_area()->addWidget(power_control_);
+    window_agent_->setHitTestVisible(power_control_, true);
+
     set_title(title);
 
     apply_caption_theme();
@@ -282,11 +293,21 @@ void ViewerWindow::set_title(const QString& title)
     }
 }
 
+void ViewerWindow::set_power_controller(PowerController* controller)
+{
+    if (power_control_ != nullptr) {
+        power_control_->set_controller(controller);
+    }
+}
+
 void ViewerWindow::apply_caption_theme()
 {
     const bool dark = launcher_should_use_dark_theme(QGuiApplication::styleHints()->colorScheme());
     if (title_bar_ != nullptr) {
         title_bar_->apply_theme(dark);
+    }
+    if (power_control_ != nullptr) {
+        power_control_->apply_theme(dark);
     }
     if (window_agent_ != nullptr) {
         // Dark-mode the 1px system border QWindowKit keeps + the DWM bits.

@@ -423,6 +423,8 @@ std::string aten_client_packet_name(std::uint8_t type)
         return "MOUSE_SYNC";
     case 25:
         return "CURSOR_POSITION_REQUEST";
+    case 26:
+        return "SMC_POWER_ACTION";
     case 54:
         return "SET_MOUSE_MODE";
     case 55:
@@ -529,6 +531,20 @@ std::vector<std::uint8_t> make_aten_mouse_sync_request()
     packet.push_back(7);
     append_be16(packet, 1920);
     return packet;
+}
+
+std::vector<std::uint8_t> make_aten_power_action(std::uint8_t option)
+{
+    // SMCPowerAction (rfb.js): client packet type 26 (0x1A) followed by the option
+    // byte. Fire-and-forget -- the BMC sends no acknowledgement.
+    return std::vector<std::uint8_t>{26, option};
+}
+
+std::vector<std::uint8_t> make_aten_get_mouse_mode()
+{
+    // SMCGetMouseMode (rfb.js): single byte [55]. The server replies with msg
+    // 53/54/55 whose 3rd byte is the host power state -- our only ATEN status signal.
+    return std::vector<std::uint8_t>{55};
 }
 
 AtenAstPayloadHeader read_ast_payload_header(const std::vector<std::uint8_t>& payload)
