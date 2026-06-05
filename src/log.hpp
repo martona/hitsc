@@ -3,6 +3,7 @@
 #include <boost/log/trivial.hpp>
 
 #include <cstddef>
+#include <cstdint>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -44,6 +45,11 @@ struct LogEntry {
 };
 
 std::vector<LogEntry> recent_log_lines(std::size_t max_lines);
+
+// Monotonic counter bumped on every appended log line -- a cheap "did the in-memory
+// log tail change?" token so the viewer console only re-renders when it actually
+// changed rather than every frame.
+std::uint64_t recent_log_revision();
 
 LogLine log_trace();
 LogLine log_debug();

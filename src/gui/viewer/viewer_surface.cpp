@@ -1,6 +1,7 @@
 #include "gui/viewer/viewer_surface.hpp"
 
 #include "gui/viewer/qt_console.hpp"
+#include "log.hpp"
 
 #include <rhi/qrhi.h>
 #include <rhi/qrhi_platform.h>
@@ -148,21 +149,36 @@ ViewerSurface::~ViewerSurface()
 
 void ViewerSurface::show_console(const ConsoleScreen& screen)
 {
+    // The frame timer calls this every tick while disconnected. Only (re)paint when
+    // something actually changed -- the screen text, or the live log tail (its
+    // revision bumps per appended line). An unchanged console does ZERO work: no
+    // raster, no upload, no repaint; QRhiWidget keeps showing the last frame.
+    // (Resizes are caught in render_image via the size check.) Without this gate the
+    // console re-rasterized the full QPainter text + re-uploaded at 60 Hz -- a
+    // pegged core whenever the disconnected/connecting screen was up.
+    const std::uint64_t log_revision = recent_log_revision();
+    const bool changed = !console_active_
+        || screen != console_
+        || log_revision != console_log_revision_;
+
     hardware_active_ = false;
     console_active_ = true;
-    // The console has no video cursor; drop any retained sprite so a reconnect
-    // (video -> console -> video) never flashes the previous session's cursor over
-    // the first new frame. The next session re-sends its cursor when one arrives.
+    console_ = screen;
+    console_log_revision_ = log_revision;
+
+    if (!changed) {
+        return;
+    }
+
+    // Entering the console, or its content changed: drop the cursor overlay and any
+    // non-owning video wrap (so a torn-down view can't leave us a dangling pointer),
+    // and flag a re-raster. render_console_to_image rebuilds image_ as an owning QImage.
     cursor_active_ = false;
-    // image_ may be a non-owning wrap of the view's decode buffer; drop it now that
-    // we're leaving video so a torn-down view never leaves us a dangling pointer.
-    // (render_console_to_image rebuilds image_ as an owning QImage.)
     image_ = QImage();
     image_dirty_ = false;
     image_dirty_full_ = false;
     image_dirty_rect_ = QRect();
-    console_ = screen;
-    console_rendered_size_ = QSize();
+    console_dirty_ = true;
     update();
 }
 
@@ -419,8 +435,9 @@ void ViewerSurface::render_image(QRhiCommandBuffer* cb)
         return;
     }
 
-    if (console_active_ && console_rendered_size_ != size()) {
+    if (console_active_ && (console_dirty_ || console_rendered_size_ != size())) {
         render_console_to_image();
+        console_dirty_ = false;
     }
 
     QRhiResourceUpdateBatch* batch = rhi_->nextResourceUpdateBatch();

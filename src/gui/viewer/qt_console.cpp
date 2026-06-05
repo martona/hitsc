@@ -75,30 +75,36 @@ void render_console_qpainter(QPainter& painter, const QSize& size, const Console
         painter.drawText(kMargin, top + metrics.ascent(), text);
     };
 
-    int y = kMargin;
+    // Chronological top-to-bottom: the log tail (oldest -> newest) fills from the
+    // top; the status block (headline + detail) -- the CURRENT state, i.e. newest --
+    // sits just below the logs; the hint is pinned to the bottom edge. (The status
+    // block used to be at the TOP, which read backwards against a log tail whose
+    // newest line is at the bottom.) Colour already distinguishes the three regions.
 
+    // Build the status block: headline (bright / error-red) then its detail lines.
+    std::vector<std::pair<QColor, QString>> status_rows;
     if (!screen.headline.empty()) {
         const QColor color = screen.severity == ConsoleSeverity::Error
             ? QColor(232, 96, 96)
             : QColor(226, 230, 235);
-        draw_line(clamp_width(QString::fromStdString(screen.headline), max_chars), color, y);
-        y += line_height;
+        status_rows.emplace_back(color, clamp_width(QString::fromStdString(screen.headline), max_chars));
     }
-
     if (!screen.detail.empty()) {
         const QColor color(178, 184, 192);
         for (const QString& line : wrap_text(QString::fromStdString(screen.detail), max_chars)) {
-            draw_line(line, color, y);
-            y += line_height;
+            status_rows.emplace_back(color, line);
         }
     }
 
-    y += line_height; // gap before the log tail
-
+    // Lay out from the bottom up: hint at the edge, status block above it, logs fill
+    // the rest. The "- line_height" terms are one-line gaps between the regions.
     const int hint_y = size.height() - kMargin - glyph_height;
-    const int logs_top = y;
-    const int logs_bottom = screen.hint.empty() ? (size.height() - kMargin) : (hint_y - line_height);
-    const int max_log_lines = line_height > 0 ? (logs_bottom - logs_top) / line_height : 0;
+    const int status_bottom = screen.hint.empty() ? (size.height() - kMargin) : (hint_y - line_height);
+    const int status_top = status_bottom - static_cast<int>(status_rows.size()) * line_height;
+
+    const int logs_top = kMargin;
+    const int logs_bottom = status_rows.empty() ? status_bottom : (status_top - line_height);
+    const int max_log_lines = line_height > 0 ? std::max(0, (logs_bottom - logs_top) / line_height) : 0;
 
     if (max_log_lines > 0) {
         const std::vector<LogEntry> entries = recent_log_lines(static_cast<std::size_t>(max_log_lines));
@@ -109,7 +115,7 @@ void render_console_qpainter(QPainter& painter, const QSize& size, const Console
             }
         }
 
-        // Keep the most recent rows that fit.
+        // Keep the most recent rows that fit (oldest at the top, newest at the bottom).
         const std::size_t max_rows = static_cast<std::size_t>(max_log_lines);
         const std::size_t first = rows.size() > max_rows ? rows.size() - max_rows : 0;
         int log_y = logs_top;
@@ -117,6 +123,13 @@ void render_console_qpainter(QPainter& painter, const QSize& size, const Console
             draw_line(rows[i].second, log_color(rows[i].first), log_y);
             log_y += line_height;
         }
+    }
+
+    // Status block, just below the log tail.
+    int status_y = status_top;
+    for (const auto& [color, text] : status_rows) {
+        draw_line(text, color, status_y);
+        status_y += line_height;
     }
 
     if (!screen.hint.empty()) {

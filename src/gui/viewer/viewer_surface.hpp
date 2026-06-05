@@ -118,7 +118,9 @@ private:
     bool image_dirty_full_ = false;  // pending upload must cover the whole frame
     QRect image_dirty_rect_;         // else: accumulated changed region (frame pixels)
     bool console_active_ = true;
+    bool console_dirty_ = false;              // console image needs a re-raster (content changed)
     ConsoleScreen console_;
+    std::uint64_t console_log_revision_ = 0;  // log-tail revision baked into the last raster
     QSize console_rendered_size_;
 
     // Cursor overlay (software/ASPEED path): a small straight-alpha sprite drawn

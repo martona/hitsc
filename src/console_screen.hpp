@@ -16,6 +16,9 @@ struct ConsoleScreen {
     std::string headline;
     std::string detail;
     std::string hint;
+
+    // So the viewer can skip re-rendering an unchanged console (see ViewerSurface).
+    friend bool operator==(const ConsoleScreen&, const ConsoleScreen&) = default;
 };
 
 } // namespace hitsc

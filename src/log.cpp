@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <deque>
 #include <iomanip>
 #include <mutex>
@@ -40,6 +41,7 @@ public:
         while (entries_.size() > kCapacity) {
             entries_.pop_front();
         }
+        ++revision_;
     }
 
     std::vector<LogEntry> snapshot(std::size_t max_lines) const
@@ -49,10 +51,17 @@ public:
         return std::vector<LogEntry>(entries_.end() - static_cast<std::ptrdiff_t>(count), entries_.end());
     }
 
+    std::uint64_t revision() const
+    {
+        std::lock_guard lock(mutex_);
+        return revision_;
+    }
+
 private:
     static constexpr std::size_t kCapacity = 500;
     mutable std::mutex mutex_;
     std::deque<LogEntry> entries_;
+    std::uint64_t revision_ = 0;
 };
 
 LogRing& log_ring()
@@ -124,6 +133,11 @@ void write_log(trivial::severity_level severity, std::string_view message)
 std::vector<LogEntry> recent_log_lines(std::size_t max_lines)
 {
     return log_ring().snapshot(max_lines);
+}
+
+std::uint64_t recent_log_revision()
+{
+    return log_ring().revision();
 }
 
 LogLine::LogLine(trivial::severity_level severity)
