@@ -71,16 +71,18 @@ void PowerRestWorker::run()
         outcome.action = action;
         try {
             const PowerRequestSpec spec = build_request_(action);
+            log_info() << "power: " << power_action_name(action);
+            log_info() << "  -> POST " << spec.target;  // worker is REST POST-only (PiKVM)
             StringResponse response = web_.request(
                 spec.method, spec.target, spec.body, spec.content_type, spec.headers);
             const int status = static_cast<int>(response.result_int());
             outcome.http_status = status;
             outcome.ok = status >= 200 && status < 300;
             if (outcome.ok) {
-                log_info() << "power " << power_action_name(action) << " -> HTTP " << status;
+                log_info() << "  <- HTTP " << status;
             } else {
                 outcome.detail = "HTTP ERROR " + std::to_string(status);
-                log_warning() << "power " << power_action_name(action) << " -> HTTP " << status
+                log_warning() << "  <- HTTP " << status
                               << ": " << body_snippet(decode_response_body(response));
             }
         } catch (const std::exception& ex) {

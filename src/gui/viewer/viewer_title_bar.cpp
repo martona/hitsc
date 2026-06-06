@@ -128,6 +128,11 @@ ViewerTitleBar::ViewerTitleBar(QWidget* parent)
     icon_->setPixmap(QIcon(QStringLiteral(":/icons/hitsc-16.png")).pixmap(16, 16));
     row->addWidget(icon_);
 
+    left_action_area_ = new QHBoxLayout();
+    left_action_area_->setContentsMargins(0, 0, 0, 0);
+    left_action_area_->setSpacing(0);
+    row->addLayout(left_action_area_);
+
     title_ = new QLabel(this);
     title_->setIndent(4);
     title_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);

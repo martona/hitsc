@@ -38,6 +38,9 @@ public:
     // ViewerWindow's agent setHitTestVisible() on them so they receive clicks.
     QHBoxLayout* action_area() const { return action_area_; }
 
+    // Left-aligned slot, immediately right of the app icon (holds the power control).
+    QHBoxLayout* left_action_area() const { return left_action_area_; }
+
 signals:
     void minimizeRequested();
     void maximizeRestoreRequested();
@@ -53,6 +56,7 @@ private:
     QLabel* icon_ = nullptr;
     QLabel* title_ = nullptr;
     QHBoxLayout* action_area_ = nullptr;
+    QHBoxLayout* left_action_area_ = nullptr;
     class CaptionButton* min_ = nullptr;
     class CaptionButton* max_ = nullptr;
     class CaptionButton* close_ = nullptr;

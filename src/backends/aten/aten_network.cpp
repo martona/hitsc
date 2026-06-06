@@ -461,7 +461,10 @@ public:
         state_.power.install(
             [weak](PowerAction action) mutable {
                 if (auto self = weak.lock()) {
-                    self->send_packet(make_aten_power_action(aten_power_option(action)));
+                    const std::uint8_t opt = aten_power_option(action);
+                    log_info() << "power: " << power_action_name(action);
+                    log_info() << "  -> SMC power packet [26 " << static_cast<int>(opt) << "]";
+                    self->send_packet(make_aten_power_action(opt));
                     // ATEN power is fire-and-forget (no ack / no status): confirm on send.
                     self->state_.power.publish_outcome(PowerOutcome{action, true, 0, "sent"});
                 }

@@ -52,6 +52,10 @@ using tcp = asio::ip::tcp;
 using KvmWebSocket = BmcWebSocketStream;
 
 constexpr auto kBlankRecoveryInterval = std::chrono::seconds(3);
+// "session unregistered" (validation response 8) is a BMC-side registration-commit race:
+// retry just the /kvm socket + validation (same token), giving the BMC time to commit.
+constexpr int kMaxValidationRetries = 5;
+constexpr auto kValidationRetryDelay = std::chrono::milliseconds(250);
 constexpr auto kMegaracStopGrace = std::chrono::milliseconds(250);
 
 constexpr std::uint16_t kCmdConnectionAllowed = command_value(MegaracCommand::ConnectionAllowed);
@@ -84,6 +88,7 @@ using PacketBuffer = MegaracPacketBuffer;
 using SharedCursor = MegaracHardwareCursor;
 
 constexpr std::uint8_t kValidateSessionValid = kMegaracValidateSessionValid;
+constexpr std::uint8_t kValidateSessionUnregistered = kMegaracValidateSessionUnregistered;
 constexpr std::uint16_t kKvmPrivReqMaster = kMegaracViewPrivReqMaster;
 constexpr std::uint16_t kKvmReqAllowed = kMegaracViewReqAllowed;
 
@@ -428,14 +433,17 @@ public:
                 return;
             }
             const std::uint16_t value = megarac_power_ctrl_value(action);
+            log_info() << "power: " << power_action_name(action);
+            log_info() << "  -> CMD_POWER_CTRL_REQUEST (35) status=" << value;
             self->queue_packet_from_strand(
                 kCmdPowerCtrlRequest, make_simple_packet(kCmdPowerCtrlRequest, value));
             self->state_.power.publish_outcome(PowerOutcome{action, true, 0, "sent"});
-            if (self->options_.login.verbose) {
-                log_info() << "megarac power " << power_action_name(action) << " ctrl=" << value;
-            }
         });
     }
+
+    // True if validation came back "session unregistered" (8) -- the caller should reopen
+    // the socket and re-validate with the same token rather than treat it as fatal.
+    bool validation_unregistered() const { return validation_unregistered_; }
 
     void request_stop()
     {
@@ -552,6 +560,9 @@ private:
         }
 
         if (packet.type == kCmdConnectionAllowed && !validation_sent_) {
+            if (options_.login.vverbose) {
+                log_info() << "received CMD_CONNECTION_ALLOWED";  // gap before this is BMC-side
+            }
             queue_packet_from_strand(
                 kCmdValidateVideoSession,
                 make_validate_video_session_packet(config_, options_.login.username));
@@ -618,6 +629,15 @@ private:
         }
 
         const auto response = static_cast<std::uint8_t>(packet.payload[0]);
+        if (response == kValidateSessionUnregistered) {
+            // The BMC hasn't committed the h5viewercfg session yet (registration race).
+            // Don't fail the session -- flag it so the network loop reopens the socket and
+            // re-validates with the SAME token; re-login/re-fetch would restart the race.
+            validation_unregistered_ = true;
+            log_warning() << "KVM validation: session unregistered; retrying socket";
+            close_socket();
+            return;
+        }
         if (response != kValidateSessionValid) {
             const std::string reason = validation_response_name(response);
             state_.set_exception(std::make_exception_ptr(
@@ -996,6 +1016,7 @@ private:
     int blank_screen_packets_ = 0;
     int power_status_ = -1;
     bool validation_sent_ = false;
+    bool validation_unregistered_ = false;
     bool full_screen_requested_ = false;
     bool video_feedback_started_ = false;
     bool writing_ = false;
@@ -1036,48 +1057,70 @@ void run_megarac_view_session(const MegaracViewOptions& options, MegaracViewSess
             web.force_close_websocket("megarac-kvm");
         });
 
-        auto websocket = session.web.open_websocket(BmcWebSocketConnectOptions{
-            .role = "megarac-kvm",
-            .log_name = "kvm websocket",
-            .path = "/kvm",
-            .idle_timeout_seconds = options.idle_timeout_seconds,
-            .extra_headers = {Header{http::field::sec_websocket_protocol, {}, "binary, base64"}},
-        });
-        auto ws = websocket.connection->stream();
-        asio::io_context& io = websocket.connection->io_context();
-        const std::string subprotocol = selected_subprotocol(websocket.response);
-        state.view_status.kvm_connection(true);
-        log_info() << "kvm websocket subprotocol=" << subprotocol;
+        // The BMC registers the h5viewercfg session asynchronously; a fast /kvm validate
+        // can beat that commit and come back "session unregistered" (response 8). Retry
+        // just the socket + validation, reusing the SAME token, with a short delay so the
+        // BMC has time to commit. (Re-login/re-fetch would only restart the same race.)
+        for (int attempt = 0; !stop_requested.load(); ++attempt) {
+            if (attempt > 0) {
+                std::this_thread::sleep_for(kValidationRetryDelay);
+                log_warning() << "retrying KVM video-session validation (unregistered)"
+                              << " attempt=" << attempt;
+            }
 
-        if (stop_requested.load()) {
-            force_close_network(state);
-            return;
-        }
+            auto websocket = session.web.open_websocket(BmcWebSocketConnectOptions{
+                .role = "megarac-kvm",
+                .log_name = "kvm websocket",
+                .path = "/kvm",
+                .idle_timeout_seconds = options.idle_timeout_seconds,
+                .extra_headers = {Header{http::field::sec_websocket_protocol, {}, "binary, base64"}},
+            });
+            auto ws = websocket.connection->stream();
+            asio::io_context& io = websocket.connection->io_context();
+            const std::string subprotocol = selected_subprotocol(websocket.response);
+            state.view_status.kvm_connection(true);
+            log_info() << "kvm websocket subprotocol=" << subprotocol;
 
-        auto async_session = std::make_shared<KvmAsyncSession>(io, ws, options, config, subprotocol, state);
-        std::weak_ptr<KvmAsyncSession> weak_session = async_session;
-        state.input.install(
-            [weak_session](MegaracInputWork work) mutable {
+            if (stop_requested.load()) {
+                force_close_network(state);
+                return;
+            }
+
+            auto async_session = std::make_shared<KvmAsyncSession>(io, ws, options, config, subprotocol, state);
+            std::weak_ptr<KvmAsyncSession> weak_session = async_session;
+            state.input.install(
+                [weak_session](MegaracInputWork work) mutable {
+                    if (auto session = weak_session.lock()) {
+                        session->send_packet(work.type, std::move(work.packet));
+                    }
+                });
+
+            // Power control rides the KVM websocket (CMD_POWER_CTRL_REQUEST), like input --
+            // no REST, no CSRF, no second connection. Status comes back over the same socket.
+            state.power.install([weak_session](PowerAction action) {
                 if (auto session = weak_session.lock()) {
-                    session->send_packet(work.type, std::move(work.packet));
+                    session->send_power_command(action);
                 }
             });
 
-        // Power control rides the KVM websocket (CMD_POWER_CTRL_REQUEST), like input --
-        // no REST, no CSRF, no second connection. Status comes back over the same socket.
-        state.power.install([weak_session](PowerAction action) {
-            if (auto session = weak_session.lock()) {
-                session->send_power_command(action);
-            }
-        });
+            state.set_force_close([weak_session] {
+                if (auto session = weak_session.lock()) {
+                    session->request_stop();
+                }
+            });
+            async_session->start();
+            io.run();
 
-        state.set_force_close([weak_session] {
-            if (auto session = weak_session.lock()) {
-                session->request_stop();
+            if (!async_session->validation_unregistered()) {
+                break;  // validated and ran, or ended for another reason (exception set on failure)
             }
-        });
-        async_session->start();
-        io.run();
+            if (attempt + 1 >= kMaxValidationRetries) {
+                state.set_exception(std::make_exception_ptr(std::runtime_error(
+                    "MegaRAC KVM validation failed: session unregistered (after retries)")));
+                break;
+            }
+            state.view_status.kvm_connection(false);  // brief disconnect between socket attempts
+        }
     } catch (...) {
         if (!stop_requested.load()) {
             state.set_exception(std::current_exception());

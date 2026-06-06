@@ -251,7 +251,7 @@ ViewerWindow::ViewerWindow(const QString& title, QWidget* parent)
     toast_manager_ = new ToastManager(this, this);
     power_control_ = new ViewerPowerControl(this);
     power_control_->set_toast_manager(toast_manager_);
-    title_bar_->action_area()->addWidget(power_control_);
+    title_bar_->left_action_area()->addWidget(power_control_);
     window_agent_->setHitTestVisible(power_control_, true);
 
     set_title(title);
