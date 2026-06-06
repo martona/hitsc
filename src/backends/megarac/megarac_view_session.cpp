@@ -7,7 +7,6 @@
 #include "megarac_protocol.hpp"
 #include "megarac_session.hpp"
 #include "megarac_video.hpp"
-#include "power_rest_worker.hpp"
 #include "text.hpp"
 
 #include <boost/asio/bind_executor.hpp>
@@ -71,6 +70,8 @@ constexpr std::uint16_t kCmdKvmSharing = command_value(MegaracCommand::KvmSharin
 constexpr std::uint16_t kCmdGetUserMacro = command_value(MegaracCommand::GetUserMacro);
 constexpr std::uint16_t kCmdSetNextMaster = command_value(MegaracCommand::SetNextMaster);
 constexpr std::uint16_t kCmdPowerStatus = command_value(MegaracCommand::PowerStatus);
+constexpr std::uint16_t kCmdPowerCtrlRequest = command_value(MegaracCommand::PowerCtrlRequest);
+constexpr std::uint16_t kCmdPowerCtrlResp = command_value(MegaracCommand::PowerCtrlResp);
 constexpr std::uint16_t kCmdDisplayLockSet = command_value(MegaracCommand::DisplayLockSet);
 constexpr std::uint16_t kCmdMediaLicenseStatus = command_value(MegaracCommand::MediaLicenseStatus);
 // MegaRAC expects this periodic video feedback even when the reported diff is zero.
@@ -92,14 +93,15 @@ struct OutgoingPacket {
     std::string encoded_text;
 };
 
-// MegaRAC web power command codes: POST /api/actions/power {"power_command":N}.
-int megarac_power_command(PowerAction action)
+// MegaRAC POWER_CONTROL_* values, sent as the status field of a CMD_POWER_CTRL_REQUEST
+// (35) packet over the KVM websocket -- the same enum the H5Viewer uses.
+std::uint16_t megarac_power_ctrl_value(PowerAction action)
 {
     switch (action) {
-    case PowerAction::OffHard:     return 0;
-    case PowerAction::On:          return 1;
-    case PowerAction::OffGraceful: return 5;  // ACPI soft-off
-    case PowerAction::Reset:       return 3;  // hard reset
+    case PowerAction::OffHard:     return 0;  // POWER_CONTROL_OFF_IMMEDIATE
+    case PowerAction::On:          return 1;  // POWER_CONTROL_ON
+    case PowerAction::OffGraceful: return 5;  // POWER_CONTROL_SOFT_RESET (soft/ACPI off)
+    case PowerAction::Reset:       return 3;  // POWER_CONTROL_HARD_RESET
     }
     return 1;
 }
@@ -415,6 +417,26 @@ public:
         });
     }
 
+    // Power control over the KVM websocket: CMD_POWER_CTRL_REQUEST (35) carrying the
+    // POWER_CONTROL_* value in the status field (no REST). The ack (CMD_POWER_CTRL_RESP)
+    // has no success code, so we confirm optimistically and re-poll for the new state.
+    void send_power_command(PowerAction action)
+    {
+        auto self = shared_from_this();
+        asio::post(strand_, [self, action] {
+            if (self->closed_ || self->stopping_) {
+                return;
+            }
+            const std::uint16_t value = megarac_power_ctrl_value(action);
+            self->queue_packet_from_strand(
+                kCmdPowerCtrlRequest, make_simple_packet(kCmdPowerCtrlRequest, value));
+            self->state_.power.publish_outcome(PowerOutcome{action, true, 0, "sent"});
+            if (self->options_.login.verbose) {
+                log_info() << "megarac power " << power_action_name(action) << " ctrl=" << value;
+            }
+        });
+    }
+
     void request_stop()
     {
         auto self = shared_from_this();
@@ -572,6 +594,10 @@ private:
             handle_blank_screen_packet(packet);
         } else if (packet.type == kCmdPowerStatus) {
             handle_power_status(packet.status);
+        } else if (packet.type == kCmdPowerCtrlResp) {
+            // The BMC accepted a power command (the resp carries no success code per the
+            // H5Viewer); re-query so the indicator reflects the new state promptly.
+            query_power_status("power-ctrl-resp");
         } else if (packet.type == kIvtpHwCursor) {
             handle_hardware_cursor_packet(packet);
         } else if (packet.type == kCmdVideoPackets) {
@@ -685,7 +711,13 @@ private:
     void handle_power_status(std::uint16_t status)
     {
         power_status_ = static_cast<int>(status);
-        state_.power.publish_state(status == 1 ? PowerState::On : PowerState::Off);
+        // 1 = on, 0 = off, 100 = UNABLE_TO_GET_POWER_STATUS (sentinel) -- only publish a
+        // real state, leaving the last-known value on the sentinel.
+        if (status == 1) {
+            state_.power.publish_state(PowerState::On);
+        } else if (status == 0) {
+            state_.power.publish_state(PowerState::Off);
+        }
         if (options_.login.verbose) {
             log_info() << "power status=" << power_status_;
         }
@@ -1031,28 +1063,11 @@ void run_megarac_view_session(const MegaracViewOptions& options, MegaracViewSess
                 }
             });
 
-        // Power control rides a dedicated, cancelable REST worker (reusing this login)
-        // so a power POST never stalls the video websocket. Joined before logout.
-        auto power_worker = std::make_shared<PowerRestWorker>(
-            session.web,
-            [csrf = std::string(session.web.session_token())](PowerAction action) {
-                PowerRequestSpec spec;
-                spec.method = http::verb::post;
-                spec.target = "/api/actions/power";
-                spec.content_type = "application/json";
-                spec.body = "{\"power_command\":" + std::to_string(megarac_power_command(action)) + "}";
-                if (!csrf.empty()) {
-                    spec.headers.push_back(Header{http::field::unknown, "X-CSRFTOKEN", csrf});
-                }
-                return spec;
-            },
-            [&state](PowerOutcome outcome) {
-                state.power.publish_outcome(std::move(outcome));
-            });
-        std::weak_ptr<PowerRestWorker> weak_power_worker = power_worker;
-        state.power.install([weak_power_worker](PowerAction action) {
-            if (auto worker = weak_power_worker.lock()) {
-                worker->submit(action);
+        // Power control rides the KVM websocket (CMD_POWER_CTRL_REQUEST), like input --
+        // no REST, no CSRF, no second connection. Status comes back over the same socket.
+        state.power.install([weak_session](PowerAction action) {
+            if (auto session = weak_session.lock()) {
+                session->send_power_command(action);
             }
         });
 

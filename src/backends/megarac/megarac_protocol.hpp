@@ -25,6 +25,8 @@ enum class MegaracCommand : std::uint16_t {
     VideoPackets = 25,
     KvmSharing = 32,
     PowerStatus = 34,
+    PowerCtrlRequest = 35,
+    PowerCtrlResp = 36,
     ActiveClients = 39,
     GetUserMacro = 40,
     SetNextMaster = 50,
