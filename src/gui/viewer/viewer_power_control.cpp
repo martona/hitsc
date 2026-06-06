@@ -3,6 +3,7 @@
 #include "gui/toast.hpp"
 
 #include <QAbstractAnimation>
+#include <QEnterEvent>
 #include <QEvent>
 #include <QFrame>
 #include <QLabel>
@@ -304,6 +305,31 @@ QSize ViewerPowerControl::sizeHint() const
     return QSize(kButtonWidth, kButtonHeight);
 }
 
+void ViewerPowerControl::enterEvent(QEnterEvent* event)
+{
+    hovered_ = true;
+    update();
+    QAbstractButton::enterEvent(event);
+}
+
+void ViewerPowerControl::leaveEvent(QEvent* event)
+{
+    // Fires when the cursor exits into the draggable caption or off-window (a real
+    // client/non-client crossing). The exit into the video surface produces no leave --
+    // clear_hover() handles that, driven by the surface's enter.
+    hovered_ = false;
+    update();
+    QAbstractButton::leaveEvent(event);
+}
+
+void ViewerPowerControl::clear_hover()
+{
+    if (hovered_) {
+        hovered_ = false;
+        update();
+    }
+}
+
 void ViewerPowerControl::set_toast_manager(ToastManager* toasts)
 {
     toasts_ = toasts;
@@ -422,7 +448,7 @@ void ViewerPowerControl::paintEvent(QPaintEvent*)
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing, true);
 
-    if (underMouse() || isDown()) {
+    if (hovered_ || isDown()) {
         painter.fillRect(rect(), hover_bg_);
     }
 

@@ -72,6 +72,7 @@ signals:
     void pointerMotion(const hitsc::KvmPointerMotion& motion);
     void pointerWheel(const hitsc::KvmPointerWheel& wheel);
     void focusLost();
+    void cursorEntered();   // pointer entered the surface (drops a stuck caption hover)
     void rhiReady();        // QRhi (and its device) is available
     void rhiUnavailable();  // QRhi could not initialize (no usable D3D11)
 
@@ -85,6 +86,7 @@ protected:
     void mouseMoveEvent(QMouseEvent* event) override;
     void wheelEvent(QWheelEvent* event) override;
     void focusOutEvent(QFocusEvent* event) override;
+    void enterEvent(QEnterEvent* event) override;
 
 private:
     void render_console_to_image();

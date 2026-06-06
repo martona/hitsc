@@ -264,6 +264,13 @@ ViewerWindow::ViewerWindow(const QString& title, QWidget* parent)
     setCentralWidget(surface_);
     surface_->setFocus();
 
+    // power_control_ is hit-test-visible, so QWindowKit reports it as HTCLIENT: moving the
+    // cursor off it into the surface crosses no client/non-client boundary, Windows posts
+    // no WM_MOUSELEAVE, and Qt delivers no leaveEvent -- its hover would stick. The surface
+    // (a plain composited widget) gets a reliable enter; use it to drop the highlight.
+    connect(surface_, &ViewerSurface::cursorEntered, power_control_,
+            &ViewerPowerControl::clear_hover);
+
     frame_timer_ = new QTimer(this);
     frame_timer_->setInterval(kFrameIntervalMs);
     connect(frame_timer_, &QTimer::timeout, this, &ViewerWindow::frameTick);

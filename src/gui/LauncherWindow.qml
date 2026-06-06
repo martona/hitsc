@@ -97,6 +97,35 @@ ApplicationWindow {
         }
     }
 
+    // The two left caption buttons (hamburger menu / view-toggle). Registered with
+    // QWindowKit as hit-test-visible, which makes them HTCLIENT: when the cursor leaves
+    // one into the content below, no client/non-client boundary is crossed, so Qt never
+    // delivers a hover-leave and the built-in `hovered` sticks true. The custom flat
+    // background gates the highlight on `!suppressHighlight` so the content hover (see
+    // contentHover) can drop it. Hover tint matches CaptionButton; like it, the theme
+    // colors are passed in (fg/dark) rather than read from outer ids.
+    component TitleBarToolButton: ToolButton {
+        id: tbBtn
+
+        property bool suppressHighlight: false
+        property color fg: "black"
+        property bool dark: false
+
+        Layout.preferredWidth: 40
+        Layout.preferredHeight: 32
+        Layout.alignment: Qt.AlignVCenter
+        focusPolicy: Qt.NoFocus
+
+        background: Rectangle {
+            radius: 4
+            color: tbBtn.down
+                ? Qt.rgba(tbBtn.fg.r, tbBtn.fg.g, tbBtn.fg.b, tbBtn.dark ? 0.18 : 0.16)
+                : (tbBtn.hovered && !tbBtn.suppressHighlight)
+                    ? Qt.rgba(tbBtn.fg.r, tbBtn.fg.g, tbBtn.fg.b, tbBtn.dark ? 0.12 : 0.10)
+                    : "transparent"
+        }
+    }
+
     color: theme.window
     palette.window: theme.window
     palette.windowText: theme.text
@@ -140,14 +169,14 @@ ApplicationWindow {
                 Layout.rightMargin: 6
             }
 
-            ToolButton {
+            TitleBarToolButton {
                 id: menuButton
                 objectName: "menuButton"
 
-                Layout.preferredWidth: 40
-                Layout.preferredHeight: 32
-                Layout.alignment: Qt.AlignVCenter
                 palette: root.palette
+                fg: theme.text
+                dark: theme.darkMode
+                suppressHighlight: contentHover.hovered
 
                 onClicked: appMenu.popup(menuButton, 0, menuButton.height + 4)
 
@@ -170,15 +199,15 @@ ApplicationWindow {
                 }
             }
 
-            ToolButton {
+            TitleBarToolButton {
                 id: viewToggleButton
                 objectName: "viewToggleButton"
 
-                Layout.preferredWidth: 40
-                Layout.preferredHeight: 32
-                Layout.alignment: Qt.AlignVCenter
                 Layout.rightMargin: 6
                 palette: root.palette
+                fg: theme.text
+                dark: theme.darkMode
+                suppressHighlight: contentHover.hovered
 
                 onClicked: windowPlacement.setMode(root.viewMode === "mini" ? "expanded" : "mini")
 
@@ -279,6 +308,20 @@ ApplicationWindow {
                 palette: root.palette
                 onTriggered: Qt.quit()
             }
+        }
+    }
+
+    // Authoritative "pointer is in the client area" signal for the title-bar buttons
+    // above. HoverHandler is passive -- it never grabs or blocks, so it reports hover for
+    // the whole content region (below the caption) without stealing events from the
+    // tiles/panel drawn on top. The hit-test-visible caption buttons gate their highlight
+    // on this so it drops the instant the cursor enters the content (the one transition
+    // QWindowKit doesn't produce a leave for).
+    Item {
+        anchors.fill: parent
+
+        HoverHandler {
+            id: contentHover
         }
     }
 

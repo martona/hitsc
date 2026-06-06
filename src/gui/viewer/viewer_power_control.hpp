@@ -6,6 +6,8 @@
 #include <QColor>
 #include <QSize>
 
+class QEnterEvent;
+class QEvent;
 class QPaintEvent;
 class QTimer;
 
@@ -33,10 +35,17 @@ public:
     void set_toast_manager(ToastManager* toasts);
     void apply_theme(bool dark);
 
+    // Drop the hover highlight. As a hit-test-visible caption widget this button gets no
+    // leaveEvent when the cursor exits into the client area (QWindowKit reports it
+    // HTCLIENT), so its hover would stick; the window calls this on surface-enter.
+    void clear_hover();
+
     QSize sizeHint() const override;
 
 protected:
     void paintEvent(QPaintEvent* event) override;
+    void enterEvent(QEnterEvent* event) override;
+    void leaveEvent(QEvent* event) override;
 
 private:
     void open_popup();
@@ -53,6 +62,7 @@ private:
     PowerCapabilities caps_;
     PowerState state_ = PowerState::Unknown;
     bool pending_ = false;
+    bool hovered_ = false;  // own hover flag: underMouse() sticks (no leaveEvent, see clear_hover)
     int pending_ticks_ = 0;
     double pulse_phase_ = 0.0;
 

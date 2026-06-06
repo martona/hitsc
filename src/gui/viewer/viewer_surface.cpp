@@ -7,6 +7,7 @@
 #include <rhi/qrhi_platform.h>
 
 #include <QColor>
+#include <QEnterEvent>
 #include <QFile>
 #include <QMouseEvent>
 #include <QPainter>
@@ -736,6 +737,15 @@ void ViewerSurface::wheelEvent(QWheelEvent* event)
 void ViewerSurface::focusOutEvent(QFocusEvent*)
 {
     emit focusLost();
+}
+
+void ViewerSurface::enterEvent(QEnterEvent* event)
+{
+    // The title bar's hit-test-visible caption buttons (HTCLIENT to QWindowKit) get no
+    // Qt leaveEvent when the cursor exits them into this surface, so their hover sticks.
+    // We do get a normal enter -- let the window drop any stuck caption highlight.
+    emit cursorEntered();
+    QRhiWidget::enterEvent(event);
 }
 
 } // namespace hitsc
