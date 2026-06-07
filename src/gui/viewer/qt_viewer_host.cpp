@@ -5,6 +5,7 @@
 #include "console_screen.hpp"
 #include "gui/launcher_host_store.hpp"
 #include "gui/screen_geometry.hpp"
+#include "gui/toast.hpp"
 #include "gui/viewer/clipboard_typer.hpp"
 #include "gui/viewer/keyboard_layout.hpp"
 #include "gui/viewer/main_thread_sampler.hpp"
@@ -151,13 +152,15 @@ int run_viewer(const ViewerLaunch& launch, const std::function<void(ViewerHost&)
                 }
             });
 
-        // Phase 2: drive the built plan onto the wire (paced), with click-to-cancel.
+        // Phase 2: drive the built plan onto the wire (paced), with click-to-cancel and a
+        // live progress toast that updates per keystroke and clears when done/canceled.
+        auto typing_toast = std::make_shared<ToastManager::Handle>();
         QObject::connect(
             paste, &ViewerPasteControl::pasteRequested, &window,
             [&host, &window, &clipboard_typer](const TypePlan& plan) {
                 KvmViewBase* view = host.view();
                 if (view == nullptr || !view->hosted_connected()) {
-                    window.show_toast(QStringLiteral("Connect to a host first"));
+                    window.toasts()->show(QStringLiteral("Connect to a host first"));
                     return;
                 }
                 clipboard_typer.start(plan);
@@ -165,15 +168,26 @@ int run_viewer(const ViewerLaunch& launch, const std::function<void(ViewerHost&)
         QObject::connect(paste, &ViewerPasteControl::cancelRequested, &clipboard_typer,
                          [&clipboard_typer]() { clipboard_typer.cancel(); });
         QObject::connect(
-            &clipboard_typer, &ClipboardTyper::started, paste, [paste, &window](int characters) {
+            &clipboard_typer, &ClipboardTyper::started, paste,
+            [paste, &window, typing_toast](int total) {
                 paste->set_typing(true);
-                window.show_toast(QStringLiteral("Typing %1 characters...").arg(characters));
+                *typing_toast = window.toasts()->show_sticky(
+                    QStringLiteral("Typing, %1 keystrokes left").arg(total));
             });
         QObject::connect(
-            &clipboard_typer, &ClipboardTyper::finished, paste, [paste, &window](bool completed) {
+            &clipboard_typer, &ClipboardTyper::progress, &window,
+            [&window, typing_toast](int remaining) {
+                window.toasts()->update(
+                    *typing_toast, QStringLiteral("Typing, %1 keystrokes left").arg(remaining));
+            });
+        QObject::connect(
+            &clipboard_typer, &ClipboardTyper::finished, paste,
+            [paste, &window, typing_toast](bool completed) {
                 paste->set_typing(false);
-                window.show_toast(completed ? QStringLiteral("Done typing")
-                                            : QStringLiteral("Canceled typing"));
+                window.toasts()->dismiss(*typing_toast);
+                if (!completed) {
+                    window.toasts()->show(QStringLiteral("Canceled typing"));
+                }
             });
     }
 

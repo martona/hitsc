@@ -52,11 +52,7 @@ public:
         setAttribute(Qt::WA_DeleteOnClose);
         setFocusPolicy(Qt::NoFocus);
 
-        const QFontMetrics metrics(font());
-        const int text_width = metrics.horizontalAdvance(text_);
-        const int width = std::min(text_width + 2 * kPadX, kMaxWidth);
-        resize(std::max(width, 80), metrics.height() + 2 * kPadY);
-
+        relayout();
         setWindowOpacity(0.0);
 
         auto* fade_in = new QPropertyAnimation(this, "windowOpacity", this);
@@ -65,8 +61,20 @@ public:
         fade_in->setEndValue(1.0);
         fade_in->start(QAbstractAnimation::DeleteWhenStopped);
 
-        QTimer::singleShot(duration_ms, this, [this] { fade_out(); });
+        // duration_ms <= 0 means "sticky": stay until the owner update()s / dismiss()es it.
+        if (duration_ms > 0) {
+            QTimer::singleShot(duration_ms, this, [this] { fade_out(); });
+        }
     }
+
+    void set_text(const QString& text)
+    {
+        text_ = text;
+        relayout();
+        update();
+    }
+
+    void dismiss() { fade_out(); }
 
 protected:
     void paintEvent(QPaintEvent*) override
@@ -83,6 +91,14 @@ protected:
     }
 
 private:
+    void relayout()
+    {
+        const QFontMetrics metrics(font());
+        const int text_width = metrics.horizontalAdvance(text_);
+        const int width = std::min(text_width + 2 * kPadX, kMaxWidth);
+        resize(std::max(width, 80), metrics.height() + 2 * kPadY);
+    }
+
     void fade_out()
     {
         auto* fade = new QPropertyAnimation(this, "windowOpacity", this);
@@ -108,10 +124,10 @@ ToastManager::ToastManager(QWidget* anchor, QObject* parent)
     }
 }
 
-void ToastManager::show(const QString& text, Level level, int duration_ms)
+QWidget* ToastManager::create_toast(const QString& text, Level level, int duration_ms)
 {
     if (!anchor_) {
-        return;
+        return nullptr;
     }
 
     auto* toast = new ToastWidget(text, level, duration_ms);
@@ -120,6 +136,32 @@ void ToastManager::show(const QString& text, Level level, int duration_ms)
 
     reflow();
     toast->show();
+    return toast;
+}
+
+void ToastManager::show(const QString& text, Level level, int duration_ms)
+{
+    create_toast(text, level, duration_ms);
+}
+
+ToastManager::Handle ToastManager::show_sticky(const QString& text, Level level)
+{
+    return Handle(create_toast(text, level, 0));  // 0 => sticky (no auto fade-out)
+}
+
+void ToastManager::update(const Handle& handle, const QString& text)
+{
+    if (auto* toast = static_cast<ToastWidget*>(handle.target_.data())) {
+        toast->set_text(text);
+        reflow();
+    }
+}
+
+void ToastManager::dismiss(const Handle& handle)
+{
+    if (auto* toast = static_cast<ToastWidget*>(handle.target_.data())) {
+        toast->dismiss();
+    }
 }
 
 bool ToastManager::eventFilter(QObject* watched, QEvent* event)

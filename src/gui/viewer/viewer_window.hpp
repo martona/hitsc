@@ -2,8 +2,6 @@
 
 #include "view_input_types.hpp"  // KvmKeyEvent
 
-#include "gui/toast.hpp"  // ToastManager::Level (show_toast)
-
 #include <QMainWindow>
 
 #include <memory>
@@ -58,8 +56,8 @@ public:
     // hide it). Called by the viewer host when a view attaches / detaches.
     void set_power_controller(PowerController* controller);
 
-    // Post a transient toast (used by the host glue for paste/typing feedback).
-    void show_toast(const QString& text, ToastManager::Level level = ToastManager::Level::Info);
+    // The toast host (used by the glue for paste/typing feedback). Always non-null.
+    ToastManager* toasts() const { return toast_manager_; }
 
 signals:
     void keyEvent(const hitsc::KvmKeyEvent& key);  // raw-scancode key (Win32 filter)

@@ -196,13 +196,6 @@ void ViewerWindow::set_power_controller(PowerController* controller)
     }
 }
 
-void ViewerWindow::show_toast(const QString& text, ToastManager::Level level)
-{
-    if (toast_manager_ != nullptr) {
-        toast_manager_->show(text, level);
-    }
-}
-
 void ViewerWindow::apply_caption_theme()
 {
     const bool dark = launcher_should_use_dark_theme(QGuiApplication::styleHints()->colorScheme());

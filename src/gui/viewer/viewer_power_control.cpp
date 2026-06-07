@@ -376,8 +376,10 @@ void ViewerPowerControl::open_popup()
     }
     popup_->update_state(state_);
     popup_->adjustSize();
-    const QPoint top_left(width() - popup_->width(), height() + 2);
-    popup_->move(mapToGlobal(top_left));
+    // Drop down from the button's left edge, extending right: the button lives at the left
+    // of the title bar, so the window (and the screen space) is to the right. The old
+    // right-aligned anchor ran the panel off the left edge when maximized.
+    popup_->move(mapToGlobal(QPoint(0, height() + 2)));
     popup_->show();
 }
 

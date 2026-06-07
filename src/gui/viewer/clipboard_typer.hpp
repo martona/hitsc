@@ -34,7 +34,8 @@ public:
     bool busy() const { return active_; }
 
 signals:
-    void started(int characters);
+    void started(int total);      // total key events queued
+    void progress(int remaining);
     void finished(bool completed);  // false = canceled by user or guest disconnected
 
 private:
@@ -49,7 +50,6 @@ private:
     std::vector<KvmKeyEvent> queue_;
     std::size_t next_ = 0;
     std::vector<KvmScancode> pressed_;  // down-but-not-yet-up, for a clean abort
-    int characters_ = 0;
     bool active_ = false;
 };
 

@@ -42,7 +42,6 @@ void ClipboardTyper::start(const TypePlan& plan)
     queue_.clear();
     pressed_.clear();
     next_ = 0;
-    characters_ = plan.character_count;
 
     // Expand each chord: modifiers down, key down, key up, modifiers up (released LIFO).
     for (const KeyChord& chord : plan.chords) {
@@ -60,7 +59,7 @@ void ClipboardTyper::start(const TypePlan& plan)
         return;
     }
     active_ = true;
-    emit started(characters_);
+    emit started(static_cast<int>(queue_.size()));
     timer_->start();
 }
 
@@ -96,7 +95,10 @@ void ClipboardTyper::tick()
         }
     }
 
-    if (next_ >= queue_.size()) {
+    const int remaining = static_cast<int>(queue_.size() - next_);
+    if (remaining > 0) {
+        emit progress(remaining);
+    } else {
         stop_with(true);
     }
 }
