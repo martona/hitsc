@@ -377,6 +377,56 @@ std::optional<std::string> HostStore::load_pinned_cert(const QString& host_id) c
     return std::string(utf8.constData(), static_cast<std::size_t>(utf8.size()));
 }
 
+void HostStore::save_keyboard_layout(const QString& host_id, const QString& klid) const
+{
+    const QString trimmed_id = host_id.trimmed();
+    if (trimmed_id.isEmpty() || klid.trimmed().isEmpty()) {
+        return;
+    }
+
+    const auto root = open_key(HKEY_CURRENT_USER, root_path_, KEY_READ);
+    if (!root) {
+        return;
+    }
+    const auto hosts = open_key(root->get(), QStringLiteral("Hosts"), KEY_READ);
+    if (!hosts) {
+        return;
+    }
+    const auto host_key = open_key(hosts->get(), trimmed_id, KEY_WRITE);
+    if (!host_key) {
+        return; // host no longer exists — don't recreate it
+    }
+
+    write_string_value(host_key->get(), L"KeyboardLayout", klid);
+}
+
+std::optional<QString> HostStore::load_keyboard_layout(const QString& host_id) const
+{
+    const QString trimmed_id = host_id.trimmed();
+    if (trimmed_id.isEmpty()) {
+        return std::nullopt;
+    }
+
+    const auto root = open_key(HKEY_CURRENT_USER, root_path_, KEY_READ);
+    if (!root) {
+        return std::nullopt;
+    }
+    const auto hosts = open_key(root->get(), QStringLiteral("Hosts"), KEY_READ);
+    if (!hosts) {
+        return std::nullopt;
+    }
+    const auto host_key = open_key(hosts->get(), trimmed_id, KEY_READ);
+    if (!host_key) {
+        return std::nullopt;
+    }
+
+    const auto value = read_string_value(host_key->get(), L"KeyboardLayout");
+    if (!value || value->isEmpty()) {
+        return std::nullopt;
+    }
+    return *value;
+}
+
 #else
 
 QByteArray CredentialProtector::protect(const QByteArray& plaintext) const
@@ -437,6 +487,18 @@ void HostStore::save_pinned_cert(const QString& host_id, const std::string& sha2
 }
 
 std::optional<std::string> HostStore::load_pinned_cert(const QString& host_id) const
+{
+    (void)host_id;
+    return std::nullopt;
+}
+
+void HostStore::save_keyboard_layout(const QString& host_id, const QString& klid) const
+{
+    (void)host_id;
+    (void)klid;
+}
+
+std::optional<QString> HostStore::load_keyboard_layout(const QString& host_id) const
 {
     (void)host_id;
     return std::nullopt;

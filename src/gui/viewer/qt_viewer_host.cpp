@@ -5,7 +5,9 @@
 #include "console_screen.hpp"
 #include "gui/launcher_host_store.hpp"
 #include "gui/screen_geometry.hpp"
+#include "gui/viewer/keyboard_layout.hpp"
 #include "gui/viewer/main_thread_sampler.hpp"
+#include "gui/viewer/viewer_paste_control.hpp"
 #include "gui/viewer/viewer_surface.hpp"
 #include "gui/viewer/viewer_window.hpp"
 #include "view_base.hpp"
@@ -110,6 +112,31 @@ int run_viewer(const ViewerLaunch& launch, const std::function<void(ViewerHost&)
                 window.setGeometry(*rect);
             }
         }
+    }
+
+    // Per-host clipboard-typing layout: restore the saved KLID (default: the client's
+    // active layout) and persist it whenever the user picks a different one. Lives in the
+    // same per-host registry key as the window geometry above -- no IPC needed.
+    if (ViewerPasteControl* paste = window.paste_control()) {
+        QString klid;
+        if (!host_id.empty()) {
+            const HostStore store;
+            if (const std::optional<QString> saved =
+                    store.load_keyboard_layout(QString::fromStdString(host_id))) {
+                klid = *saved;
+            }
+        }
+        if (klid.isEmpty()) {
+            klid = active_keyboard_layout_klid();
+        }
+        paste->set_layout(klid);
+        QObject::connect(
+            paste, &ViewerPasteControl::layoutChanged, &window, [host_id](const QString& chosen) {
+                if (!host_id.empty()) {
+                    const HostStore store;
+                    store.save_keyboard_layout(QString::fromStdString(host_id), chosen);
+                }
+            });
     }
 
     // Keyboard gating: a live session forwards keys to the guest; the disconnected

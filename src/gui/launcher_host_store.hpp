@@ -39,6 +39,11 @@ public:
     void save_pinned_cert(const QString& host_id, const std::string& sha256_hex) const;
     std::optional<std::string> load_pinned_cert(const QString& host_id) const;
 
+    // Per-host clipboard-typing keyboard layout (a Windows KLID string), stored
+    // alongside the host record. Used by the viewer's "type clipboard" control.
+    void save_keyboard_layout(const QString& host_id, const QString& klid) const;
+    std::optional<QString> load_keyboard_layout(const QString& host_id) const;
+
     const QString& root_path() const;
 
 private:

@@ -19,6 +19,7 @@ namespace hitsc {
 
 class PowerController;
 class ToastManager;
+class ViewerPasteControl;
 class ViewerPowerControl;
 class ViewerSurface;
 class ViewerTitleBar;
@@ -45,6 +46,9 @@ public:
 
     ViewerSurface* surface() const { return surface_; }
 
+    // The title-bar "type clipboard" control (host glue persists its chosen layout).
+    ViewerPasteControl* paste_control() const { return paste_control_; }
+
     // Set the caption text (and the OS window title used by the taskbar / Alt-Tab).
     void set_title(const QString& title);
 
@@ -69,6 +73,7 @@ private:
     QWK::WidgetWindowAgent* window_agent_ = nullptr;
     ViewerTitleBar* title_bar_ = nullptr;
     ViewerPowerControl* power_control_ = nullptr;
+    ViewerPasteControl* paste_control_ = nullptr;
     ToastManager* toast_manager_ = nullptr;
     ViewerSurface* surface_ = nullptr;
     QTimer* frame_timer_ = nullptr;

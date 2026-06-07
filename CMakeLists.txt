@@ -134,6 +134,12 @@ add_executable(
   src/gui/viewer/viewer_power_control.hpp
   src/gui/viewer/viewer_title_bar.cpp
   src/gui/viewer/viewer_title_bar.hpp
+  src/gui/viewer/viewer_paste_control.cpp
+  src/gui/viewer/viewer_paste_control.hpp
+  src/gui/viewer/keyboard_layout.hpp
+  src/gui/viewer/keyboard_layout_win.cpp
+  src/gui/viewer/win_scancode.cpp
+  src/gui/viewer/win_scancode.hpp
   src/gui/viewer/qt_viewer_host.cpp
   src/gui/viewer/qt_viewer_host.hpp
   src/gui/viewer/main_thread_sampler.cpp
