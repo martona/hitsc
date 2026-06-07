@@ -194,7 +194,17 @@ int run_viewer(const ViewerLaunch& launch, const std::function<void(ViewerHost&)
     // Keyboard gating: a live session forwards keys to the guest; the disconnected
     // console takes R (reconnect) / Esc (close); the connecting/detecting phase
     // (no view yet) takes Esc (cancel).
-    QObject::connect(&window, &ViewerWindow::keyEvent, &window, [&host, &window](const KvmKeyEvent& key) {
+    QObject::connect(&window, &ViewerWindow::keyEvent, &window,
+                     [&host, &window, &clipboard_typer](const KvmKeyEvent& key) {
+        // While a clipboard paste is in flight the user's keys aren't meant for the guest:
+        // any key press cancels it, and we swallow the rest so physical input can't
+        // interleave with the synthesized stream.
+        if (clipboard_typer.busy()) {
+            if (key.down) {
+                clipboard_typer.cancel();
+            }
+            return;
+        }
         KvmViewBase* view = host.view();
         if (view != nullptr && view->hosted_session_ended()) {
             if (key.down && key.scancode == KvmScancode::R) {
@@ -214,7 +224,15 @@ int run_viewer(const ViewerLaunch& launch, const std::function<void(ViewerHost&)
     });
 
     // Pointer input only flows to a live session.
-    QObject::connect(surface, &ViewerSurface::pointerButton, &window, [&host](const KvmPointerButton& button) {
+    QObject::connect(surface, &ViewerSurface::pointerButton, &window,
+                     [&host, &clipboard_typer](const KvmPointerButton& button) {
+        // While a paste is in flight the surface holds the mouse, so a click meant for the
+        // title-bar cancel button lands HERE, not on the button. This is where the click
+        // has to cancel -- mirrors the any-key cancel in the keyboard handler above.
+        if (button.down && clipboard_typer.busy()) {
+            clipboard_typer.cancel();
+            return;  // consume it: it's a cancel, not guest input
+        }
         if (KvmViewBase* view = host.view(); view != nullptr && view->hosted_connected()) {
             view->feed_pointer_button(button);
         }
@@ -267,6 +285,7 @@ int run_viewer(const ViewerLaunch& launch, const std::function<void(ViewerHost&)
         &window,
         [&host, &window, surface, host_label, last_title = QString()]() mutable {
             KvmViewBase* view = host.view();
+            window.set_session_connected(view != nullptr && view->hosted_connected());
             if (view == nullptr) {
                 ConsoleScreen screen;
                 screen.headline = "Connecting to " + host_label + "...";

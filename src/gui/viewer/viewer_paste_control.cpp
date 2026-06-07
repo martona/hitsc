@@ -30,6 +30,7 @@ namespace {
 constexpr int kButtonWidth = 46;
 constexpr int kButtonHeight = 36;
 constexpr int kChevronWidth = 14;
+constexpr int kConfirmEventThreshold = 2000;  // ~1 min at 30 ms/event: confirm big pastes
 
 // Hand-drawn clipboard glyph (a board with a clip tab on top), matching the title bar's
 // other hand-drawn glyphs so it stays crisp at any DPI without an icon-font dependency.
@@ -149,6 +150,15 @@ void ViewerPasteControl::set_typing(bool typing)
     update();
 }
 
+void ViewerPasteControl::set_paste_enabled(bool enabled)
+{
+    if (paste_enabled_ == enabled) {
+        return;
+    }
+    paste_enabled_ = enabled;
+    update();
+}
+
 bool ViewerPasteControl::in_chevron(const QPoint& pos) const
 {
     return pos.x() >= width() - kChevronWidth;
@@ -183,8 +193,8 @@ void ViewerPasteControl::open_layout_menu()
 
 void ViewerPasteControl::do_paste()
 {
-    if (toasts_ == nullptr) {
-        return;
+    if (!paste_enabled_ || toasts_ == nullptr) {
+        return;  // disabled while disconnected; the chevron stays usable via mousePressEvent
     }
 
     const QClipboard* clipboard = QGuiApplication::clipboard();
@@ -224,21 +234,28 @@ void ViewerPasteControl::do_paste()
         return;
     }
 
-    // Newlines become Enter presses -- in a shell each one runs a command. Require a
-    // confirming second click before typing anything that contains line breaks.
+    // Require a confirming second click before anything risky: newlines (each Enter runs a
+    // command in a shell) or a very large paste (slow, and usually a mis-click).
     int newlines = 0;
     for (const KeyChord& chord : result.plan.chords) {
         if (chord.key == KvmScancode::RETURN) {
             ++newlines;
         }
     }
-    if (newlines > 0 && !armed_) {
+    const bool large = result.plan.key_event_count > kConfirmEventThreshold;
+    if ((newlines > 0 || large) && !armed_) {
         armed_ = true;
         arm_timer_->start();
-        toasts_->show(
-            tr("Will press Enter %1x - click again to type").arg(newlines),
-            ToastManager::Level::Info,
-            3200);
+        QString detail;
+        if (newlines > 0) {
+            detail = tr("Will press Enter %1x").arg(newlines);
+        } else {
+            const int secs = result.plan.key_event_count * 30 / 1000;
+            const QString eta = secs >= 60 ? tr("~%1 min").arg((secs + 30) / 60)
+                                           : tr("~%1 s").arg(secs);
+            detail = tr("%1 keystrokes (%2)").arg(result.plan.key_event_count).arg(eta);
+        }
+        toasts_->show(tr("%1 - click again to type").arg(detail), ToastManager::Level::Info, 3200);
         return;
     }
 
@@ -257,7 +274,9 @@ void ViewerPasteControl::paintEvent(QPaintEvent*)
     }
 
     QColor glyph_color = fg_neutral_;
-    if (typing_) {
+    if (!paste_enabled_) {
+        glyph_color.setAlphaF(0.35f);  // dimmed: no connected guest to type into
+    } else if (typing_) {
         const double level = 0.35 + 0.65 * (0.5 + 0.5 * std::sin(pulse_phase_));
         glyph_color.setAlphaF(static_cast<float>(level));
     }

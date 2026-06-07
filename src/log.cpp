@@ -101,6 +101,10 @@ void initialize_logging()
         logging::add_common_attributes();
         auto sink = logging::add_console_log(std::clog);
         sink->set_formatter(&format_record);
+        // Flush every record: without this, std::clog buffers and sparse runtime lines
+        // (a lone power op, the paste/cancel diagnostics) sit unflushed until a later
+        // burst pushes them out -- they look "missing" in real time.
+        sink->locked_backend()->auto_flush(true);
     });
 }
 

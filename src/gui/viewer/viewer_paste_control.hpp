@@ -50,6 +50,10 @@ public:
     // Reflect the typer's state: pulse the glyph while typing, and make a click cancel.
     void set_typing(bool typing);
 
+    // Enable/disable the paste action (the chevron/layout menu stays usable regardless).
+    // Disabled while there's no connected guest to type into.
+    void set_paste_enabled(bool enabled);
+
     QSize sizeHint() const override;
 
 signals:
@@ -75,6 +79,7 @@ private:
     bool dark_ = true;
     bool hovered_ = false;
     bool typing_ = false;
+    bool paste_enabled_ = true;
     bool armed_ = false;  // a newline-containing paste was warned about; next click types
     double pulse_phase_ = 0.0;
     QTimer* pulse_timer_ = nullptr;

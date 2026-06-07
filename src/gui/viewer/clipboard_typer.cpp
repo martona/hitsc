@@ -43,16 +43,33 @@ void ClipboardTyper::start(const TypePlan& plan)
     pressed_.clear();
     next_ = 0;
 
-    // Expand each chord: modifiers down, key down, key up, modifiers up (released LIFO).
+    // Expand each chord into key events, holding shared modifiers across consecutive
+    // chords instead of releasing and re-pressing them (roughly halves the events for runs
+    // of shifted/AltGr text). Any modifiers still held at the end are released.
+    const auto contains = [](const std::vector<KvmScancode>& v, KvmScancode m) {
+        return std::find(v.begin(), v.end(), m) != v.end();
+    };
+    std::vector<KvmScancode> held;
     for (const KeyChord& chord : plan.chords) {
+        // Release held modifiers this chord doesn't want (newest first).
+        for (std::size_t i = held.size(); i-- > 0;) {
+            if (!contains(chord.modifiers, held[i])) {
+                queue_.push_back(KvmKeyEvent{held[i], false, false});
+                held.erase(held.begin() + static_cast<std::ptrdiff_t>(i));
+            }
+        }
+        // Press modifiers this chord wants that aren't held yet.
         for (const KvmScancode mod : chord.modifiers) {
-            queue_.push_back(KvmKeyEvent{mod, true, false});
+            if (!contains(held, mod)) {
+                queue_.push_back(KvmKeyEvent{mod, true, false});
+                held.push_back(mod);
+            }
         }
         queue_.push_back(KvmKeyEvent{chord.key, true, false});
         queue_.push_back(KvmKeyEvent{chord.key, false, false});
-        for (auto it = chord.modifiers.rbegin(); it != chord.modifiers.rend(); ++it) {
-            queue_.push_back(KvmKeyEvent{*it, false, false});
-        }
+    }
+    for (std::size_t i = held.size(); i-- > 0;) {
+        queue_.push_back(KvmKeyEvent{held[i], false, false});
     }
 
     if (queue_.empty()) {

@@ -466,6 +466,9 @@ void ViewerPowerControl::paintEvent(QPaintEvent*)
         const double level = 0.4 + 0.6 * (0.5 + 0.5 * std::sin(pulse_phase_));
         color.setAlphaF(static_cast<float>(level));
     }
+    if (!isEnabled()) {
+        color.setAlphaF(0.35f);  // dimmed: no connected session to send power commands to
+    }
 
     const double box = 16.0;
     const QPointF center(width() / 2.0, height() / 2.0);

@@ -196,6 +196,16 @@ void ViewerWindow::set_power_controller(PowerController* controller)
     }
 }
 
+void ViewerWindow::set_session_connected(bool connected)
+{
+    if (paste_control_ != nullptr) {
+        paste_control_->set_paste_enabled(connected);
+    }
+    if (power_control_ != nullptr) {
+        power_control_->setEnabled(connected);
+    }
+}
+
 void ViewerWindow::apply_caption_theme()
 {
     const bool dark = launcher_should_use_dark_theme(QGuiApplication::styleHints()->colorScheme());

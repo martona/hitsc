@@ -59,6 +59,10 @@ public:
     // The toast host (used by the glue for paste/typing feedback). Always non-null.
     ToastManager* toasts() const { return toast_manager_; }
 
+    // Enable/disable the connection-gated caption controls (paste action, power) as the
+    // session connects/disconnects. Driven from the host's frame tick.
+    void set_session_connected(bool connected);
+
 signals:
     void keyEvent(const hitsc::KvmKeyEvent& key);  // raw-scancode key (Win32 filter)
     void frameTick();                              // ~16 ms repaint cadence
