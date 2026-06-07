@@ -5,6 +5,7 @@
 #include "console_screen.hpp"
 #include "gui/launcher_host_store.hpp"
 #include "gui/screen_geometry.hpp"
+#include "gui/viewer/clipboard_typer.hpp"
 #include "gui/viewer/keyboard_layout.hpp"
 #include "gui/viewer/main_thread_sampler.hpp"
 #include "gui/viewer/viewer_paste_control.hpp"
@@ -117,6 +118,18 @@ int run_viewer(const ViewerLaunch& launch, const std::function<void(ViewerHost&)
     // Per-host clipboard-typing layout: restore the saved KLID (default: the client's
     // active layout) and persist it whenever the user picks a different one. Lives in the
     // same per-host registry key as the window geometry above -- no IPC needed.
+    ClipboardTyper clipboard_typer;
+    clipboard_typer.set_hooks(
+        [&host]() {
+            KvmViewBase* view = host.view();
+            return view != nullptr && view->hosted_connected();
+        },
+        [&host](const KvmKeyEvent& key) {
+            KvmViewBase* view = host.view();
+            if (view != nullptr && view->hosted_connected()) {
+                view->feed_key(key);
+            }
+        });
     if (ViewerPasteControl* paste = window.paste_control()) {
         QString klid;
         if (!host_id.empty()) {
@@ -136,6 +149,31 @@ int run_viewer(const ViewerLaunch& launch, const std::function<void(ViewerHost&)
                     const HostStore store;
                     store.save_keyboard_layout(QString::fromStdString(host_id), chosen);
                 }
+            });
+
+        // Phase 2: drive the built plan onto the wire (paced), with click-to-cancel.
+        QObject::connect(
+            paste, &ViewerPasteControl::pasteRequested, &window,
+            [&host, &window, &clipboard_typer](const TypePlan& plan) {
+                KvmViewBase* view = host.view();
+                if (view == nullptr || !view->hosted_connected()) {
+                    window.show_toast(QStringLiteral("Connect to a host first"));
+                    return;
+                }
+                clipboard_typer.start(plan);
+            });
+        QObject::connect(paste, &ViewerPasteControl::cancelRequested, &clipboard_typer,
+                         [&clipboard_typer]() { clipboard_typer.cancel(); });
+        QObject::connect(
+            &clipboard_typer, &ClipboardTyper::started, paste, [paste, &window](int characters) {
+                paste->set_typing(true);
+                window.show_toast(QStringLiteral("Typing %1 characters...").arg(characters));
+            });
+        QObject::connect(
+            &clipboard_typer, &ClipboardTyper::finished, paste, [paste, &window](bool completed) {
+                paste->set_typing(false);
+                window.show_toast(completed ? QStringLiteral("Done typing")
+                                            : QStringLiteral("Canceled typing"));
             });
     }
 

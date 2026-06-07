@@ -1,5 +1,7 @@
 #pragma once
 
+#include "gui/viewer/keyboard_layout.hpp"  // TypePlan (complete type: it's a signal param)
+
 #include <QAbstractButton>
 #include <QColor>
 #include <QSize>
@@ -11,10 +13,10 @@ class QEnterEvent;
 class QEvent;
 class QMouseEvent;
 class QPaintEvent;
+class QTimer;
 
 namespace hitsc {
 
-class KeyboardLayout;
 class ToastManager;
 
 // Title-bar "type my clipboard" control: a split button. The clipboard glyph types the
@@ -45,10 +47,15 @@ public:
     // control hits too), so the viewer clears it on surface-enter.
     void clear_hover();
 
+    // Reflect the typer's state: pulse the glyph while typing, and make a click cancel.
+    void set_typing(bool typing);
+
     QSize sizeHint() const override;
 
 signals:
     void layoutChanged(const QString& klid);
+    void pasteRequested(const TypePlan& plan);
+    void cancelRequested();
 
 protected:
     void paintEvent(QPaintEvent* event) override;
@@ -67,6 +74,11 @@ private:
 
     bool dark_ = true;
     bool hovered_ = false;
+    bool typing_ = false;
+    bool armed_ = false;  // a newline-containing paste was warned about; next click types
+    double pulse_phase_ = 0.0;
+    QTimer* pulse_timer_ = nullptr;
+    QTimer* arm_timer_ = nullptr;
     QColor fg_neutral_ = QColor(0xF0, 0xF0, 0xF0);
     QColor hover_bg_ = QColor(255, 255, 255, 25);
 };

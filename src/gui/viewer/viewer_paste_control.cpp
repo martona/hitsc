@@ -18,7 +18,9 @@
 #include <QPointF>
 #include <QPolygonF>
 #include <QRectF>
+#include <QTimer>
 
+#include <cmath>
 #include <utility>
 #include <vector>
 
@@ -74,6 +76,21 @@ ViewerPasteControl::ViewerPasteControl(QWidget* parent)
     setAttribute(Qt::WA_Hover, true);
     setToolTip(QStringLiteral("Type clipboard"));
 
+    // Fast glyph pulse while typing (runs only between set_typing(true) and (false)).
+    pulse_timer_ = new QTimer(this);
+    pulse_timer_->setInterval(30);
+    connect(pulse_timer_, &QTimer::timeout, this, [this] {
+        pulse_phase_ += 0.5;
+        update();
+    });
+
+    // A newline-containing paste arms on the first click and disarms after a few seconds
+    // if the confirming second click doesn't come.
+    arm_timer_ = new QTimer(this);
+    arm_timer_->setSingleShot(true);
+    arm_timer_->setInterval(3000);
+    connect(arm_timer_, &QTimer::timeout, this, [this] { armed_ = false; });
+
     connect(this, &QAbstractButton::clicked, this, &ViewerPasteControl::do_paste);
 }
 
@@ -111,6 +128,24 @@ void ViewerPasteControl::set_layout(const QString& klid)
     layout_ = std::move(engine);
     setToolTip(layout_ ? QStringLiteral("Type clipboard - %1").arg(layout_->display_name())
                        : QStringLiteral("Type clipboard"));
+    update();
+}
+
+void ViewerPasteControl::set_typing(bool typing)
+{
+    if (typing_ == typing) {
+        return;
+    }
+    typing_ = typing;
+    if (typing_) {
+        pulse_phase_ = 0.0;
+        pulse_timer_->start();
+        setToolTip(QStringLiteral("Typing... (click to cancel)"));
+    } else {
+        pulse_timer_->stop();
+        setToolTip(layout_ ? QStringLiteral("Type clipboard - %1").arg(layout_->display_name())
+                           : QStringLiteral("Type clipboard"));
+    }
     update();
 }
 
@@ -155,16 +190,19 @@ void ViewerPasteControl::do_paste()
     const QClipboard* clipboard = QGuiApplication::clipboard();
     const QString text = clipboard != nullptr ? clipboard->text() : QString();
     if (text.isEmpty()) {
+        armed_ = false;
         toasts_->show(tr("Clipboard has no text"), ToastManager::Level::Info);
         return;
     }
     if (!layout_) {
+        armed_ = false;
         toasts_->show(tr("No keyboard layout selected"), ToastManager::Level::Error);
         return;
     }
 
     const TypeResult result = layout_->translate(text);
     if (!result.ok) {
+        armed_ = false;
         const TypeError& error = result.error;
         const QString cphex =
             QStringLiteral("%1").arg(static_cast<uint>(error.codepoint), 4, 16, QLatin1Char('0')).toUpper();
@@ -186,12 +224,27 @@ void ViewerPasteControl::do_paste()
         return;
     }
 
-    toasts_->show(
-        tr("%1 chars -> %2 key events [%3]")
-            .arg(result.plan.character_count)
-            .arg(result.plan.key_event_count)
-            .arg(layout_->display_name()),
-        ToastManager::Level::Success);
+    // Newlines become Enter presses -- in a shell each one runs a command. Require a
+    // confirming second click before typing anything that contains line breaks.
+    int newlines = 0;
+    for (const KeyChord& chord : result.plan.chords) {
+        if (chord.key == KvmScancode::RETURN) {
+            ++newlines;
+        }
+    }
+    if (newlines > 0 && !armed_) {
+        armed_ = true;
+        arm_timer_->start();
+        toasts_->show(
+            tr("Will press Enter %1x - click again to type").arg(newlines),
+            ToastManager::Level::Info,
+            3200);
+        return;
+    }
+
+    armed_ = false;
+    arm_timer_->stop();
+    emit pasteRequested(result.plan);
 }
 
 void ViewerPasteControl::paintEvent(QPaintEvent*)
@@ -203,21 +256,33 @@ void ViewerPasteControl::paintEvent(QPaintEvent*)
         painter.fillRect(rect(), hover_bg_);
     }
 
+    QColor glyph_color = fg_neutral_;
+    if (typing_) {
+        const double level = 0.35 + 0.65 * (0.5 + 0.5 * std::sin(pulse_phase_));
+        glyph_color.setAlphaF(static_cast<float>(level));
+    }
+
     const QRectF glyph_area(0.0, 0.0, width() - kChevronWidth, height());
     const QRectF chevron_area(width() - kChevronWidth, 0.0, kChevronWidth, height());
 
     const double box = 16.0;
     const QPointF center = glyph_area.center();
     draw_clipboard_glyph(
-        painter, QRectF(center.x() - box / 2.0, center.y() - box / 2.0, box, box), fg_neutral_);
+        painter, QRectF(center.x() - box / 2.0, center.y() - box / 2.0, box, box), glyph_color);
     draw_chevron(painter, chevron_area, fg_neutral_);
 }
 
 void ViewerPasteControl::mousePressEvent(QMouseEvent* event)
 {
-    if (event->button() == Qt::LeftButton && in_chevron(event->position().toPoint())) {
-        open_layout_menu();
-        return;  // chevron press opens the menu; it's not a paste click
+    if (event->button() == Qt::LeftButton) {
+        if (typing_) {
+            emit cancelRequested();  // any click on the pulsing button cancels
+            return;
+        }
+        if (in_chevron(event->position().toPoint())) {
+            open_layout_menu();  // chevron press opens the menu; it's not a paste click
+            return;
+        }
     }
     QAbstractButton::mousePressEvent(event);
 }
