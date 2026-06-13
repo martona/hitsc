@@ -111,6 +111,13 @@ add_executable(
   src/backends/megarac/megarac_protocol.cpp
   src/backends/megarac/megarac_video.cpp
   src/backends/megarac/megarac_session.cpp
+  src/backends/megarac/megarac_iusb.cpp
+  src/backends/megarac/megarac_iusb.hpp
+  src/virtual_media/block_source.hpp
+  src/virtual_media/iso_file_source.cpp
+  src/virtual_media/iso_file_source.hpp
+  src/virtual_media/scsi_cd_target.cpp
+  src/virtual_media/scsi_cd_target.hpp
   src/backends/pikvm/pikvm_events.cpp
   src/backends/pikvm/pikvm_input.cpp
   src/backends/pikvm/pikvm_session.cpp
@@ -290,7 +297,11 @@ if(BUILD_TESTING)
     src/gui/launcher_types.cpp
     src/gui/windows_registry.cpp
     src/url.cpp
+    src/virtual_media/iso_file_source.cpp
+    src/virtual_media/scsi_cd_target.cpp
+    src/backends/megarac/megarac_iusb.cpp
     tests/launcher_tests.cpp
+    tests/virtual_media_tests.cpp
   )
 
   target_compile_features(hitsc_tests PRIVATE cxx_std_20)

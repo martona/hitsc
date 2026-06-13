@@ -1,6 +1,8 @@
 #include "gui/launcher_host_store.hpp"
 #include "gui/launcher_types.hpp"
 
+#include "virtual_media_tests.hpp"
+
 #include <QByteArray>
 #include <QUuid>
 
@@ -193,6 +195,8 @@ int main()
     test_credential_protector();
     test_host_store();
 #endif
+
+    failures += hitsc::tests::run_virtual_media_tests();
 
     if (failures != 0) {
         std::cerr << failures << " launcher test(s) failed.\n";
