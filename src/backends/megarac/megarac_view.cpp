@@ -194,6 +194,10 @@ private:
         return &input_;
     }
 
+    // MegaRAC speaks AMI IUSB CD redirection on a separate /cd-server websocket, so it can
+    // mount a client ISO. Surfaces the title-bar CD control; the transport follows.
+    bool hosted_supports_virtual_media() const override { return true; }
+
     std::optional<std::pair<int, int>> hosted_input_resolution() override
     {
         // MegaRAC reports resolution only inside the video stream, so before any frame

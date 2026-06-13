@@ -287,6 +287,12 @@ public:
     // host binds the title-bar power widget to it; the GUI uses only this interface.
     virtual PowerController* power_controller() { return nullptr; }
 
+    // True if this backend supports virtual-media (CD/ISO) redirection. The viewer host
+    // shows the title-bar "mount CD" control only when true. Default: unsupported. (For
+    // now a capability flag; this becomes a VirtualMediaController* -- mirroring
+    // power_controller() -- once the IUSB /cd-server transport lands.)
+    virtual bool hosted_supports_virtual_media() const { return false; }
+
     // Zero-copy hardware path (pikvm D3D11VA). The surface hands its QRhi
     // ID3D11Device via set_rhi_d3d11_device once RHI is up; latest_hardware_frame
     // then yields decoded NV12 textures to import. Default: software-only.

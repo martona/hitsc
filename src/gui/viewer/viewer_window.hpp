@@ -19,6 +19,7 @@ namespace hitsc {
 
 class PowerController;
 class ToastManager;
+class ViewerCdControl;
 class ViewerPasteControl;
 class ViewerPowerControl;
 class ViewerSurface;
@@ -49,12 +50,19 @@ public:
     // The title-bar "type clipboard" control (host glue persists its chosen layout).
     ViewerPasteControl* paste_control() const { return paste_control_; }
 
+    // The title-bar "mount CD / ISO" control (host glue connects its mountRequested).
+    ViewerCdControl* cd_control() const { return cd_control_; }
+
     // Set the caption text (and the OS window title used by the taskbar / Alt-Tab).
     void set_title(const QString& title);
 
     // Bind the title-bar power control to the attached view's controller (or null to
     // hide it). Called by the viewer host when a view attaches / detaches.
     void set_power_controller(PowerController* controller);
+
+    // Show/hide the title-bar CD control based on whether the attached backend supports
+    // virtual-media redirection. Called by the viewer host when a view attaches.
+    void set_virtual_media_available(bool available);
 
     // The toast host (used by the glue for paste/typing feedback). Always non-null.
     ToastManager* toasts() const { return toast_manager_; }
@@ -81,6 +89,7 @@ private:
     ViewerTitleBar* title_bar_ = nullptr;
     ViewerPowerControl* power_control_ = nullptr;
     ViewerPasteControl* paste_control_ = nullptr;
+    ViewerCdControl* cd_control_ = nullptr;
     ToastManager* toast_manager_ = nullptr;
     ViewerSurface* surface_ = nullptr;
     QTimer* frame_timer_ = nullptr;

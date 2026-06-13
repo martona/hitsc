@@ -136,6 +136,8 @@ add_executable(
   src/gui/viewer/viewer_title_bar.hpp
   src/gui/viewer/viewer_paste_control.cpp
   src/gui/viewer/viewer_paste_control.hpp
+  src/gui/viewer/viewer_cd_control.cpp
+  src/gui/viewer/viewer_cd_control.hpp
   src/gui/viewer/clipboard_typer.cpp
   src/gui/viewer/clipboard_typer.hpp
   src/gui/viewer/keyboard_layout.hpp

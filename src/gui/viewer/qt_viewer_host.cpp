@@ -9,6 +9,7 @@
 #include "gui/viewer/clipboard_typer.hpp"
 #include "gui/viewer/keyboard_layout.hpp"
 #include "gui/viewer/main_thread_sampler.hpp"
+#include "gui/viewer/viewer_cd_control.hpp"
 #include "gui/viewer/viewer_paste_control.hpp"
 #include "gui/viewer/viewer_surface.hpp"
 #include "gui/viewer/viewer_window.hpp"
@@ -68,6 +69,7 @@ public:
             view_->set_rhi_d3d11_device(surface_.d3d11_device());
             view_->hosted_start_network();
             window_.set_power_controller(view_->power_controller());
+            window_.set_virtual_media_available(view_->hosted_supports_virtual_media());
         }
     }
 
@@ -189,6 +191,15 @@ int run_viewer(const ViewerLaunch& launch, const std::function<void(ViewerHost&)
                     window.toasts()->show(QStringLiteral("Canceled typing"));
                 }
             });
+    }
+
+    // Title-bar CD control (shown only for virtual-media-capable backends). The mount flow
+    // -- pick an .iso, open the IUSB /cd-server transport, serve sectors on demand -- is not
+    // built yet; for now clicking just acknowledges. This is the seam it slots into.
+    if (ViewerCdControl* cd = window.cd_control()) {
+        QObject::connect(cd, &ViewerCdControl::mountRequested, &window, [&window]() {
+            window.toasts()->show(QStringLiteral("Virtual media (CD / ISO) - not yet implemented"));
+        });
     }
 
     // Keyboard gating: a live session forwards keys to the guest; the disconnected

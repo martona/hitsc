@@ -2,6 +2,7 @@
 
 #include "gui/launcher_theme.hpp"
 #include "gui/toast.hpp"
+#include "gui/viewer/viewer_cd_control.hpp"
 #include "gui/viewer/viewer_paste_control.hpp"
 #include "gui/viewer/viewer_power_control.hpp"
 #include "gui/viewer/viewer_surface.hpp"
@@ -141,6 +142,13 @@ ViewerWindow::ViewerWindow(const QString& title, QWidget* parent)
     title_bar_->left_action_area()->addWidget(paste_control_);
     window_agent_->setHitTestVisible(paste_control_, true);
 
+    // CD / virtual-media control, immediately right of paste. Starts hidden; the host
+    // shows it only for backends that support virtual media (set_virtual_media_available).
+    cd_control_ = new ViewerCdControl(this);
+    cd_control_->setVisible(false);
+    title_bar_->left_action_area()->addWidget(cd_control_);
+    window_agent_->setHitTestVisible(cd_control_, true);
+
     set_title(title);
 
     apply_caption_theme();
@@ -159,6 +167,8 @@ ViewerWindow::ViewerWindow(const QString& title, QWidget* parent)
             &ViewerPowerControl::clear_hover);
     connect(surface_, &ViewerSurface::cursorEntered, paste_control_,
             &ViewerPasteControl::clear_hover);
+    connect(surface_, &ViewerSurface::cursorEntered, cd_control_,
+            &ViewerCdControl::clear_hover);
 
     frame_timer_ = new QTimer(this);
     frame_timer_->setInterval(kFrameIntervalMs);
@@ -196,6 +206,13 @@ void ViewerWindow::set_power_controller(PowerController* controller)
     }
 }
 
+void ViewerWindow::set_virtual_media_available(bool available)
+{
+    if (cd_control_ != nullptr) {
+        cd_control_->setVisible(available);
+    }
+}
+
 void ViewerWindow::set_session_connected(bool connected)
 {
     if (paste_control_ != nullptr) {
@@ -203,6 +220,9 @@ void ViewerWindow::set_session_connected(bool connected)
     }
     if (power_control_ != nullptr) {
         power_control_->setEnabled(connected);
+    }
+    if (cd_control_ != nullptr) {
+        cd_control_->set_mount_enabled(connected);
     }
 }
 
@@ -217,6 +237,9 @@ void ViewerWindow::apply_caption_theme()
     }
     if (paste_control_ != nullptr) {
         paste_control_->apply_theme(dark);
+    }
+    if (cd_control_ != nullptr) {
+        cd_control_->apply_theme(dark);
     }
     if (window_agent_ != nullptr) {
         // Dark-mode the 1px system border QWindowKit keeps + the DWM bits.
