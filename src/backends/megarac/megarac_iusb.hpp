@@ -69,6 +69,11 @@ enum : std::uint8_t {
     kIusbConnAcceptedNoBoost = 28,
 };
 
+// A guest-initiated eject arrives as START_STOP_UNIT carrying this magic value in the CDB's LBA
+// field (read LITTLE-endian, the IUSB control convention); 0x30000 is its "loaded" counterpart.
+inline constexpr std::uint32_t kIusbLbaEjected = 0x20000;
+inline constexpr std::uint32_t kIusbLbaLoaded = 0x30000;
+
 // --- header primitives ---
 
 // Serialize a header into `out32` (>= 32 bytes), leaving the checksum byte for

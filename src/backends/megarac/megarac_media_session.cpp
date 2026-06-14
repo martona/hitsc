@@ -158,7 +158,10 @@ public:
         auto self = shared_from_this();
         asio::dispatch(strand_, [self] {
             self->media_.publish_state(MediaState::Mounting);
-            self->queue_packet(iusb_build_auth(self->token_, self->cd_device_no_, false));
+            // Request media-boost: a one-byte AUTH flag asking the BMC to accelerate redirection
+            // (server-side read-ahead). The BMC grants it (ACK 27) or not (ACK 28); we do nothing
+            // else differently either way.
+            self->queue_packet(iusb_build_auth(self->token_, self->cd_device_no_, /*media_boost=*/true));
             self->queue_packet(iusb_build_device_info(self->filename_));
             self->start_read();
         });
@@ -295,11 +298,16 @@ private:
         switch (status) {
         case kIusbConnAccepted:
         case kIusbConnAcceptedBoost:
-        case kIusbConnAcceptedNoBoost:
+        case kIusbConnAcceptedNoBoost: {
+            const char* boost = status == kIusbConnAcceptedBoost      ? " (media boost)"
+                                : status == kIusbConnAcceptedNoBoost  ? " (no media boost)"
+                                                                      : "";
             media_.publish_state(MediaState::Mounted);
-            media_.publish_outcome(MediaOutcome{true, "Mounted " + filename_});
-            log_info() << "cd-server redirection accepted (status " << static_cast<int>(status) << ")";
+            media_.publish_outcome(MediaOutcome{true, "Mounted " + filename_ + boost});
+            log_info() << "cd-server redirection accepted (status " << static_cast<int>(status)
+                       << ")" << boost;
             break;
+        }
         case kIusbConnInUse: {
             std::string other;
             for (std::size_t i = kIusbAckOtherIpIndex;
@@ -347,6 +355,22 @@ private:
         }
         ++scsi_seen_;
         queue_packet(iusb_build_scsi_response(packet, size, result));
+
+        // Guest-initiated eject: START_STOP_UNIT carrying the eject magic in the CDB's LBA field
+        // (little-endian, the IUSB control convention). The guest removed our disc; its response is
+        // already queued, so tear the session down gracefully (request_stop publishes Idle on exit,
+        // which the title-bar control reflects).
+        if (cdb.opcode == kScsiStartStopUnit) {
+            const std::uint8_t* lba = packet + kIusbScsiOpcodeIndex + 2;
+            const std::uint32_t control_lba = static_cast<std::uint32_t>(lba[0]) |
+                (static_cast<std::uint32_t>(lba[1]) << 8) |
+                (static_cast<std::uint32_t>(lba[2]) << 16) |
+                (static_cast<std::uint32_t>(lba[3]) << 24);
+            if (control_lba == kIusbLbaEjected) {
+                log_info() << "cd-server: guest ejected the virtual CD";
+                request_stop();
+            }
+        }
     }
 
     void queue_packet(std::vector<std::uint8_t> bytes)
@@ -516,11 +540,15 @@ void run_megarac_media_session(
         auto async_session = std::make_shared<CdServerAsyncSession>(
             io, ws, options, token, subprotocol, filename_from_path(iso_path),
             /*cd_device_no=*/0, *source, state.media);
-        // Stop = stop the io_context directly from the caller's (Ctrl-C) thread. io_context::stop()
-        // is thread-safe and makes io.run() return immediately whether the strand is idle or busy;
-        // the connection's destructor then closes the socket. (This is what actually makes Ctrl-C
-        // work -- posting onto the strand or aborting the socket can stall behind a pending op.)
-        state.set_force_close([&io] { io.stop(); });
+        // Stop (GUI eject / Ctrl-C) = graceful: flush any in-flight response, send DISCONNECT(247),
+        // then close. request_stop() posts onto the strand (woken even when idle) and arms a 250ms
+        // grace timer that force-closes if the DISCONNECT write stalls, so io.run() always returns.
+        std::weak_ptr<CdServerAsyncSession> weak_session = async_session;
+        state.set_force_close([weak_session] {
+            if (auto session = weak_session.lock()) {
+                session->request_stop();
+            }
+        });
 
         async_session->start();
         io.run();
