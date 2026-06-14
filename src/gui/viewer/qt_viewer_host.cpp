@@ -9,7 +9,6 @@
 #include "gui/viewer/clipboard_typer.hpp"
 #include "gui/viewer/keyboard_layout.hpp"
 #include "gui/viewer/main_thread_sampler.hpp"
-#include "gui/viewer/viewer_cd_control.hpp"
 #include "gui/viewer/viewer_paste_control.hpp"
 #include "gui/viewer/viewer_surface.hpp"
 #include "gui/viewer/viewer_window.hpp"
@@ -69,7 +68,7 @@ public:
             view_->set_rhi_d3d11_device(surface_.d3d11_device());
             view_->hosted_start_network();
             window_.set_power_controller(view_->power_controller());
-            window_.set_virtual_media_available(view_->hosted_supports_virtual_media());
+            window_.set_virtual_media_controller(view_->virtual_media_controller());
         }
     }
 
@@ -193,14 +192,9 @@ int run_viewer(const ViewerLaunch& launch, const std::function<void(ViewerHost&)
             });
     }
 
-    // Title-bar CD control (shown only for virtual-media-capable backends). The mount flow
-    // -- pick an .iso, open the IUSB /cd-server transport, serve sectors on demand -- is not
-    // built yet; for now clicking just acknowledges. This is the seam it slots into.
-    if (ViewerCdControl* cd = window.cd_control()) {
-        QObject::connect(cd, &ViewerCdControl::mountRequested, &window, [&window]() {
-            window.toasts()->show(QStringLiteral("Virtual media (CD / ISO) - not yet implemented"));
-        });
-    }
+    // The title-bar CD control is self-driving: the host binds the attached view's
+    // VirtualMediaController in attach_view (above), and the control handles the ISO picker,
+    // mount/unmount, and state/outcome polling itself.
 
     // Keyboard gating: a live session forwards keys to the guest; the disconnected
     // console takes R (reconnect) / Esc (close); the connecting/detecting phase
@@ -370,8 +364,9 @@ int run_viewer(const ViewerLaunch& launch, const std::function<void(ViewerHost&)
     MainThreadSampler main_thread_sampler;
     const int code = app->exec();
 
-    // Unbind the power control before the view (and its controller) is destroyed.
+    // Unbind the title-bar controls before the view (and its controllers) is destroyed.
     window.set_power_controller(nullptr);
+    window.set_virtual_media_controller(nullptr);
 
     cancel_pending_cert_prompt();
     if (KvmViewBase* view = host.view()) {

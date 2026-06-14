@@ -117,19 +117,6 @@ std::string filename_from_path(const std::string& iso_path)
     return name.empty() ? "image.iso" : name;
 }
 
-std::string hex_dump(const std::uint8_t* data, std::size_t count)
-{
-    static const char* digits = "0123456789abcdef";
-    std::string out;
-    out.reserve(count * 3);
-    for (std::size_t i = 0; i < count; ++i) {
-        out.push_back(digits[data[i] >> 4]);
-        out.push_back(digits[data[i] & 0x0F]);
-        out.push_back(' ');
-    }
-    return out;
-}
-
 struct OutgoingPacket {
     std::vector<std::uint8_t> bytes;
     std::string encoded_text;  // kept alive across an async base64 write
@@ -196,9 +183,6 @@ private:
         if (closed_ || stopping_) {
             return;
         }
-        if (packets_seen_ <= 24) {
-            log_info() << "cd start_read (awaiting next packet)";
-        }
         read_buffer_.clear();
         auto self = shared_from_this();
         ws_->async_read(
@@ -208,7 +192,7 @@ private:
             }));
     }
 
-    void on_read(beast::error_code error, std::size_t bytes)
+    void on_read(beast::error_code error, std::size_t /*bytes*/)
     {
         if (error) {
             handle_read_error(error);
@@ -217,10 +201,6 @@ private:
 
         try {
             const std::vector<std::uint8_t> message = bmc_ws_message_bytes(read_buffer_, subprotocol_);
-            if (packets_seen_ <= 24) {
-                log_info() << "cd on_read ws-bytes=" << bytes << " decoded=" << message.size()
-                           << " accum=" << accumulator_.size();
-            }
             accumulator_.insert(accumulator_.end(), message.begin(), message.end());
 
             std::size_t offset = 0;
@@ -274,18 +254,10 @@ private:
 
     void handle_iusb_packet(const std::uint8_t* packet, std::size_t size)
     {
-        ++packets_seen_;
         if (size <= kIusbScsiOpcodeIndex) {
-            if (packets_seen_ <= 24) {
-                log_info() << "cd pkt #" << packets_seen_ << " short size=" << size;
-            }
             return;  // no opcode byte
         }
         const std::uint8_t opcode = packet[kIusbScsiOpcodeIndex];
-        if (packets_seen_ <= 24) {
-            log_info() << "cd pkt #" << packets_seen_ << " opcode=0x" << std::hex
-                       << static_cast<int>(opcode) << std::dec << " size=" << size;
-        }
         if (opcode >= kIusbOpAck) {
             handle_control(opcode, packet, size);
         } else {
@@ -358,37 +330,23 @@ private:
             return;  // command region incomplete
         }
         const ScsiCdb cdb = ScsiCdTarget::parse_cdb(packet + kIusbScsiOpcodeIndex);
-        // Log the first handful of commands UNCONDITIONALLY (the mount handshake is short), then
-        // only under --vverbose, so a failed mount is diagnosable at any verbosity. The parsed
-        // CDB is logged BEFORE servicing, so even a command that hangs/blocks still shows what was
-        // parsed (e.g. an out-of-range length).
-        const bool trace = scsi_seen_ < 16 || options_.login.vverbose;
-        if (trace) {
-            log_info() << "cd scsi #" << scsi_seen_ << " <- opcode=0x" << std::hex
-                       << static_cast<int>(cdb.opcode) << std::dec << " lba=" << cdb.lba
-                       << " len=" << cdb.length;
-        }
-
         const ScsiResult result = scsi_.execute(cdb);
 
-        if (trace || result.status != 0) {
+        // One line per command under --vverbose; a CHECK CONDITION is always logged so a failed
+        // read is visible at any verbosity.
+        if (options_.login.vverbose || result.status != 0) {
             LogLine line = log_info();
-            line << "cd scsi #" << scsi_seen_ << " -> status=" << static_cast<int>(result.status)
+            line << "cd scsi #" << scsi_seen_ << " opcode=0x" << std::hex
+                 << static_cast<int>(cdb.opcode) << std::dec << " lba=" << cdb.lba
+                 << " len=" << cdb.length << " -> status=" << static_cast<int>(result.status)
                  << " bytes=" << result.data.size();
             if (result.status != 0) {
                 line << " sense=" << static_cast<int>(result.sense_key) << '/'
                      << static_cast<int>(result.asc) << '/' << static_cast<int>(result.ascq);
             }
         }
-
-        std::vector<std::uint8_t> response = iusb_build_scsi_response(packet, size, result);
-        if (scsi_seen_ < 4) {
-            // Dump the exact request + our answer so the wire bytes can be checked field-by-field.
-            log_info() << "cd req : " << hex_dump(packet, std::min<std::size_t>(size, 72));
-            log_info() << "cd resp: " << hex_dump(response.data(), std::min<std::size_t>(response.size(), 72));
-        }
         ++scsi_seen_;
-        queue_packet(std::move(response));
+        queue_packet(iusb_build_scsi_response(packet, size, result));
     }
 
     void queue_packet(std::vector<std::uint8_t> bytes)
@@ -445,9 +403,6 @@ private:
             outgoing_.pop_front();
         }
         writing_ = false;
-        if (packets_seen_ <= 24) {
-            log_info() << "cd on_write done, queued=" << outgoing_.size();
-        }
 
         if (stopping_ && outgoing_.empty()) {
             close_socket();
@@ -498,7 +453,6 @@ private:
     beast::flat_buffer read_buffer_;
     std::vector<std::uint8_t> accumulator_;
     std::deque<OutgoingPacket> outgoing_;
-    int packets_seen_ = 0;
     int scsi_seen_ = 0;
     bool ack_seen_ = false;
     bool writing_ = false;

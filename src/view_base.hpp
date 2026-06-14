@@ -4,6 +4,7 @@
 #include "power_control.hpp"
 #include "view_input_types.hpp"
 #include "view_status.hpp"
+#include "virtual_media/virtual_media.hpp"
 
 #include <QImage>
 #include <QRect>
@@ -287,11 +288,10 @@ public:
     // host binds the title-bar power widget to it; the GUI uses only this interface.
     virtual PowerController* power_controller() { return nullptr; }
 
-    // True if this backend supports virtual-media (CD/ISO) redirection. The viewer host
-    // shows the title-bar "mount CD" control only when true. Default: unsupported. (For
-    // now a capability flag; this becomes a VirtualMediaController* -- mirroring
-    // power_controller() -- once the IUSB /cd-server transport lands.)
-    virtual bool hosted_supports_virtual_media() const { return false; }
+    // Virtual-media (CD/ISO) redirection for this session, or nullptr if unsupported. The viewer
+    // host binds the title-bar CD widget to it; the GUI uses only this interface. Mirrors
+    // power_controller().
+    virtual VirtualMediaController* virtual_media_controller() { return nullptr; }
 
     // Zero-copy hardware path (pikvm D3D11VA). The surface hands its QRhi
     // ID3D11Device via set_rhi_d3d11_device once RHI is up; latest_hardware_frame

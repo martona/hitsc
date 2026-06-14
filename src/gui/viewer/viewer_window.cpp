@@ -142,10 +142,10 @@ ViewerWindow::ViewerWindow(const QString& title, QWidget* parent)
     title_bar_->left_action_area()->addWidget(paste_control_);
     window_agent_->setHitTestVisible(paste_control_, true);
 
-    // CD / virtual-media control, immediately right of paste. Starts hidden; the host
-    // shows it only for backends that support virtual media (set_virtual_media_available).
+    // CD / virtual-media control, immediately right of paste. Hidden until the host binds a
+    // controller (set_virtual_media_controller); it self-drives from there.
     cd_control_ = new ViewerCdControl(this);
-    cd_control_->setVisible(false);
+    cd_control_->set_toast_manager(toast_manager_);
     title_bar_->left_action_area()->addWidget(cd_control_);
     window_agent_->setHitTestVisible(cd_control_, true);
 
@@ -206,10 +206,10 @@ void ViewerWindow::set_power_controller(PowerController* controller)
     }
 }
 
-void ViewerWindow::set_virtual_media_available(bool available)
+void ViewerWindow::set_virtual_media_controller(VirtualMediaController* controller)
 {
     if (cd_control_ != nullptr) {
-        cd_control_->setVisible(available);
+        cd_control_->set_controller(controller);
     }
 }
 
@@ -221,9 +221,8 @@ void ViewerWindow::set_session_connected(bool connected)
     if (power_control_ != nullptr) {
         power_control_->setEnabled(connected);
     }
-    if (cd_control_ != nullptr) {
-        cd_control_->set_mount_enabled(connected);
-    }
+    // The CD control is not connection-gated: virtual media runs its own login, independent of
+    // the video session. It self-drives from its bound controller's state.
 }
 
 void ViewerWindow::apply_caption_theme()

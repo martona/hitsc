@@ -3,11 +3,13 @@
 #include "backends/aspeed/aspeed_view.hpp"
 #include "diagnostics.hpp"
 #include "gui/viewer/qt_viewer_host.hpp"
+#include "backends/megarac/megarac_media_session.hpp"
 #include "hardware_cursor.hpp"
 #include "megarac_hid.hpp"
 #include "megarac_protocol.hpp"
 #include "megarac_view_session.hpp"
 #include "view_input.hpp"
+#include "virtual_media/virtual_media.hpp"
 
 #include <QImage>
 #include <QRect>
@@ -17,9 +19,12 @@
 #include <cstdint>
 #include <cstring>
 #include <exception>
+#include <functional>
 #include <iostream>
 #include <memory>
 #include <optional>
+#include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -161,6 +166,8 @@ public:
     {
     }
 
+    ~MegaracView() override { stop_media(); }
+
 private:
     MegaracView(const MegaracViewOptions& options, std::shared_ptr<MegaracViewSessionState> state)
         : AspeedView(*state, options.login.base_url.host, "megarac", [state] {
@@ -171,6 +178,10 @@ private:
         , state_(std::move(state))
         , encoder_(*state_)
         , input_(encoder_, [] { return std::optional<FrameGeometry>{}; })
+        , media_controller_(
+              media_state_.media,
+              [this](std::string iso_path) { start_media(std::move(iso_path)); },
+              [this] { stop_media(); })
     {
     }
 
@@ -194,9 +205,31 @@ private:
         return &input_;
     }
 
-    // MegaRAC speaks AMI IUSB CD redirection on a separate /cd-server websocket, so it can
-    // mount a client ISO. Surfaces the title-bar CD control; the transport follows.
-    bool hosted_supports_virtual_media() const override { return true; }
+    // MegaRAC speaks AMI IUSB CD redirection on a separate /cd-server websocket, so it can mount
+    // a client ISO. The controller drives a dedicated media thread (start/stop below) -- kept off
+    // the video KvmNetworkWorker so a media stop never disturbs the video session.
+    VirtualMediaController* virtual_media_controller() override { return &media_controller_; }
+
+    void start_media(std::string iso_path)
+    {
+        stop_media();  // join any prior session cleanly before starting a new mount
+        media_stop_.store(false);
+        MegaracViewOptions options = options_;
+        media_thread_ = std::thread([this, options, iso_path]() mutable {
+            run_megarac_media_session(options, iso_path, media_state_, media_stop_);
+        });
+    }
+
+    void stop_media()
+    {
+        if (media_thread_.joinable()) {
+            media_stop_.store(true);
+            if (std::function<void()> force_close = media_state_.force_close_snapshot()) {
+                force_close();  // break the media session's io.run()
+            }
+            media_thread_.join();
+        }
+    }
 
     std::optional<std::pair<int, int>> hosted_input_resolution() override
     {
@@ -226,6 +259,14 @@ private:
     std::shared_ptr<MegaracViewSessionState> state_;
     MegaracInputEncoder encoder_;
     KvmInputController input_;
+
+    // Virtual media runs on its own thread (NOT the video KvmNetworkWorker): own session state
+    // (channel + force-close), own stop flag. media_state_ must precede media_controller_, which
+    // references its channel. media_thread_ is joined in stop_media()/the destructor.
+    MediaSessionState media_state_;
+    std::atomic_bool media_stop_{false};
+    ViewVirtualMediaController media_controller_;
+    std::thread media_thread_;
 };
 
 } // namespace

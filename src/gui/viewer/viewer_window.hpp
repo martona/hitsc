@@ -24,6 +24,7 @@ class ViewerPasteControl;
 class ViewerPowerControl;
 class ViewerSurface;
 class ViewerTitleBar;
+class VirtualMediaController;
 
 // The top-level Qt-native viewer window. Owns the ViewerSurface (its central
 // widget) plus the things that have to live above the surface:
@@ -50,9 +51,6 @@ public:
     // The title-bar "type clipboard" control (host glue persists its chosen layout).
     ViewerPasteControl* paste_control() const { return paste_control_; }
 
-    // The title-bar "mount CD / ISO" control (host glue connects its mountRequested).
-    ViewerCdControl* cd_control() const { return cd_control_; }
-
     // Set the caption text (and the OS window title used by the taskbar / Alt-Tab).
     void set_title(const QString& title);
 
@@ -60,9 +58,9 @@ public:
     // hide it). Called by the viewer host when a view attaches / detaches.
     void set_power_controller(PowerController* controller);
 
-    // Show/hide the title-bar CD control based on whether the attached backend supports
-    // virtual-media redirection. Called by the viewer host when a view attaches.
-    void set_virtual_media_available(bool available);
+    // Bind the title-bar CD control to the attached view's virtual-media controller (or null to
+    // hide it). Called by the viewer host when a view attaches.
+    void set_virtual_media_controller(VirtualMediaController* controller);
 
     // The toast host (used by the glue for paste/typing feedback). Always non-null.
     ToastManager* toasts() const { return toast_manager_; }
