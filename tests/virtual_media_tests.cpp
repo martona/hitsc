@@ -164,11 +164,13 @@ void test_scsi_parse_cdb()
     expect(a.lba == 0x1234, "READ(10) LBA parsed big-endian");
     expect(a.length == 0x40, "READ(10) length parsed big-endian (u16 @7-8)");
 
-    const std::uint8_t read12[12] = {0xA8, 0x00, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x01, 0x00, 0, 0};
+    // READ(12) LBA is big-endian (bytes 2-5) but its transfer length is LITTLE-endian (bytes
+    // 6-9) -- the AMI BMC convention. Here LBA = 5, length = 2.
+    const std::uint8_t read12[12] = {0xA8, 0x00, 0x00, 0x00, 0x00, 0x05, 0x02, 0x00, 0x00, 0x00, 0, 0};
     const ScsiCdb b = ScsiCdTarget::parse_cdb(read12);
     expect(b.opcode == 0xA8, "READ(12) opcode parsed");
     expect(b.lba == 0x05, "READ(12) LBA parsed big-endian");
-    expect(b.length == 0x0100, "READ(12) length parsed big-endian (u32 @6-9)");
+    expect(b.length == 2, "READ(12) length parsed little-endian (u32 @6-9)");
 }
 
 void test_scsi_execute()
@@ -202,6 +204,11 @@ void test_scsi_execute()
     expect(toc.status == 0 && !toc.data.empty() && toc.data.size() <= 20, "READ TOC bounded by allocation");
     expect(toc.data.size() >= 4 && toc.data[2] == 1 && toc.data[3] == 1, "READ TOC reports one track");
     expect(toc.data.size() >= 15 && toc.data[14] == 0xAA, "READ TOC includes the lead-out track");
+
+    // An absurd transfer length (e.g. a misparsed READ(12)) is rejected, never allocated.
+    const ScsiResult huge = target.execute(ScsiCdb{kScsiRead12, 0, 0, 33554432});
+    expect(huge.status == 1 && huge.sense_key == 0x05 && huge.asc == 0x24 && huge.data.empty(),
+           "absurd transfer length is ILLEGAL REQUEST, not a giant allocation");
 
     // START STOP UNIT is acknowledged; PREVENT/ALLOW MEDIUM REMOVAL is an illegal request.
     expect(target.execute(ScsiCdb{kScsiStartStopUnit, 0, 0, 0}).status == 0, "START STOP UNIT is GOOD");

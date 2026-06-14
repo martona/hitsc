@@ -18,6 +18,17 @@ std::uint32_t read_be32(const std::uint8_t* p)
         (static_cast<std::uint32_t>(p[2]) << 8) | static_cast<std::uint32_t>(p[3]);
 }
 
+std::uint32_t read_le32(const std::uint8_t* p)
+{
+    return static_cast<std::uint32_t>(p[0]) | (static_cast<std::uint32_t>(p[1]) << 8) |
+        (static_cast<std::uint32_t>(p[2]) << 16) | (static_cast<std::uint32_t>(p[3]) << 24);
+}
+
+// The largest read we will service. The BMC caps reads at 64 sectors (its MAX_READ_SECTORS),
+// so anything beyond a very generous bound is a corrupt/misparsed CDB, not a real request --
+// reject it rather than allocate gigabytes.
+constexpr std::uint32_t kMaxTransferSectors = 8192;  // 16 MiB
+
 void push_be32(std::vector<std::uint8_t>& out, std::uint32_t value)
 {
     out.push_back(static_cast<std::uint8_t>(value >> 24));
@@ -39,9 +50,13 @@ ScsiCdb ScsiCdTarget::parse_cdb(const std::uint8_t* c)
     ScsiCdb cdb;
     cdb.opcode = c[0];
     cdb.lun = c[1];
-    cdb.lba = read_be32(c + 2);  // bytes 2-5, big-endian
+    cdb.lba = read_be32(c + 2);  // bytes 2-5, big-endian (both READ(10) and READ(12))
     if (cdb.opcode == kScsiRead12) {
-        cdb.length = read_be32(c + 6);  // READ(12) transfer length: u32 BE @6-9
+        // READ(12) transfer length is LITTLE-endian on the wire here -- the AMI BMC/H5Viewer
+        // convention (the JS reads it with the DataStream's native endianness). This BMC sends
+        // host READ(10)s to us as READ(12), so getting this right is not optional. Big-endian
+        // here turns an on-wire "02 00 00 00" (2) into 0x02000000 (33M sectors).
+        cdb.length = read_le32(c + 6);  // u32 LE @6-9
     } else {
         cdb.length = read_be16(c + 7);  // READ(10)/READ_TOC length: u16 BE @7-8
     }
@@ -101,6 +116,11 @@ ScsiResult ScsiCdTarget::read_blocks(const ScsiCdb& cdb)
 {
     if (cdb.length == 0) {
         return ScsiResult{};  // zero-length transfer: GOOD, no data
+    }
+    if (cdb.length > kMaxTransferSectors) {
+        // ILLEGAL REQUEST / INVALID FIELD IN CDB: never trust an absurd length enough to size
+        // an allocation from it.
+        return check_condition(0x05, 0x24, 0x00);
     }
 
     ScsiResult result;

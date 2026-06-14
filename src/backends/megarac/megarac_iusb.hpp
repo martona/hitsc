@@ -53,6 +53,22 @@ enum : std::uint8_t {
     kIusbOpDeviceInfo = 248,
 };
 
+// DEVICE_REDIRECTION_ACK (241) carries the connection status at data offset 30 (absolute 62);
+// if it reports "in use", the other client's IP follows as a string at the next offset.
+inline constexpr std::size_t kIusbAckStatusIndex = 62;
+inline constexpr std::size_t kIusbAckOtherIpIndex = 63;
+inline constexpr std::size_t kIusbAckOtherIpMaxLen = 45;
+
+enum : std::uint8_t {
+    kIusbConnAccepted = 1,
+    kIusbConnLoginFailed = 3,
+    kIusbConnInUse = 4,
+    kIusbConnMaxUser = 8,
+    kIusbConnUnable = 9,
+    kIusbConnAcceptedBoost = 27,
+    kIusbConnAcceptedNoBoost = 28,
+};
+
 // --- header primitives ---
 
 // Serialize a header into `out32` (>= 32 bytes), leaving the checksum byte for

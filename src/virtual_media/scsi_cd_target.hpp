@@ -24,7 +24,9 @@ struct ScsiCdb {
     std::uint8_t opcode = 0;
     std::uint8_t lun = 0;     // byte 1 (the BMC packs LUN/flags here; READ_TOC's MSF bit lives in it)
     std::uint64_t lba = 0;    // bytes 2-5, big-endian
-    std::uint32_t length = 0; // transfer/allocation length: READ(10)/READ_TOC u16 @7-8, READ(12) u32 @6-9
+    // Transfer/allocation length. Endianness is asymmetric (AMI BMC convention): READ(10) /
+    // READ_TOC use a big-endian u16 @7-8; READ(12) uses a LITTLE-endian u32 @6-9.
+    std::uint32_t length = 0;
 };
 
 // One serviced command's result. status: 0 = GOOD, 1 = CHECK CONDITION (then sense_key/asc/ascq

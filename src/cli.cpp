@@ -7,6 +7,7 @@
 #include "errors.hpp"
 #include "gui/child/launcher_child_command.hpp"
 #include "gui/launcher_gui.hpp"
+#include "backends/megarac/megarac_media_session.hpp"
 #include "backends/megarac/megarac_view.hpp"
 #include "options.hpp"
 #include "backends/pikvm/pikvm_view.hpp"
@@ -158,6 +159,22 @@ int run_cli(int argc, char* argv[])
         megarac_password_env_name);
     megarac->add_option("url", megarac_url, "https://host[:port]")->required();
 
+    MegaracViewOptions megarac_media_options;
+    std::string megarac_media_url;
+    std::string megarac_media_password_env_name;
+    std::string megarac_media_iso;
+    CLI::App* megarac_media = app.add_subcommand(
+        "megarac-media", "TEST: mount a client ISO onto a MegaRAC host as a virtual CD (no GUI).");
+    configure_view_options(
+        *megarac_media,
+        megarac_media_options.login,
+        megarac_media_options.idle_timeout_seconds,
+        megarac_media_password_env_name);
+    megarac_media->add_option("--iso", megarac_media_iso, "Path to the .iso to mount.")
+        ->required()
+        ->check(CLI::ExistingFile);
+    megarac_media->add_option("url", megarac_media_url, "https://host[:port]")->required();
+
     AtenViewOptions aten_options;
     std::string aten_url;
     std::string aten_password_env_name;
@@ -199,6 +216,7 @@ int run_cli(int argc, char* argv[])
         if (!command.empty()
             && command.front() != '-'
             && command != "megarac"
+            && command != "megarac-media"
             && command != "aten"
             && command != "pikvm"
             && command != "auto"
@@ -237,6 +255,16 @@ int run_cli(int argc, char* argv[])
         fill_default_credentials(megarac_options.login, megarac_password_env_name);
 
         run_megarac_view(megarac_options);
+        return EXIT_SUCCESS;
+    }
+
+    if (*megarac_media) {
+        normalize_verbosity(megarac_media_options.login);
+        megarac_media_options.login.base_url = parse_https_url(megarac_media_url);
+        megarac_media_options.login.base_url.target = "/";
+        fill_default_credentials(megarac_media_options.login, megarac_media_password_env_name);
+
+        run_megarac_media(megarac_media_options, megarac_media_iso);
         return EXIT_SUCCESS;
     }
 

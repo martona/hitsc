@@ -113,7 +113,12 @@ add_executable(
   src/backends/megarac/megarac_session.cpp
   src/backends/megarac/megarac_iusb.cpp
   src/backends/megarac/megarac_iusb.hpp
+  src/backends/megarac/bmc_ws_framing.cpp
+  src/backends/megarac/bmc_ws_framing.hpp
+  src/backends/megarac/megarac_media_session.cpp
+  src/backends/megarac/megarac_media_session.hpp
   src/virtual_media/block_source.hpp
+  src/virtual_media/virtual_media.hpp
   src/virtual_media/iso_file_source.cpp
   src/virtual_media/iso_file_source.hpp
   src/virtual_media/scsi_cd_target.cpp
