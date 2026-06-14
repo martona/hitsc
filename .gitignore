@@ -33,3 +33,7 @@ CMakeUserPresets.json
 # Local KVM artifacts
 /captures/
 /decoded/
+
+# claude
+.claude/
+handoff.md
