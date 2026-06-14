@@ -275,6 +275,8 @@ private:
             handle_ack(packet, size);
             break;
         case kIusbOpKeepAlive:
+            // Logged at info so an idle mount's keep-alive handshake is visible without --vverbose.
+            log_info() << "cd-server keep-alive received; echoing";
             queue_packet(iusb_build_control(kIusbOpKeepAlive));
             break;
         case kIusbOpDisconnect:

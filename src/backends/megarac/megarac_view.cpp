@@ -166,7 +166,7 @@ public:
     {
     }
 
-    ~MegaracView() override { stop_media(); }
+    ~MegaracView() override { join_media(); }
 
 private:
     MegaracView(const MegaracViewOptions& options, std::shared_ptr<MegaracViewSessionState> state)
@@ -181,7 +181,7 @@ private:
         , media_controller_(
               media_state_.media,
               [this](std::string iso_path) { start_media(std::move(iso_path)); },
-              [this] { stop_media(); })
+              [this] { request_unmount(); })
     {
     }
 
@@ -212,7 +212,7 @@ private:
 
     void start_media(std::string iso_path)
     {
-        stop_media();  // join any prior session cleanly before starting a new mount
+        join_media();  // finish + join any prior session before starting a new mount
         media_stop_.store(false);
         MegaracViewOptions options = options_;
         media_thread_ = std::thread([this, options, iso_path]() mutable {
@@ -220,13 +220,26 @@ private:
         });
     }
 
-    void stop_media()
+    // Eject: signal the media session to stop, but do NOT block the GUI thread waiting for it.
+    // The session publishes Idle (which the title-bar control reflects) before its teardown does a
+    // BMC logout (an HTTP round-trip), so the button feels instant; the now-finishing thread is
+    // joined lazily by the next start_media() / the destructor.
+    void request_unmount()
     {
         if (media_thread_.joinable()) {
             media_stop_.store(true);
             if (std::function<void()> force_close = media_state_.force_close_snapshot()) {
-                force_close();  // break the media session's io.run()
+                force_close();  // graceful DISCONNECT + close, breaking the media session's io.run()
             }
+        }
+    }
+
+    // Stop AND join the media thread -- used where it must be gone before we continue (starting a
+    // new mount, or destruction), since both touch media_state_ / media_thread_.
+    void join_media()
+    {
+        request_unmount();
+        if (media_thread_.joinable()) {
             media_thread_.join();
         }
     }
@@ -262,7 +275,7 @@ private:
 
     // Virtual media runs on its own thread (NOT the video KvmNetworkWorker): own session state
     // (channel + force-close), own stop flag. media_state_ must precede media_controller_, which
-    // references its channel. media_thread_ is joined in stop_media()/the destructor.
+    // references its channel. media_thread_ is joined in join_media()/the destructor.
     MediaSessionState media_state_;
     std::atomic_bool media_stop_{false};
     ViewVirtualMediaController media_controller_;
