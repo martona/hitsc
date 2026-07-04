@@ -207,6 +207,9 @@ AtenSession login_aten(const LoginOptions& options)
 bool logout_aten(const LoginOptions& options, BmcWebSession& web)
 {
     web.close_all_websockets();
+    // Teardown is best-effort: a dead or black-holed BMC must never hold process
+    // exit hostage on a courtesy logout.
+    web.set_http_timeout_seconds(3);
 
     const auto started_at = std::chrono::steady_clock::now();
     const auto log_duration = [&] {

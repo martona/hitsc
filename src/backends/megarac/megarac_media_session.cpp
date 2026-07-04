@@ -522,8 +522,17 @@ void run_megarac_media_session(
                    << source->capacity_sectors() * source->sector_size() << " bytes)";
         state.media.publish_state(MediaState::Mounting);
 
-        MegaRacSession session = login_megarac(options.login);
-        MegaRacLogoutGuard logout_guard(options.login);
+        // Login + token fetch are HTTP with no socket registered anywhere yet; an
+        // early unmount/exit can only abort them through the cancel token. The slot
+        // is replaced with the websocket force-close below once /cd-server opens.
+        LoginOptions login_options = options.login;
+        if (!login_options.cancel_token) {
+            login_options.cancel_token = std::make_shared<HttpCancelToken>();
+        }
+        state.set_force_close([token = login_options.cancel_token] { token->cancel(); });
+
+        MegaRacSession session = login_megarac(login_options);
+        MegaRacLogoutGuard logout_guard(login_options);
         logout_guard.arm(session);
         log_info() << "megarac-cd login succeeded";
 

@@ -257,8 +257,17 @@ void run_pikvm_network_session(
     std::atomic_bool& stop_requested)
 {
     set_pikvm_status(state, "logging in");
-    PikvmSession session = login_pikvm(options.login);
-    PikvmLogoutGuard logout_guard(options.login);
+    // Login + the ATX probe are HTTP with no socket registered anywhere yet; an
+    // early stop (window closed while connecting) can only abort them through the
+    // cancel token. The stop-handles slot takes over below.
+    LoginOptions login_options = options.login;
+    if (!login_options.cancel_token) {
+        login_options.cancel_token = std::make_shared<HttpCancelToken>();
+    }
+    state.set_force_close([token = login_options.cancel_token] { token->cancel(); });
+
+    PikvmSession session = login_pikvm(login_options);
+    PikvmLogoutGuard logout_guard(login_options);
     logout_guard.arm(session);
     log_info() << "pikvm login succeeded";
     if (options.login.verbose) {

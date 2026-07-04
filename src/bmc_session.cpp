@@ -8,6 +8,7 @@
 #include "url.hpp"
 
 #include <boost/asio/ip/tcp.hpp>
+#include <boost/asio/steady_timer.hpp>
 #include <boost/beast/http.hpp>
 #include <boost/beast/websocket.hpp>
 #include <boost/system/system_error.hpp>
@@ -15,6 +16,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <functional>
 #include <cstdint>
 #include <mutex>
 #include <sstream>
@@ -165,6 +167,17 @@ const std::string& BmcWebSocketConnection::role() const
 
 void BmcWebSocketConnection::force_close() noexcept
 {
+    closed_.store(true);
+    // Unconditionally break whatever is pumping io_: an in-progress open_websocket
+    // (its pump sees the stop and unwinds) or a live session's io.run(). Socket
+    // close alone is not enough for the open phase -- before async_connect starts
+    // there is no pending operation for it to abort.
+    io_.stop();
+    if (opening_.load()) {
+        // The opening thread owns the socket and closes it on unwind; touching it
+        // from this thread would race its handlers.
+        return;
+    }
     if (!stream_) {
         return;
     }
@@ -194,7 +207,8 @@ BmcWebSession::BmcWebSession(const LoginOptions& options)
           options.verbose,
           30,
           tls_session_cache_.get(),
-          !options.debug_disable_http_keepalive)
+          !options.debug_disable_http_keepalive,
+          options.cancel_token)
     , websockets_(std::make_unique<WebSocketRegistry>())
 {
 }
@@ -235,13 +249,17 @@ void BmcWebSession::cancel_in_flight_request() noexcept
     client_.cancel();
 }
 
+void BmcWebSession::set_http_timeout_seconds(int seconds) noexcept
+{
+    client_.set_timeout_seconds(seconds);
+}
+
 BmcWebSocketOpenResult BmcWebSession::open_websocket(BmcWebSocketConnectOptions options)
 {
     auto connection = BmcWebSocketConnectionPtr(new BmcWebSocketConnection(options.role));
     configure_tls_session_cache(connection->tls_context_, *tls_session_cache_);
     BmcWebSocketStream& ws = *connection->stream_;
 
-    websocket::response_type response;
     const std::string host = make_host_header(base_url_);
     const std::string origin = make_origin(base_url_);
     const auto websocket_started_at = std::chrono::steady_clock::now();
@@ -252,19 +270,130 @@ BmcWebSocketOpenResult BmcWebSession::open_websocket(BmcWebSocketConnectOptions 
                    << " idle-timeout=" << (options.idle_timeout_seconds > 0 ? std::to_string(options.idle_timeout_seconds) + "s" : "disabled");
     }
 
+    // Register BEFORE any network step so force_close_websocket(role) can abort an
+    // in-progress open: force_close() stops the io_context this open pumps, and the
+    // pump below notices and unwinds. Deregistered again on failure.
+    if (websockets_ != nullptr) {
+        std::lock_guard lock(websockets_->mutex);
+        websockets_->connections.push_back(connection);
+    }
+    connection->opening_.store(true);
+    const auto unregister_connection = [this, &connection]() noexcept {
+        if (websockets_ == nullptr) {
+            return;
+        }
+        std::lock_guard lock(websockets_->mutex);
+        auto& list = websockets_->connections;
+        list.erase(std::remove(list.begin(), list.end(), connection), list.end());
+    };
+
+    // The open runs as pumped ASYNC steps: beast timeouts only apply to async
+    // operations, and only a stoppable run() loop makes the open force-closeable.
+    // Handlers own their state via shared_ptr (never stack references), so a step
+    // abandoned by a force-close drains or dies with the connection's io_context
+    // without dangling.
+    struct OpenStep {
+        bool done = false;
+        beast::error_code ec;
+    };
+    struct OpenState {
+        explicit OpenState(asio::io_context& io)
+            : resolver(io)
+            , timer(io)
+        {
+        }
+
+        tcp::resolver resolver;
+        asio::steady_timer timer;  // resolve deadline (the resolver has no built-in one)
+        tcp::resolver::results_type endpoints;
+        websocket::response_type response;
+    };
+
+    asio::io_context& io = connection->io_;
+    auto state = std::make_shared<OpenState>(io);
+    auto stream = connection->stream_;
+
+    const auto begin_step = [&io, &connection](const char* what) {
+        if (connection->closed_.load()) {
+            throw boost::system::system_error(asio::error::operation_aborted, what);
+        }
+        io.restart();
+    };
+    const auto finish_step = [&io](
+                                 const std::shared_ptr<OpenStep>& step, const char* what,
+                                 const std::function<void()>& abort_in_flight) {
+        io.run();
+        if (!step->done) {
+            // run() was stopped by force_close() mid-step: abort the in-flight
+            // operation, drain its handlers, and unwind.
+            abort_in_flight();
+            io.restart();
+            io.run();
+            throw boost::system::system_error(asio::error::operation_aborted, what);
+        }
+        if (step->ec) {
+            throw boost::system::system_error(step->ec, what);
+        }
+    };
+    const auto close_socket = [stream] {
+        beast::error_code ignored;
+        beast::get_lowest_layer(*stream).socket().close(ignored);
+    };
+
     try {
         configure_tls(connection->tls_context_, ws.next_layer(), base_url_.host, insecure_);
         set_server_name_indication(ws.next_layer(), base_url_.host);
         prepare_tls_session_resumption(ws.next_layer(), *tls_session_cache_, verbose_);
 
-        tcp::resolver resolver(connection->io_);
-        const auto endpoints = resolver.resolve(base_url_.host, base_url_.port);
-        beast::get_lowest_layer(ws).expires_after(std::chrono::seconds(30));
-        beast::get_lowest_layer(ws).connect(endpoints);
+        {
+            begin_step("websocket resolve");
+            auto step = std::make_shared<OpenStep>();
+            state->timer.expires_after(std::chrono::seconds(30));
+            state->timer.async_wait([state, step](beast::error_code timer_error) {
+                if (!timer_error && !step->done) {
+                    state->resolver.cancel();
+                }
+            });
+            state->resolver.async_resolve(
+                base_url_.host, base_url_.port,
+                [state, step](beast::error_code error, tcp::resolver::results_type results) {
+                    state->endpoints = std::move(results);
+                    step->ec = error;
+                    step->done = true;
+                    state->timer.cancel();
+                });
+            finish_step(step, "websocket resolve", [state] {
+                state->resolver.cancel();
+                state->timer.cancel();
+            });
+        }
+        {
+            begin_step("websocket connect");
+            auto step = std::make_shared<OpenStep>();
+            beast::get_lowest_layer(ws).expires_after(std::chrono::seconds(30));
+            beast::get_lowest_layer(ws).async_connect(
+                state->endpoints,
+                [stream, state, step](beast::error_code error, const tcp::endpoint&) {
+                    step->ec = error;
+                    step->done = true;
+                });
+            finish_step(step, "websocket connect", close_socket);
+        }
         if (options.tcp_no_delay) {
             beast::get_lowest_layer(ws).socket().set_option(tcp::no_delay(true));
         }
-        ws.next_layer().handshake(ssl::stream_base::client);
+        {
+            begin_step("websocket tls handshake");
+            auto step = std::make_shared<OpenStep>();
+            beast::get_lowest_layer(ws).expires_after(std::chrono::seconds(30));
+            ws.next_layer().async_handshake(
+                ssl::stream_base::client,
+                [stream, step](beast::error_code error) {
+                    step->ec = error;
+                    step->done = true;
+                });
+            finish_step(step, "websocket tls handshake", close_socket);
+        }
         log_tls_session_handshake_result(ws.next_layer(), *tls_session_cache_, verbose_);
         beast::get_lowest_layer(ws).expires_never();
 
@@ -291,11 +420,34 @@ BmcWebSocketOpenResult BmcWebSession::open_websocket(BmcWebSocketConnectOptions 
                 }
             }));
 
-        ws.handshake(response, host, options.path);
+        {
+            begin_step("websocket handshake");
+            auto step = std::make_shared<OpenStep>();
+            ws.async_handshake(
+                state->response, host, options.path,
+                [stream, state, step](beast::error_code error) {
+                    step->ec = error;
+                    step->done = true;
+                });
+            finish_step(step, "websocket handshake", close_socket);
+        }
+
+        connection->opening_.store(false);
+        io.restart();  // leave the io_context runnable for the session's own io.run()
+        // A force-close that raced the open wins: hand back nothing. Checked AFTER
+        // the opening_ flip and restart so no ordering loses the close -- from here
+        // on force_close() also closes the socket itself.
+        if (connection->closed_.load()) {
+            throw boost::system::system_error(asio::error::operation_aborted, "websocket open");
+        }
     } catch (const boost::system::system_error& ex) {
+        unregister_connection();
+        connection->opening_.store(false);
         connection->force_close();
-        throw UserError(websocket_handshake_error_message(options, ex, response));
+        throw UserError(websocket_handshake_error_message(options, ex, state->response));
     } catch (...) {
+        unregister_connection();
+        connection->opening_.store(false);
         connection->force_close();
         throw;
     }
@@ -315,12 +467,7 @@ BmcWebSocketOpenResult BmcWebSession::open_websocket(BmcWebSocketConnectOptions 
         }
     }
 
-    if (websockets_ != nullptr) {
-        std::lock_guard lock(websockets_->mutex);
-        websockets_->connections.push_back(connection);
-    }
-
-    return BmcWebSocketOpenResult{std::move(connection), std::move(response)};
+    return BmcWebSocketOpenResult{std::move(connection), std::move(state->response)};
 }
 
 void BmcWebSession::force_close_websocket(std::string_view role) noexcept

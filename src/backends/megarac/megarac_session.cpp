@@ -71,6 +71,9 @@ bool logout_megarac(const LoginOptions& options, BmcWebSession& web)
 {
     (void)options;
     web.close_all_websockets();
+    // Teardown is best-effort: a dead or black-holed BMC must never hold process
+    // exit hostage on a courtesy DELETE.
+    web.set_http_timeout_seconds(3);
 
     std::vector<Header> headers;
     const std::string_view csrf_token = web.session_token();

@@ -10,12 +10,16 @@
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/asio/ssl.hpp>
+#include <boost/asio/steady_timer.hpp>
 #include <boost/beast/core.hpp>
 #include <boost/beast/ssl.hpp>
 #include <boost/version.hpp>
 #include <zlib.h>
 
+#include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <functional>
 #include <memory>
 #include <stdexcept>
 #include <utility>
@@ -164,8 +168,104 @@ bool can_retry_reused_request(http::verb method)
 
 } // namespace
 
+void HttpCancelToken::cancel() noexcept
+{
+    std::lock_guard lock(mutex_);
+    canceled_ = true;
+    for (asio::io_context* io : contexts_) {
+        io->stop();  // thread-safe; unblocks the request() pumping that context
+    }
+}
+
+bool HttpCancelToken::canceled() const noexcept
+{
+    std::lock_guard lock(mutex_);
+    return canceled_;
+}
+
+void HttpCancelToken::register_io(asio::io_context& io)
+{
+    std::lock_guard lock(mutex_);
+    contexts_.push_back(&io);
+    if (canceled_) {
+        io.stop();  // cancel() already happened: make the first pump abort immediately
+    }
+}
+
+void HttpCancelToken::unregister_io(asio::io_context& io) noexcept
+{
+    std::lock_guard lock(mutex_);
+    contexts_.erase(std::remove(contexts_.begin(), contexts_.end(), &io), contexts_.end());
+}
+
 struct HttpsClient::Impl {
     using Stream = beast::ssl_stream<beast::tcp_stream>;
+
+    // All I/O below is asynchronous, driven to completion by pumping io_ on the
+    // calling thread. This is not a style choice: beast's timeouts only exist for
+    // async operations ("Timeouts are not available when performing blocking calls"
+    // -- basic_stream docs), and cancel()'s io_.stop() can only interrupt a run()
+    // loop. The previous synchronous implementation had silently non-functional
+    // timeouts and an inert cancel(), which let a hard-powered-off BMC hang every
+    // teardown path.
+    //
+    // Every completion handler writes into shared_ptr-owned state (StepState /
+    // Connection / Exchange) and never captures raw stack pointers, so a step
+    // abandoned by cancel() can be drained -- or destroyed with io_ -- without
+    // dangling.
+
+    // One async step's outcome; handlers own it via shared_ptr.
+    struct StepState {
+        bool done = false;
+        beast::error_code ec;
+    };
+
+    // One connection attempt's resources. The established stream_ aliases into
+    // this, so handler-held copies keep everything alive together.
+    struct Connection {
+        Connection(asio::io_context& io, ssl::context& tls_context)
+            : stream(io, tls_context)
+            , timer(io)
+        {
+        }
+
+        Stream stream;
+        asio::steady_timer timer;  // resolve deadline (the resolver has no built-in one)
+        tcp::resolver::results_type endpoints;
+    };
+
+    // One request/response exchange's buffers, alive until the handlers finish.
+    struct Exchange {
+        http::request<http::string_body> request;
+        beast::flat_buffer buffer;
+        StringResponse response;
+    };
+
+    // RAII binding of one request() to the cancel token, so token->cancel() from
+    // another thread stops this client's io_context while the request runs.
+    struct TokenRegistration {
+        TokenRegistration(HttpCancelToken* token, asio::io_context& io)
+            : token_(token)
+            , io_(&io)
+        {
+            if (token_ != nullptr) {
+                token_->register_io(*io_);
+            }
+        }
+
+        ~TokenRegistration()
+        {
+            if (token_ != nullptr) {
+                token_->unregister_io(*io_);
+            }
+        }
+
+        TokenRegistration(const TokenRegistration&) = delete;
+        TokenRegistration& operator=(const TokenRegistration&) = delete;
+
+        HttpCancelToken* token_;
+        asio::io_context* io_;
+    };
 
     Impl(
         const Url& url,
@@ -173,13 +273,15 @@ struct HttpsClient::Impl {
         bool verbose,
         int timeout_seconds,
         TlsSessionCache* tls_session_cache,
-        bool keep_alive)
+        bool keep_alive,
+        std::shared_ptr<HttpCancelToken> cancel_token)
         : url_(url)
         , insecure_(insecure)
         , verbose_(verbose)
         , timeout_seconds_(timeout_seconds)
         , tls_session_cache_(tls_session_cache)
         , keep_alive_(keep_alive)
+        , cancel_token_(std::move(cancel_token))
         , tls_context_(ssl::context::tls_client)
         , resolver_(io_)
     {
@@ -201,6 +303,11 @@ struct HttpsClient::Impl {
         CookieJar* cookies,
         const std::vector<Header>& extra_headers)
     {
+        // A client-level cancel() is not sticky (the next request reconnects); a
+        // token cancel is, and begin_step() enforces it before every operation.
+        canceled_.store(false);
+        TokenRegistration token_registration(cancel_token_.get(), io_);
+
         const std::string request_url = make_request_url(url_, target);
         const auto request_started_at = std::chrono::steady_clock::now();
         if (verbose_) {
@@ -241,12 +348,18 @@ struct HttpsClient::Impl {
                 return response;
             } catch (const boost_system::system_error& ex) {
                 close_connection();
+                const boost::system::error_code code = ex.code();
+                // Never retry a canceled request (teardown wants out NOW) or one that
+                // hit its deadline (the peer is unresponsive; a second full wait helps
+                // nobody and doubles a hang).
+                if (code == asio::error::operation_aborted || code == beast::error::timeout) {
+                    throw;
+                }
                 // A reused keep-alive connection that the server closed while idle
                 // surfaces as EOF before any response byte (end_of_stream). The request
                 // was never processed, so retrying once is safe even for non-idempotent
                 // methods (e.g. the power POSTs) -- this is the standard stale-keepalive
                 // recovery. Other (mid-exchange) errors stay gated on idempotency.
-                const boost::system::error_code code = ex.code();
                 const bool connection_closed =
                     code == http::error::end_of_stream ||
                     code == ssl::error::stream_truncated ||
@@ -273,34 +386,125 @@ struct HttpsClient::Impl {
 
     void cancel() noexcept
     {
-        // Thread-safe (io_context::stop may be called from any thread). Unblocks the
-        // synchronous beast op currently pumping io_ -- the in-flight connect / TLS
-        // handshake / write / read returns with operation_aborted, so request()
-        // throws. Not sticky: connect() calls io_.restart() before the next request.
+        // Thread-safe (io_context::stop may be called from any thread). request()
+        // pumps every async operation through io_.run(), so the stop returns run()
+        // before the step's handler fires; finish_step() sees the incomplete step,
+        // aborts the in-flight operation, and throws operation_aborted. Not sticky:
+        // request() clears the flag on entry and restarts io_ before each step.
+        canceled_.store(true);
         io_.stop();
     }
 
+    void set_timeout_seconds(int timeout_seconds) noexcept
+    {
+        timeout_seconds_ = timeout_seconds;
+    }
+
 private:
+    // Throws if this request was canceled, then readies io_ for the next step.
+    // (io_.restart() clears a stop flag, so the cancel checks must come first; a
+    // cancel landing in the hair's width between check and run() still gets caught
+    // by the step's own deadline -- bounded, never a hang.)
+    void begin_step(const char* what)
+    {
+        if (canceled_.load() || (cancel_token_ != nullptr && cancel_token_->canceled())) {
+            throw boost_system::system_error(asio::error::operation_aborted, what);
+        }
+        io_.restart();
+    }
+
+    // Pump io_ until the step completes. If run() was stopped first (cancel()),
+    // abort the in-flight operation and drain its handlers -- they own their state
+    // via shared_ptr, so even a drain truncated by a second stop dangles nothing --
+    // then surface the abort.
+    void finish_step(
+        const std::shared_ptr<StepState>& step,
+        const char* what,
+        const std::function<void()>& abort_in_flight)
+    {
+        io_.run();
+        if (!step->done) {
+            abort_in_flight();
+            io_.restart();
+            io_.run();
+            throw boost_system::system_error(asio::error::operation_aborted, what);
+        }
+        if (step->ec) {
+            throw boost_system::system_error(step->ec, what);
+        }
+    }
+
+    static void close_stream(Stream& stream) noexcept
+    {
+        beast::error_code ignored;
+        beast::get_lowest_layer(stream).socket().close(ignored);
+    }
+
     void connect()
     {
-        io_.restart();
-
-        auto next_stream = std::make_unique<Stream>(io_, tls_context_);
-        configure_tls(tls_context_, *next_stream, url_.host, insecure_);
-        set_server_name_indication(*next_stream, url_.host);
+        auto connection = std::make_shared<Connection>(io_, tls_context_);
+        configure_tls(tls_context_, connection->stream, url_.host, insecure_);
+        set_server_name_indication(connection->stream, url_.host);
         if (tls_session_cache_ != nullptr) {
-            prepare_tls_session_resumption(*next_stream, *tls_session_cache_, verbose_);
+            prepare_tls_session_resumption(connection->stream, *tls_session_cache_, verbose_);
         }
 
-        const auto endpoints = resolver_.resolve(url_.host, url_.port);
-        beast::get_lowest_layer(*next_stream).expires_after(std::chrono::seconds(timeout_seconds_));
-        beast::get_lowest_layer(*next_stream).connect(endpoints);
-        next_stream->handshake(ssl::stream_base::client);
-        if (tls_session_cache_ != nullptr) {
-            log_tls_session_handshake_result(*next_stream, *tls_session_cache_, verbose_);
+        {
+            begin_step("resolve host");
+            auto step = std::make_shared<StepState>();
+            connection->timer.expires_after(std::chrono::seconds(timeout_seconds_));
+            connection->timer.async_wait([this, step](beast::error_code timer_error) {
+                if (!timer_error && !step->done) {
+                    resolver_.cancel();
+                }
+            });
+            resolver_.async_resolve(
+                url_.host, url_.port,
+                [connection, step](beast::error_code error, tcp::resolver::results_type results) {
+                    connection->endpoints = std::move(results);
+                    step->ec = error;
+                    step->done = true;
+                    connection->timer.cancel();
+                });
+            finish_step(step, "resolve host", [this, connection] {
+                resolver_.cancel();
+                connection->timer.cancel();
+            });
+        }
+        {
+            begin_step("connect");
+            auto step = std::make_shared<StepState>();
+            beast::get_lowest_layer(connection->stream)
+                .expires_after(std::chrono::seconds(timeout_seconds_));
+            beast::get_lowest_layer(connection->stream)
+                .async_connect(
+                    connection->endpoints,
+                    [connection, step](beast::error_code error, const tcp::endpoint&) {
+                        step->ec = error;
+                        step->done = true;
+                    });
+            finish_step(step, "connect", [connection] { close_stream(connection->stream); });
+        }
+        {
+            begin_step("tls handshake");
+            auto step = std::make_shared<StepState>();
+            beast::get_lowest_layer(connection->stream)
+                .expires_after(std::chrono::seconds(timeout_seconds_));
+            connection->stream.async_handshake(
+                ssl::stream_base::client,
+                [connection, step](beast::error_code error) {
+                    step->ec = error;
+                    step->done = true;
+                });
+            finish_step(step, "tls handshake", [connection] { close_stream(connection->stream); });
         }
 
-        stream_ = std::move(next_stream);
+        if (tls_session_cache_ != nullptr) {
+            log_tls_session_handshake_result(connection->stream, *tls_session_cache_, verbose_);
+        }
+
+        // Alias into the Connection so handler-held copies and stream_ share one lifetime.
+        stream_ = std::shared_ptr<Stream>(connection, &connection->stream);
     }
 
     http::request<http::string_body> make_http_request(
@@ -334,22 +538,42 @@ private:
             connect();
         }
 
-        auto request = make_http_request(method, target, body, content_type, cookies, extra_headers);
+        auto stream = stream_;  // handlers keep the connection alive if abandoned
+        auto exchange = std::make_shared<Exchange>();
+        exchange->request =
+            make_http_request(method, target, body, content_type, cookies, extra_headers);
+        log_http_request(exchange->request, verbose_);
 
-        log_http_request(request, verbose_);
-        beast::get_lowest_layer(*stream_).expires_after(std::chrono::seconds(timeout_seconds_));
-        http::write(*stream_, request);
-
-        beast::flat_buffer buffer;
-        StringResponse response;
-        beast::get_lowest_layer(*stream_).expires_after(std::chrono::seconds(timeout_seconds_));
-        http::read(*stream_, buffer, response);
-
-        if (cookies != nullptr) {
-            collect_cookies(response, *cookies);
+        {
+            begin_step("send request");
+            auto step = std::make_shared<StepState>();
+            beast::get_lowest_layer(*stream).expires_after(std::chrono::seconds(timeout_seconds_));
+            http::async_write(
+                *stream, exchange->request,
+                [stream, exchange, step](beast::error_code error, std::size_t) {
+                    step->ec = error;
+                    step->done = true;
+                });
+            finish_step(step, "send request", [stream] { close_stream(*stream); });
+        }
+        {
+            begin_step("read response");
+            auto step = std::make_shared<StepState>();
+            beast::get_lowest_layer(*stream).expires_after(std::chrono::seconds(timeout_seconds_));
+            http::async_read(
+                *stream, exchange->buffer, exchange->response,
+                [stream, exchange, step](beast::error_code error, std::size_t) {
+                    step->ec = error;
+                    step->done = true;
+                });
+            finish_step(step, "read response", [stream] { close_stream(*stream); });
         }
 
-        return response;
+        if (cookies != nullptr) {
+            collect_cookies(exchange->response, *cookies);
+        }
+
+        return std::move(exchange->response);
     }
 
     void log_request_finished(
@@ -376,9 +600,23 @@ private:
         }
 
         try {
-            beast::get_lowest_layer(*stream_).expires_after(std::chrono::seconds(timeout_seconds_));
-            beast::error_code shutdown_error;
-            stream_->shutdown(shutdown_error);
+            // Graceful close_notify, but tightly bounded: asio's TLS shutdown WAITS
+            // to read the peer's close_notify, which never arrives from a dead BMC.
+            // This runs on teardown paths and is pure courtesy -- 2s, then hard close.
+            begin_step("tls shutdown");
+            auto stream = stream_;
+            auto step = std::make_shared<StepState>();
+            beast::get_lowest_layer(*stream).expires_after(std::chrono::seconds(2));
+            stream->async_shutdown([stream, step](beast::error_code error) {
+                step->ec = error;
+                step->done = true;
+            });
+            io_.run();
+            if (!step->done) {
+                close_stream(*stream);
+                io_.restart();
+                io_.run();
+            }
         } catch (...) {
         }
 
@@ -403,10 +641,12 @@ private:
     int timeout_seconds_ = 30;
     TlsSessionCache* tls_session_cache_ = nullptr;
     bool keep_alive_ = true;
+    std::shared_ptr<HttpCancelToken> cancel_token_;
+    std::atomic_bool canceled_{false};
     asio::io_context io_;
     ssl::context tls_context_;
     tcp::resolver resolver_;
-    std::unique_ptr<Stream> stream_;
+    std::shared_ptr<Stream> stream_;  // aliases into a Connection (see connect())
 };
 
 HttpsClient::HttpsClient(
@@ -415,8 +655,11 @@ HttpsClient::HttpsClient(
     bool verbose,
     int timeout_seconds,
     TlsSessionCache* tls_session_cache,
-    bool keep_alive)
-    : impl_(std::make_unique<Impl>(url, insecure, verbose, timeout_seconds, tls_session_cache, keep_alive))
+    bool keep_alive,
+    std::shared_ptr<HttpCancelToken> cancel_token)
+    : impl_(std::make_unique<Impl>(
+          url, insecure, verbose, timeout_seconds, tls_session_cache, keep_alive,
+          std::move(cancel_token)))
 {
 }
 
@@ -441,6 +684,13 @@ void HttpsClient::cancel() noexcept
 {
     if (impl_) {
         impl_->cancel();
+    }
+}
+
+void HttpsClient::set_timeout_seconds(int timeout_seconds) noexcept
+{
+    if (impl_) {
+        impl_->set_timeout_seconds(timeout_seconds);
     }
 }
 

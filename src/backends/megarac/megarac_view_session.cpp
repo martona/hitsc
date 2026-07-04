@@ -1040,8 +1040,18 @@ void run_megarac_view_session(const MegaracViewOptions& options, MegaracViewSess
     } connection_status_guard{state};
 
     try {
-        MegaRacSession session = login_megarac(options.login);
-        MegaRacLogoutGuard logout_guard(options.login);
+        // The login/config phase is HTTP with no socket registered anywhere yet, so
+        // the only way an early stop (window closed while connecting) can abort it
+        // is through the cancel token. Arm force_close with it until the websocket
+        // takes over below.
+        LoginOptions login_options = options.login;
+        if (!login_options.cancel_token) {
+            login_options.cancel_token = std::make_shared<HttpCancelToken>();
+        }
+        state.set_force_close([token = login_options.cancel_token] { token->cancel(); });
+
+        MegaRacSession session = login_megarac(login_options);
+        MegaRacLogoutGuard logout_guard(login_options);
         logout_guard.arm(session);
         log_info() << "megarac login succeeded";
 

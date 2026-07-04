@@ -170,7 +170,8 @@ KvmBackendFingerprint detect_kvm_backend(LoginOptions& login)
         login.verbose,
         10,
         login.tls_session_cache.get(),
-        false);
+        false,
+        login.cancel_token);
     CookieJar cookies;
     StringResponse response = client.request(http::verb::get, "/", {}, {}, &cookies);
     return classify_root_response(response);
@@ -225,6 +226,11 @@ struct AutoDetection {
 
     ~AutoDetection()
     {
+        // Abort a probe still in flight (window closed while detecting) before the
+        // join; otherwise a dead host holds this destructor for the probe timeout.
+        if (options.login.cancel_token) {
+            options.login.cancel_token->cancel();
+        }
         if (worker.joinable()) {
             worker.join();
         }
@@ -243,6 +249,11 @@ void run_auto_view(const AutoViewOptions& options)
         detection->options = options;
         if (!detection->options.login.tls_session_cache) {
             detection->options.login.tls_session_cache = std::make_shared<TlsSessionCache>(16);
+        }
+        // Makes the detection probe abortable from ~AutoDetection; the detected
+        // view's sessions inherit and reuse the same token for their login phase.
+        if (!detection->options.login.cancel_token) {
+            detection->options.login.cancel_token = std::make_shared<HttpCancelToken>();
         }
 
         AutoDetection* state = detection.get();

@@ -1112,8 +1112,17 @@ void run_aten_network_session(
         }
     } connection_status_guard{state};
 
-    AtenSession session = login_aten(options.login);
-    AtenLogoutGuard logout_guard(options.login);
+    // Login + bootstrap fetch are HTTP with no socket registered anywhere yet; an
+    // early stop (window closed while connecting) can only abort them through the
+    // cancel token. The websocket force-close takes over the slot below.
+    LoginOptions login_options = options.login;
+    if (!login_options.cancel_token) {
+        login_options.cancel_token = std::make_shared<HttpCancelToken>();
+    }
+    state.set_force_close([token = login_options.cancel_token] { token->cancel(); });
+
+    AtenSession session = login_aten(login_options);
+    AtenLogoutGuard logout_guard(login_options);
     logout_guard.arm(session);
     log_info() << "aten login succeeded";
     if (options.login.verbose) {

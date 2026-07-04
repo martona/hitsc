@@ -52,6 +52,9 @@ PikvmSession login_pikvm(const LoginOptions& options)
 bool logout_pikvm(const LoginOptions& options, BmcWebSession& web)
 {
     web.close_all_websockets();
+    // Teardown is best-effort: a dead or black-holed BMC must never hold process
+    // exit hostage on a courtesy logout.
+    web.set_http_timeout_seconds(3);
 
     try {
         auto response = web.request(

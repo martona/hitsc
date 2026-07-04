@@ -7,6 +7,7 @@
 
 namespace hitsc {
 
+class HttpCancelToken;
 class TlsSessionCache;
 
 struct VerbosityOptions {
@@ -23,6 +24,11 @@ struct LoginOptions {
     bool insecure = false;
     bool debug_disable_http_keepalive = false;
     std::shared_ptr<TlsSessionCache> tls_session_cache;
+    // Cross-thread abort for this session's HTTP work (login, config fetches,
+    // logout). Shared into every HttpsClient built from these options; sessions
+    // arm their force-close slot with it during the login phase, when no socket
+    // exists yet to close. Optional -- created on demand by the session runners.
+    std::shared_ptr<HttpCancelToken> cancel_token;
     // Saved-host id, used to persist this viewer's window geometry with the host
     // record. Empty for direct-CLI launches (no saved host).
     std::string host_id;

@@ -11,6 +11,7 @@
 #include <boost/beast/websocket.hpp>
 #include <boost/beast/websocket/ssl.hpp>
 
+#include <atomic>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -85,6 +86,12 @@ private:
     boost::asio::ssl::context tls_context_;
     std::shared_ptr<BmcWebSocketStream> stream_;
     std::string role_;
+    // closed_: force_close() happened; an in-progress open_websocket aborts on it.
+    // opening_: open_websocket is pumping io_ on its own thread and owns the socket;
+    // force_close() then only stops io_ (the opener closes the socket itself),
+    // avoiding cross-thread socket access.
+    std::atomic_bool closed_{false};
+    std::atomic_bool opening_{false};
 };
 
 using BmcWebSocketConnectionPtr = std::shared_ptr<BmcWebSocketConnection>;
@@ -118,6 +125,10 @@ public:
     // Abort an in-flight request() from another thread (for instant teardown of a
     // blocking power POST). Forwards to the underlying HTTPS client.
     void cancel_in_flight_request() noexcept;
+
+    // Shrink the HTTP deadline for subsequent requests on this session. Teardown
+    // (logout) uses it so a dead BMC cannot hold process exit hostage.
+    void set_http_timeout_seconds(int seconds) noexcept;
 
     std::size_t cookie_count() const;
     std::string_view session_token() const;
