@@ -3,6 +3,7 @@
 #include "virtual_media/block_source.hpp"
 
 #include <algorithm>
+#include <cstring>
 
 namespace hitsc {
 namespace {
@@ -172,16 +173,22 @@ ScsiResult ScsiCdTarget::read_toc(const ScsiCdb& cdb) const
     toc[n++] = static_cast<std::uint8_t>((lead_out / 75) % 60);
     toc[n++] = static_cast<std::uint8_t>(lead_out % 75);
 
-    // TOC data length header (the count of bytes that follow these 2).
-    const std::uint16_t data_length = static_cast<std::uint16_t>(n - 2);
+    // TOC data length header (the count of bytes that follow these 2), written after the clamp
+    // to the allocation length -- the H5Viewer writes it post-truncation too.
+    const std::size_t copy = std::min<std::size_t>(n, cdb.length);
+    const std::uint16_t data_length = static_cast<std::uint16_t>(copy >= 2 ? copy - 2 : 0);
     toc[0] = static_cast<std::uint8_t>(data_length >> 8);
     toc[1] = static_cast<std::uint8_t>(data_length & 0xFF);
 
-    // Return min(available, allocation length): the host first asks with a small allocation to
-    // learn the length, then re-asks with enough room.
-    const std::size_t copy = std::min<std::size_t>(n, cdb.length);
+    // Answer with EXACTLY the allocation length, zero-padded past the real TOC. That is what
+    // the H5Viewer sends (it sizes its reply buffer to the request), so it is the only response
+    // shape the BMC's USB gadget has ever been exercised with; a shorter data-in transfer is
+    // legal SCSI but untested territory.
     ScsiResult result;
-    result.data.assign(toc, toc + copy);
+    result.data.assign(cdb.length, 0);
+    if (copy > 0) {
+        std::memcpy(result.data.data(), toc, copy);
+    }
     return result;
 }
 

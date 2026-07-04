@@ -258,7 +258,11 @@ private:
     void handle_iusb_packet(const std::uint8_t* packet, std::size_t size)
     {
         if (size <= kIusbScsiOpcodeIndex) {
-            return;  // no opcode byte
+            // Dropping a request unanswered can wedge the BMC's USB gadget (which also carries
+            // the HID devices), so a drop must never be silent.
+            log_warning() << "cd-server: dropping " << size
+                          << "-byte IUSB packet (too short to carry an opcode); no response sent";
+            return;
         }
         const std::uint8_t opcode = packet[kIusbScsiOpcodeIndex];
         if (opcode >= kIusbOpAck) {
@@ -285,6 +289,8 @@ private:
             close_socket();
             break;
         default:
+            log_warning() << "cd-server: ignoring unknown control opcode "
+                          << static_cast<int>(opcode) << " (" << size << " bytes)";
             break;
         }
     }
@@ -337,7 +343,11 @@ private:
     void handle_scsi(const std::uint8_t* packet, std::size_t size)
     {
         if (size < kIusbDataIndex) {
-            return;  // command region incomplete
+            log_warning() << "cd-server: dropping " << size
+                          << "-byte SCSI packet (command region incomplete, opcode 0x" << std::hex
+                          << static_cast<int>(packet[kIusbScsiOpcodeIndex]) << std::dec
+                          << "); no response sent";
+            return;
         }
         const ScsiCdb cdb = ScsiCdTarget::parse_cdb(packet + kIusbScsiOpcodeIndex);
         const ScsiResult result = scsi_.execute(cdb);

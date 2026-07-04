@@ -199,11 +199,28 @@ void test_scsi_execute()
     expect(read.data[0] == 2 && read.data[2048] == 3 && read.data[4096] == 4,
            "READ(10) returns the requested sectors in order");
 
-    // READ TOC: minimal single-track TOC with a lead-out (0xAA) descriptor.
+    // READ TOC: minimal single-track TOC with a lead-out (0xAA) descriptor. The response is
+    // always exactly the allocation length -- zero-padded past the 20 real bytes, truncated
+    // under -- matching the H5Viewer (the only response shape the BMC has been tested with).
     const ScsiResult toc = target.execute(ScsiCdb{kScsiReadToc, 0, 0, 20});
-    expect(toc.status == 0 && !toc.data.empty() && toc.data.size() <= 20, "READ TOC bounded by allocation");
-    expect(toc.data.size() >= 4 && toc.data[2] == 1 && toc.data[3] == 1, "READ TOC reports one track");
-    expect(toc.data.size() >= 15 && toc.data[14] == 0xAA, "READ TOC includes the lead-out track");
+    expect(toc.status == 0 && toc.data.size() == 20, "READ TOC fills the exact allocation");
+    expect(toc.data[0] == 0 && toc.data[1] == 18, "READ TOC header reports the full TOC length");
+    expect(toc.data[2] == 1 && toc.data[3] == 1, "READ TOC reports one track");
+    expect(toc.data[14] == 0xAA, "READ TOC includes the lead-out track");
+
+    // A larger allocation (the kernel typically asks with a few hundred bytes) is zero-padded;
+    // the data-length header still reports only the real 18 bytes that follow it.
+    const ScsiResult toc_padded = target.execute(ScsiCdb{kScsiReadToc, 0, 0, 324});
+    expect(toc_padded.status == 0 && toc_padded.data.size() == 324, "READ TOC pads to the allocation");
+    expect(toc_padded.data[0] == 0 && toc_padded.data[1] == 18 && toc_padded.data[14] == 0xAA,
+           "padded READ TOC keeps the real header and descriptors");
+    expect(toc_padded.data[20] == 0 && toc_padded.data[323] == 0, "READ TOC pad bytes are zero");
+
+    // A small allocation truncates, and the header reflects the truncated length.
+    const ScsiResult toc_short = target.execute(ScsiCdb{kScsiReadToc, 0, 0, 12});
+    expect(toc_short.status == 0 && toc_short.data.size() == 12, "READ TOC truncates to the allocation");
+    expect(toc_short.data[0] == 0 && toc_short.data[1] == 10,
+           "truncated READ TOC header reports the truncated length");
 
     // An absurd transfer length (e.g. a misparsed READ(12)) is rejected, never allocated.
     const ScsiResult huge = target.execute(ScsiCdb{kScsiRead12, 0, 0, 33554432});
