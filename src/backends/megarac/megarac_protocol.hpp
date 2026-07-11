@@ -60,6 +60,11 @@ struct MegaracViewConfig {
     std::string token;
     std::string server_ip;
     bool reconnect_enabled = false;
+    // Config came from /api/kvm/token because the firmware predates h5viewercfg
+    // (e.g. ASUS ASMB9 / older AST2500 SP-X). Gates the older wire dialect:
+    // 373-byte validate payload (no server_ip), client-driven 3s keepalives,
+    // CMD_GET_FULL_SCREEN status 0.
+    bool legacy = false;
 };
 
 struct MegaracPacket {

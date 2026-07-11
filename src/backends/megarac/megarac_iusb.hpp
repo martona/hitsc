@@ -102,9 +102,9 @@ std::vector<std::uint8_t> iusb_build_scsi_response(
     const std::uint8_t* request, std::size_t request_size, const ScsiResult& result);
 
 // AUTH (opcode 242): authenticates the redirection with a KVM `token`; `cd_device_no` is the
-// CD instance. Optionally sets the media-boost flag.
-std::vector<std::uint8_t> iusb_build_auth(
-    const std::string& token, std::uint8_t cd_device_no, bool media_boost);
+// CD instance. Never requests media-boost: it showed no measurable benefit on firmware that
+// has it, and legacy firmware predates the flag entirely.
+std::vector<std::uint8_t> iusb_build_auth(const std::string& token, std::uint8_t cd_device_no);
 
 // DEVICE_INFO (opcode 248): advertises the client (H5VIEWER tag) and the mounted image's
 // `filename`.

@@ -158,10 +158,7 @@ public:
         auto self = shared_from_this();
         asio::dispatch(strand_, [self] {
             self->media_.publish_state(MediaState::Mounting);
-            // Request media-boost: a one-byte AUTH flag asking the BMC to accelerate redirection
-            // (server-side read-ahead). The BMC grants it (ACK 27) or not (ACK 28); we do nothing
-            // else differently either way.
-            self->queue_packet(iusb_build_auth(self->token_, self->cd_device_no_, /*media_boost=*/true));
+            self->queue_packet(iusb_build_auth(self->token_, self->cd_device_no_));
             self->queue_packet(iusb_build_device_info(self->filename_));
             self->start_read();
         });

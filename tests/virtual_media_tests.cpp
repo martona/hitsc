@@ -296,9 +296,10 @@ void test_iusb_scsi_response()
 
 void test_iusb_handshake_packets()
 {
-    const std::vector<std::uint8_t> auth = iusb_build_auth("abc123", 2, /*media_boost=*/false);
+    const std::vector<std::uint8_t> auth = iusb_build_auth("abc123", 2);
     expect(auth.size() == 193, "AUTH packet is the expected fixed size");
     expect(auth[kIusbScsiOpcodeIndex] == kIusbOpAuth, "AUTH opcode at offset 41");
+    expect(auth[kIusbDataIndex] == 0, "AUTH does not request media-boost (offset 61)");
     expect(auth[23] == 2, "AUTH carries CDDeviceNo in the instance field");
     expect(auth[19] == kIusbDirectionFromClient, "AUTH direction is from-client");
     expect(auth[62] == 0 && std::memcmp(auth.data() + 63, "abc123", 6) == 0, "AUTH token at offset 63");

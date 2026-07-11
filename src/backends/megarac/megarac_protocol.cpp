@@ -282,7 +282,11 @@ std::vector<std::uint8_t> make_validate_video_session_packet(
     append_fixed_cstring(payload, config.client_ip, kClientOwnIpLength);
     append_fixed_cstring(payload, username.empty() ? "domain/username" : username, kClientUsernameLength);
     append_fixed_cstring(payload, "00-00-00-00-00-00", kClientOwnMacLength);
-    append_fixed_cstring(payload, config.server_ip, kClientOwnIpLength);
+    // The trailing server_ip is a newer-firmware extension; legacy ivtpd validates
+    // the classic 373-byte payload and never learned about the extra field.
+    if (!config.legacy) {
+        append_fixed_cstring(payload, config.server_ip, kClientOwnIpLength);
+    }
 
     std::vector<std::uint8_t> bytes;
     if (config.reconnect_enabled) {

@@ -122,8 +122,7 @@ std::vector<std::uint8_t> iusb_build_scsi_response(
     return out;
 }
 
-std::vector<std::uint8_t> iusb_build_auth(
-    const std::string& token, std::uint8_t cd_device_no, bool media_boost)
+std::vector<std::uint8_t> iusb_build_auth(const std::string& token, std::uint8_t cd_device_no)
 {
     std::vector<std::uint8_t> out(kAuthTotalSize, 0);
 
@@ -134,9 +133,6 @@ std::vector<std::uint8_t> iusb_build_auth(
     iusb_serialize_header(header, out.data());
 
     out[kIusbScsiOpcodeIndex] = kIusbOpAuth;
-    if (media_boost) {
-        out[kIusbDataIndex] = 1;  // enable media-boost (offset 61)
-    }
     const std::size_t room = kAuthTotalSize - kAuthTokenOffset;
     const std::size_t copy = std::min(token.size(), room);
     std::memcpy(out.data() + kAuthTokenOffset, token.data(), copy);

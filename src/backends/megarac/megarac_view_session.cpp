@@ -130,17 +130,17 @@ std::string json_string_field(const json::object& object, std::string_view name)
     return {};
 }
 
-MegaracViewConfig parse_kvm_config(std::string_view body)
+MegaracViewConfig parse_kvm_config(std::string_view body, std::string_view endpoint)
 {
     boost::system::error_code error;
     json::value value = json::parse(body, error);
     if (error) {
-        throw std::runtime_error("/api/settings/media/h5viewercfg returned invalid JSON: " + error.message());
+        throw std::runtime_error(std::string(endpoint) + " returned invalid JSON: " + error.message());
     }
 
     const json::object* object = value.if_object();
     if (object == nullptr) {
-        throw std::runtime_error("/api/settings/media/h5viewercfg did not return a JSON object");
+        throw std::runtime_error(std::string(endpoint) + " did not return a JSON object");
     }
 
     MegaracViewConfig config;
@@ -149,7 +149,7 @@ MegaracViewConfig parse_kvm_config(std::string_view body)
     config.token = json_string_field(*object, "token");
     config.server_ip = json_string_field(*object, "server_ip");
     if (config.token.empty()) {
-        throw std::runtime_error("/api/settings/media/h5viewercfg did not include a KVM token");
+        throw std::runtime_error(std::string(endpoint) + " did not include a KVM token");
     }
     if (config.client_ip.empty()) {
         config.client_ip = "No IP";
@@ -205,6 +205,11 @@ bool fetch_reconnect_feature(
     return parse_reconnect_feature(decode_response_body(response));
 }
 
+// Newer MegaRAC SP-X publishes the KVM session config at /api/settings/media/h5viewercfg.
+// Older firmware (e.g. ASUS ASMB9 / AST2500-era SP-X) has no such endpoint; its H5Viewer
+// fetches /api/kvm/token instead, which returns the same JSON fields (token/session/
+// client_ip -- no server_ip). The h5viewercfg failure doubles as the legacy-dialect
+// detector; MegaracViewConfig::legacy gates the older wire behavior downstream.
 MegaracViewConfig fetch_kvm_config(BmcWebSession& web)
 {
     std::vector<Header> headers;
@@ -213,6 +218,7 @@ MegaracViewConfig fetch_kvm_config(BmcWebSession& web)
         headers.push_back(Header{http::field::unknown, "X-CSRFTOKEN", std::string(csrf_token)});
     }
 
+    MegaracViewConfig config;
     auto response = web.request(
         http::verb::get,
         "/api/settings/media/h5viewercfg",
@@ -220,8 +226,17 @@ MegaracViewConfig fetch_kvm_config(BmcWebSession& web)
         {},
         headers);
 
-    require_success_status(response, "/api/settings/media/h5viewercfg");
-    MegaracViewConfig config = parse_kvm_config(decode_response_body(response));
+    if (response.result_int() >= 200 && response.result_int() < 300) {
+        config = parse_kvm_config(decode_response_body(response), "/api/settings/media/h5viewercfg");
+    } else {
+        log_info() << "/api/settings/media/h5viewercfg returned HTTP " << response.result_int()
+                   << "; trying the legacy /api/kvm/token";
+        response = web.request(http::verb::get, "/api/kvm/token", {}, {}, headers);
+        require_success_status(response, "/api/kvm/token (fallback after h5viewercfg failed)");
+        config = parse_kvm_config(decode_response_body(response), "/api/kvm/token");
+        config.legacy = true;
+    }
+
     config.reconnect_enabled = fetch_reconnect_feature(web);
     return config;
 }
@@ -398,6 +413,7 @@ public:
         , strand_(asio::make_strand(io))
         , force_close_timer_(io)
         , power_poll_timer_(io)
+        , keep_alive_timer_(io)
         , ws_(std::move(ws))
         , options_(std::move(options))
         , config_(std::move(config))
@@ -571,7 +587,12 @@ private:
         } else if (packet.type == kCmdValidatedVideoSession) {
             handle_validation_response(packet);
         } else if (packet.type == kCmdKeepAlive) {
-            queue_packet_from_strand(kCmdKeepAlive, make_simple_packet(kCmdKeepAlive));
+            // Newer firmware pushes keepalives that the client echoes; the legacy
+            // H5Viewer ignores inbound keepalives and self-sends on a 3s timer
+            // (started after validation) instead. Match each dialect exactly.
+            if (!config_.legacy) {
+                queue_packet_from_strand(kCmdKeepAlive, make_simple_packet(kCmdKeepAlive));
+            }
         } else if (packet.type == kCmdUsbMouseMode && !packet.payload.empty()) {
             set_mouse_mode(state_, packet.payload[0]);
             if (options_.login.verbose) {
@@ -587,7 +608,8 @@ private:
                 queue_packet_from_strand(kCmdGetWebToken, make_web_token_packet(config_.session));
             }
         } else if (packet.type == kCmdActiveClients && !full_screen_requested_) {
-            queue_packet_from_strand(kCmdGetFullScreen, make_simple_packet(kCmdGetFullScreen, 1));
+            queue_packet_from_strand(
+                kCmdGetFullScreen, make_simple_packet(kCmdGetFullScreen, full_screen_status()));
             full_screen_requested_ = true;
             log_info() << "requested full screen";
         } else if (packet.type == kCmdKvmSharing) {
@@ -651,6 +673,9 @@ private:
         state_.view_status.kvm_display_status(true);
         query_power_status("validated");
         schedule_power_poll();
+        if (config_.legacy) {
+            schedule_keep_alive();
+        }
     }
 
     void handle_kvm_sharing(const KvmPacket& packet)
@@ -699,9 +724,32 @@ private:
             }));
     }
 
+    // Legacy firmware has no BMC-pushed keepalives; the vendor client keeps the
+    // session alive by sending CMD_KEEP_ALIVE_PKT every 3s once validated.
+    void schedule_keep_alive()
+    {
+        auto self = shared_from_this();
+        keep_alive_timer_.expires_after(std::chrono::seconds(3));
+        keep_alive_timer_.async_wait(
+            asio::bind_executor(strand_, [self](beast::error_code error) {
+                if (error || self->closed_ || self->stopping_) {
+                    return;
+                }
+                self->queue_packet_from_strand(kCmdKeepAlive, make_simple_packet(kCmdKeepAlive));
+                self->schedule_keep_alive();
+            }));
+    }
+
+    // The legacy H5Viewer sends CMD_GET_FULL_SCREEN with status 0; the newer one uses 1.
+    std::uint16_t full_screen_status() const
+    {
+        return config_.legacy ? 0 : 1;
+    }
+
     void request_full_screen_retry(std::string_view reason)
     {
-        queue_packet_from_strand(kCmdGetFullScreen, make_simple_packet(kCmdGetFullScreen, 1));
+        queue_packet_from_strand(
+            kCmdGetFullScreen, make_simple_packet(kCmdGetFullScreen, full_screen_status()));
         if (options_.login.verbose) {
             log_info() << "requested full screen"
                        << " reason=" << reason;
@@ -984,6 +1032,7 @@ private:
         closed_ = true;
         force_close_timer_.cancel();
         power_poll_timer_.cancel();
+        keep_alive_timer_.cancel();
         state_.input.clear();
         state_.set_force_close({});
         discard_queued_packets_preserving_active_write();
@@ -998,6 +1047,7 @@ private:
     asio::strand<asio::io_context::executor_type> strand_;
     asio::steady_timer force_close_timer_;
     asio::steady_timer power_poll_timer_;
+    asio::steady_timer keep_alive_timer_;
     std::shared_ptr<KvmWebSocket> ws_;
     MegaracViewOptions options_;
     KvmConfig config_;
@@ -1061,7 +1111,8 @@ void run_megarac_view_session(const MegaracViewOptions& options, MegaracViewSess
                    << " client_ip=" << config.client_ip
                    << " server_ip=" << config.server_ip
                    << " token=present"
-                   << " reconnect=" << (config.reconnect_enabled ? "yes" : "no");
+                   << " reconnect=" << (config.reconnect_enabled ? "yes" : "no")
+                   << " variant=" << (config.legacy ? "legacy" : "h5viewercfg");
 
         state.set_force_close([&web = session.web] {
             web.force_close_websocket("megarac-kvm");
