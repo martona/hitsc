@@ -165,7 +165,18 @@ private:
 
 int run_launcher_gui(int argc, char* argv[], VerbosityOptions verbosity)
 {
+    // Make Qt warnings fatal ONLY in debug builds. It promotes every qWarning() to qAbort(), which
+    // is a useful dev aid for catching QML binding errors etc. immediately -- but a hard liability
+    // in a shipped app, because it turns benign, transient, uncontrollable warnings into a crash.
+    // The one that bit us: a focused QML TextField re-reads the clipboard via its canPaste property
+    // on every WM_CLIPBOARDUPDATE broadcast, so when another app (mstsc/RDP, etc.) momentarily holds
+    // the clipboard open, OleGetClipboard fails, Qt warns, and QT_FATAL_WARNINGS kills the launcher
+    // -- with no copy/paste on our part. So: on in Debug, never forced in Release. (The child process
+    // env already strips this var for the same reason.) A developer on a non-Debug build can still
+    // opt in by setting QT_FATAL_WARNINGS=1 in the environment; Qt honors it natively.
+#ifdef _DEBUG
     qputenv("QT_FATAL_WARNINGS", "1");
+#endif
 
     QGuiApplication app(argc, argv);
     QGuiApplication::setOrganizationName(QStringLiteral("hitsc"));
