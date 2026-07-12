@@ -230,6 +230,12 @@ QVariantMap ChildProcessManager::activate_or_launch(const SavedHost& host, Launc
             }
 
             sessions_.remove(raw_session->host_id, raw_session);
+            // Disconnect BEFORE freeing the session: the process is only deleteLater()'d, so it
+            // outlives this slot, and a trailing readyReadStandardOutput/Error/errorOccurred (Qt
+            // routinely delivers buffered output around finished) would otherwise fire a lambda
+            // that dereferences the freed raw_session -> use-after-free -> heap fast-fail with no
+            // dump. detach_running_children() already does this; the finished path forgot to.
+            raw_session->process->disconnect(this);
             raw_session->process->deleteLater();
             delete raw_session;
         });
