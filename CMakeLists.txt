@@ -59,6 +59,8 @@ add_executable(
   src/backends/aten/aten_protocol.cpp
   src/backends/aten/aten_session.cpp
   src/backends/aten/aten_view.cpp
+  src/backends/aten/aten_usb_bot.cpp
+  src/backends/aten/aten_media_session.cpp
   src/backends/aspeed/aspeed_decoder.cpp
   src/backends/aspeed/aspeed_presenter.cpp
   src/backends/aspeed/aspeed_view.cpp
@@ -306,6 +308,7 @@ if(BUILD_TESTING)
     src/virtual_media/iso_file_source.cpp
     src/virtual_media/scsi_cd_target.cpp
     src/backends/megarac/megarac_iusb.cpp
+    src/backends/aten/aten_usb_bot.cpp
     tests/launcher_tests.cpp
     tests/virtual_media_tests.cpp
   )

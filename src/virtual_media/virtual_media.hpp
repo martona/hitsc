@@ -55,6 +55,32 @@ private:
     std::vector<MediaOutcome> outcomes_;
 };
 
+// Owned by the caller (a backend View, or a CLI test entry). Bundles the GUI-facing
+// MediaChannel with the network thread's force-close hook. Deliberately separate from a
+// backend's video session state: the media session must not share the video session's single
+// force-close slot, or stopping one would tear down the other. Shared by all backends
+// (MegaRAC IUSB, ATEN USB-BOT).
+class MediaSessionState {
+public:
+    MediaChannel media;
+
+    void set_force_close(std::function<void()> force_close)
+    {
+        std::lock_guard lock(mutex_);
+        force_close_ = std::move(force_close);
+    }
+
+    std::function<void()> force_close_snapshot()
+    {
+        std::lock_guard lock(mutex_);
+        return force_close_;
+    }
+
+private:
+    std::mutex mutex_;
+    std::function<void()> force_close_;
+};
+
 // What the GUI talks to. Backend-agnostic: state() drives the title-bar glyph, mount/unmount
 // act, take_outcomes() feeds toasts. Owned by the view (outlives the GUI binding). All methods
 // are safe to call on the GUI thread.

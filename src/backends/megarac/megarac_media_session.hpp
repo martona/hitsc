@@ -1,39 +1,12 @@
 #pragma once
 
 #include "options.hpp"
-#include "virtual_media/virtual_media.hpp"
+#include "virtual_media/virtual_media.hpp"  // MediaSessionState (shared across backends)
 
 #include <atomic>
-#include <functional>
-#include <mutex>
 #include <string>
 
 namespace hitsc {
-
-// Owned by the caller (MegaracView in Phase 3, or the CLI test entry). Bundles the GUI-facing
-// MediaChannel with the network thread's force-close hook. Deliberately separate from
-// MegaracViewSessionState: the media session must not share the video session's single
-// force-close slot, or stopping one would tear down the other.
-class MediaSessionState {
-public:
-    MediaChannel media;
-
-    void set_force_close(std::function<void()> force_close)
-    {
-        std::lock_guard lock(mutex_);
-        force_close_ = std::move(force_close);
-    }
-
-    std::function<void()> force_close_snapshot()
-    {
-        std::lock_guard lock(mutex_);
-        return force_close_;
-    }
-
-private:
-    std::mutex mutex_;
-    std::function<void()> force_close_;
-};
 
 // Runs one MegaRAC virtual-CD redirection session: logs in (its own BMC session), fetches a
 // token, opens the /cd-server WebSocket, emulates a CD device backed by `iso_path`, and serves

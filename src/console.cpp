@@ -70,12 +70,44 @@ std::string utf8_from_wide(const std::wstring& value)
 std::string read_password_from_console(const std::string& prompt)
 {
 #ifdef _WIN32
-    const HANDLE stdin_handle = GetStdHandle(STD_INPUT_HANDLE);
+    HANDLE stdin_handle = GetStdHandle(STD_INPUT_HANDLE);
     DWORD original_mode = 0;
+    HANDLE console_input = INVALID_HANDLE_VALUE;  // opened only for the shim fallback
     if (stdin_handle == INVALID_HANDLE_VALUE || !GetConsoleMode(stdin_handle, &original_mode)) {
-        throw std::runtime_error(
-            "cannot prompt for password because stdin is not an interactive console");
+        // stdin is not a console. This is the normal case when launched via the hitsc.com shim,
+        // which is /SUBSYSTEM:console and hands this GUI-subsystem child its stdio as pipes. The
+        // real terminal is still reachable: attach to the parent console and open its input
+        // buffer (CONIN$) directly, which GetStdHandle can't give us because stdin is redirected.
+        AttachConsole(ATTACH_PARENT_PROCESS);  // no-op if already attached
+        console_input = CreateFileW(
+            L"CONIN$",
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            nullptr,
+            OPEN_EXISTING,
+            0,
+            nullptr);
+        if (console_input == INVALID_HANDLE_VALUE || !GetConsoleMode(console_input, &original_mode)) {
+            if (console_input != INVALID_HANDLE_VALUE) {
+                CloseHandle(console_input);
+            }
+            throw std::runtime_error(
+                "cannot prompt for password because no interactive console is available; "
+                "pass --password-env or set HITSC_PASSWORD");
+        }
+        stdin_handle = console_input;
     }
+
+    // Close the CONIN$ handle (if we opened one) when the prompt returns or throws.
+    struct ConsoleInputCloser {
+        HANDLE handle;
+        ~ConsoleInputCloser()
+        {
+            if (handle != INVALID_HANDLE_VALUE) {
+                CloseHandle(handle);
+            }
+        }
+    } console_input_closer{console_input};
 
     DWORD masked_mode = original_mode;
     masked_mode &= ~(ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT);

@@ -5,6 +5,7 @@
 #include "backends/aten/aten_view.hpp"
 #include "console.hpp"
 #include "errors.hpp"
+#include "backends/aten/aten_media_session.hpp"
 #include "gui/child/launcher_child_command.hpp"
 #include "gui/launcher_gui.hpp"
 #include "backends/megarac/megarac_media_session.hpp"
@@ -178,6 +179,22 @@ int run_cli(int argc, char* argv[])
         ->check(CLI::ExistingFile);
     megarac_media->add_option("url", megarac_media_url, "https://host[:port]")->required();
 
+    AtenViewOptions aten_media_options;
+    std::string aten_media_url;
+    std::string aten_media_password_env_name;
+    std::string aten_media_iso;
+    CLI::App* aten_media = app.add_subcommand(
+        "aten-media", "TEST: mount a client ISO onto an ATEN/Supermicro host as a virtual CD (no GUI).");
+    configure_view_options(
+        *aten_media,
+        aten_media_options.login,
+        aten_media_options.idle_timeout_seconds,
+        aten_media_password_env_name);
+    aten_media->add_option("--iso", aten_media_iso, "Path to the .iso to mount.")
+        ->required()
+        ->check(CLI::ExistingFile);
+    aten_media->add_option("url", aten_media_url, "https://host[:port]")->required();
+
     AtenViewOptions aten_options;
     std::string aten_url;
     std::string aten_password_env_name;
@@ -220,6 +237,7 @@ int run_cli(int argc, char* argv[])
             && command.front() != '-'
             && command != "megarac"
             && command != "megarac-media"
+            && command != "aten-media"
             && command != "aten"
             && command != "pikvm"
             && command != "auto"
@@ -269,6 +287,16 @@ int run_cli(int argc, char* argv[])
         fill_default_credentials(megarac_media_options.login, megarac_media_password_env_name);
 
         run_megarac_media(megarac_media_options, megarac_media_iso);
+        return EXIT_SUCCESS;
+    }
+
+    if (*aten_media) {
+        normalize_verbosity(aten_media_options.login);
+        aten_media_options.login.base_url = parse_https_url(aten_media_url);
+        aten_media_options.login.base_url.target = "/";
+        fill_default_credentials(aten_media_options.login, aten_media_password_env_name);
+
+        run_aten_media(aten_media_options, aten_media_iso);
         return EXIT_SUCCESS;
     }
 

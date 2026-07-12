@@ -44,6 +44,19 @@ ScsiResult check_condition(std::uint8_t sense_key, std::uint8_t asc, std::uint8_
     return ScsiResult{/*status=*/1, sense_key, asc, ascq, {}};
 }
 
+// A data-in reply clamped to the CDB allocation length. The full USB-BOT model requires
+// honoring the requested length (the host sizes its bulk-in transfer to it); returning more
+// than asked would overrun. `alloc == 0` means "return everything" (some CDBs omit a length).
+ScsiResult data_in(std::vector<std::uint8_t> full, std::uint32_t alloc)
+{
+    if (alloc != 0 && full.size() > alloc) {
+        full.resize(alloc);
+    }
+    ScsiResult result;
+    result.data = std::move(full);
+    return result;
+}
+
 } // namespace
 
 ScsiCdb ScsiCdTarget::parse_cdb(const std::uint8_t* c)
@@ -58,6 +71,9 @@ ScsiCdb ScsiCdTarget::parse_cdb(const std::uint8_t* c)
         // host READ(10)s to us as READ(12), so getting this right is not optional. Big-endian
         // here turns an on-wire "02 00 00 00" (2) into 0x02000000 (33M sectors).
         cdb.length = read_le32(c + 6);  // u32 LE @6-9
+    } else if (cdb.opcode == kScsiInquiry || cdb.opcode == kScsiRequestSense) {
+        // 6-byte CDBs: a single-byte allocation length at byte 4 (bytes, not sectors).
+        cdb.length = c[4];
     } else {
         cdb.length = read_be16(c + 7);  // READ(10)/READ_TOC length: u16 BE @7-8
     }
@@ -66,37 +82,121 @@ ScsiCdb ScsiCdTarget::parse_cdb(const std::uint8_t* c)
 
 ScsiResult ScsiCdTarget::execute(const ScsiCdb& cdb)
 {
+    const bool full_emulation = persona_ == ScsiPersona::FullDeviceEmulation;
+
+    // REQUEST SENSE reports the latched sense and must not itself overwrite it, so handle it
+    // before the dispatch that latches. (Only reachable under full device emulation.)
+    if (full_emulation && cdb.opcode == kScsiRequestSense) {
+        return request_sense(cdb);
+    }
+
+    ScsiResult result;
     switch (cdb.opcode) {
     case kScsiTestUnitReady:
         if (first_test_unit_ready_) {
             first_test_unit_ready_ = false;
             // UNIT ATTENTION / NOT READY TO READY CHANGE, MEDIUM MAY HAVE CHANGED (6/28h/00):
             // the first TUR reports the freshly inserted medium so the host re-reads capacity.
-            return check_condition(0x06, 0x28, 0x00);
+            result = check_condition(0x06, 0x28, 0x00);
         }
-        return ScsiResult{};  // GOOD, no data
+        // else GOOD, no data
+        break;
 
     case kScsiReadCapacity:
-        return read_capacity();
+        result = read_capacity();
+        break;
 
     case kScsiRead10:
     case kScsiRead12:
-        return read_blocks(cdb);
+        result = read_blocks(cdb);
+        break;
 
     case kScsiReadToc:
-        return read_toc(cdb);
+        result = read_toc(cdb);
+        break;
 
     case kScsiStartStopUnit:
         // Load/eject is signaled out-of-band by the transport (the IUSB control opcode with a
         // magic LBA), so here we just acknowledge.
-        return ScsiResult{};
+        break;
+
+    case kScsiInquiry:
+        result = full_emulation ? inquiry(cdb) : check_condition(0x05, 0x20, 0x00);
+        break;
+
+    case kScsiGetPerformance:
+        result = full_emulation ? get_performance(cdb) : check_condition(0x05, 0x20, 0x00);
+        break;
 
     case kScsiMediumRemoval:
+        // Prevent/allow medium removal: harmless to acknowledge under full emulation (the guest
+        // locks the door before reads); the BMC-serviced path never sees it, but keep the old
+        // behavior of rejecting it there so nothing changes for MegaRAC.
+        if (!full_emulation) {
+            result = check_condition(0x05, 0x20, 0x00);
+        }
+        break;
+
     default:
-        // Prevent/allow medium removal and anything unrecognized: ILLEGAL REQUEST / INVALID
-        // COMMAND OPERATION CODE (5/20h/00), matching the H5Viewer's "unsupported command".
-        return check_condition(0x05, 0x20, 0x00);
+        // Anything unrecognized: ILLEGAL REQUEST / INVALID COMMAND OPERATION CODE (5/20h/00),
+        // matching the H5Viewer's "unsupported command".
+        result = check_condition(0x05, 0x20, 0x00);
+        break;
     }
+
+    // Latch sense from a CHECK CONDITION so a following REQUEST SENSE can retrieve it (the full
+    // USB-BOT model has no autosense). Harmless for BmcServiced -- it never issues REQUEST SENSE.
+    if (result.status != 0) {
+        last_sense_key_ = result.sense_key;
+        last_asc_ = result.asc;
+        last_ascq_ = result.ascq;
+    }
+    return result;
+}
+
+ScsiResult ScsiCdTarget::inquiry(const ScsiCdb& cdb) const
+{
+    // Standard INQUIRY data for a removable CD-ROM, lifted verbatim from the ATEN H5Viewer
+    // (isohandler.js ab_sbc3_CDROMinquiry): peripheral type 5 (CD/DVD), RMB set, 31 additional
+    // bytes, vendor "ATEN", product "Virtual CDROM", revision "YS0J".
+    static const std::uint8_t kInquiry[36] = {
+        0x05, 0x80, 0x00, 0x21, 0x1F, 0x00, 0x00, 0x00,
+        'A', 'T', 'E', 'N', ' ', ' ', ' ', ' ',
+        'V', 'i', 'r', 't', 'u', 'a', 'l', ' ', 'C', 'D', 'R', 'O', 'M', ' ', ' ', ' ',
+        'Y', 'S', '0', 'J',
+    };
+    return data_in(std::vector<std::uint8_t>(std::begin(kInquiry), std::end(kInquiry)), cdb.length);
+}
+
+ScsiResult ScsiCdTarget::request_sense(const ScsiCdb& cdb)
+{
+    // Fixed-format sense data (response code 0x70), reporting the latched sense from the last
+    // CHECK CONDITION, then clearing it to NO SENSE. Mirrors the H5Viewer's ab_ReqSense_success
+    // template with the key/ASC/ASCQ filled in.
+    std::vector<std::uint8_t> sense(18, 0);
+    sense[0] = 0x70;             // current error, fixed format
+    sense[2] = last_sense_key_;  // sense key
+    sense[7] = 0x0A;             // additional sense length (10 -> total 18)
+    sense[12] = last_asc_;
+    sense[13] = last_ascq_;
+
+    last_sense_key_ = 0;
+    last_asc_ = 0;
+    last_ascq_ = 0;
+    return data_in(std::move(sense), cdb.length);
+}
+
+ScsiResult ScsiCdTarget::get_performance(const ScsiCdb& /*cdb*/) const
+{
+    // GET PERFORMANCE performance-data header, lifted verbatim from the ATEN H5Viewer
+    // (isohandler.js ab_sbc3_CDROM_OP_AC): a single nominal-performance descriptor. The
+    // reference sends these 20 bytes unconditionally, so we do too.
+    static const std::uint8_t kPerformance[20] = {
+        0x00, 0x00, 0x00, 0x14, 0x02, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x11, 0x50,
+        0x00, 0x00, 0x00, 0x2B,
+    };
+    return data_in(std::vector<std::uint8_t>(std::begin(kPerformance), std::end(kPerformance)), 0);
 }
 
 ScsiResult ScsiCdTarget::read_capacity() const

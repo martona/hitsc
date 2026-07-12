@@ -1,12 +1,14 @@
 #include "aten_view.hpp"
 
 #include "backends/aspeed/aspeed_view.hpp"
+#include "aten_media_session.hpp"
 #include "aten_network.hpp"
 #include "aten_protocol.hpp"
 #include "diagnostics.hpp"
 #include "gui/viewer/qt_viewer_host.hpp"
 #include "hardware_cursor.hpp"
 #include "view_input.hpp"
+#include "virtual_media/virtual_media.hpp"
 
 #include <QImage>
 #include <QRect>
@@ -18,6 +20,8 @@
 #include <iostream>
 #include <memory>
 #include <optional>
+#include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -112,6 +116,8 @@ public:
     {
     }
 
+    ~AtenView() override { join_media(); }
+
 private:
     AtenView(const AtenViewOptions& options, std::shared_ptr<AtenViewState> state)
         : AspeedView(*state, options.login.base_url.host, "aten", [state] {
@@ -122,6 +128,10 @@ private:
         , state_(std::move(state))
         , encoder_(*state_)
         , input_(encoder_, [] { return std::optional<FrameGeometry>{}; })
+        , media_controller_(
+              media_state_.media,
+              [this](std::string iso_path) { start_media(std::move(iso_path)); },
+              [this] { request_unmount(); })
     {
     }
 
@@ -165,10 +175,54 @@ private:
         state_->input.clear();
     }
 
+    // ATEN speaks USB-BOT CD redirection on a separate /vm websocket, so it can mount a client
+    // ISO. Like MegaRAC, the controller drives a dedicated media thread (start/stop below), kept
+    // off the video KvmNetworkWorker so a media stop never disturbs the video session.
+    VirtualMediaController* virtual_media_controller() override { return &media_controller_; }
+
+    void start_media(std::string iso_path)
+    {
+        join_media();  // finish + join any prior session before starting a new mount
+        media_stop_.store(false);
+        AtenViewOptions options = options_;
+        media_thread_ = std::thread([this, options, iso_path]() mutable {
+            run_aten_media_session(options, iso_path, media_state_, media_stop_);
+        });
+    }
+
+    // Eject: signal the media session to stop without blocking the GUI thread. The session
+    // publishes Idle (reflected by the title-bar control) before its teardown logout, so the
+    // button feels instant; the finishing thread is joined lazily by the next start / destructor.
+    void request_unmount()
+    {
+        if (media_thread_.joinable()) {
+            media_stop_.store(true);
+            if (std::function<void()> force_close = media_state_.force_close_snapshot()) {
+                force_close();  // graceful plug-out + close, breaking the media session's io.run()
+            }
+        }
+    }
+
+    void join_media()
+    {
+        request_unmount();
+        if (media_thread_.joinable()) {
+            media_thread_.join();
+        }
+    }
+
     AtenViewOptions options_;
     std::shared_ptr<AtenViewState> state_;
     AtenInputEncoder encoder_;
     KvmInputController input_;
+
+    // Virtual media runs on its own thread (NOT the video KvmNetworkWorker): own session state
+    // (channel + force-close), own stop flag. media_state_ must precede media_controller_, which
+    // references its channel. media_thread_ is joined in join_media()/the destructor.
+    MediaSessionState media_state_;
+    std::atomic_bool media_stop_{false};
+    ViewVirtualMediaController media_controller_;
+    std::thread media_thread_;
 };
 
 } // namespace
