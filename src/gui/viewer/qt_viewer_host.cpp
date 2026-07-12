@@ -78,14 +78,21 @@ public:
         window_.close();
     }
 
+    void set_console(const ConsoleScreen& screen) override
+    {
+        console_override_ = screen;
+    }
+
     KvmViewBase* view() const { return view_.get(); }
     std::exception_ptr error() const { return error_; }
+    const std::optional<ConsoleScreen>& console_override() const { return console_override_; }
 
 private:
     ViewerWindow& window_;
     ViewerSurface& surface_;
     std::unique_ptr<KvmViewBase> view_;
     std::exception_ptr error_;
+    std::optional<ConsoleScreen> console_override_;
 };
 
 } // namespace
@@ -292,6 +299,10 @@ int run_viewer(const ViewerLaunch& launch, const std::function<void(ViewerHost&)
             KvmViewBase* view = host.view();
             window.set_session_connected(view != nullptr && view->hosted_connected());
             if (view == nullptr) {
+                if (host.console_override()) {
+                    surface->show_console(*host.console_override());
+                    return;
+                }
                 ConsoleScreen screen;
                 screen.headline = "Connecting to " + host_label + "...";
                 screen.hint = "Esc to cancel";

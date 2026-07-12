@@ -121,9 +121,12 @@ int run_cli(int argc, char* argv[])
 
     CLI::App* gui = app.add_subcommand("gui", "Open the saved-host launcher.");
     CLI::App* child = app.add_subcommand("child", "Run a launcher child session.");
+    CLI::App* coldreset = app.add_subcommand(
+        "coldreset", "Run a launcher child BMC cold reset (MegaRAC only).");
     VerbosityOptions process_verbosity;
     configure_verbosity_options(*gui, process_verbosity.verbose, process_verbosity.vverbose);
     configure_verbosity_options(*child, process_verbosity.verbose, process_verbosity.vverbose);
+    configure_verbosity_options(*coldreset, process_verbosity.verbose, process_verbosity.vverbose);
 
     AutoViewOptions auto_options;
     std::string auto_url;
@@ -221,7 +224,8 @@ int run_cli(int argc, char* argv[])
             && command != "pikvm"
             && command != "auto"
             && command != "gui"
-            && command != "child") {
+            && command != "child"
+            && command != "coldreset") {
             std::cerr << "Unknown subcommand: " << command << "\n";
             std::cerr << "Run with --help for more information.\n";
             return EXIT_FAILURE;
@@ -295,6 +299,11 @@ int run_cli(int argc, char* argv[])
     if (*child) {
         normalize_verbosity(process_verbosity);
         return run_launcher_child(process_verbosity);
+    }
+
+    if (*coldreset) {
+        normalize_verbosity(process_verbosity);
+        return run_launcher_child_cold_reset(process_verbosity);
     }
 
     if (*gui) {

@@ -56,6 +56,7 @@ public:
         const QString& repeat_password);
     Q_INVOKABLE QVariantMap deleteHost(const QString& host_id);
     Q_INVOKABLE QVariantMap connectHost(const QString& host_id);
+    Q_INVOKABLE QVariantMap coldResetHost(const QString& host_id);
 
     // Mini-launcher: filtered/ranked host list for the editable picker, and a
     // connect path that resolves typed-or-saved credentials, upserts the host

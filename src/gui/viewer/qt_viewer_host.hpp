@@ -1,5 +1,7 @@
 #pragma once
 
+#include "console_screen.hpp"
+
 #include <exception>
 #include <functional>
 #include <memory>
@@ -34,6 +36,11 @@ public:
     // Report a fatal error (e.g. auto-detection failure): closes the window;
     // run_viewer rethrows it after the event loop exits.
     virtual void fail(std::exception_ptr error) = 0;
+
+    // Replace the default "Connecting to <host>" console shown while no view is
+    // attached. For view-less flows (BMC cold reset) that end on a status screen
+    // instead of a KVM session. GUI thread only. No effect once a view attaches.
+    virtual void set_console(const ConsoleScreen& screen) = 0;
 };
 
 // Run a viewer window Qt-natively. Owns the QApplication (creating one if none

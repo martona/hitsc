@@ -42,9 +42,9 @@ QString log_prefix_for_host(const SavedHost& host)
     return host.url;
 }
 
-QStringList child_process_arguments(VerbosityOptions verbosity)
+QStringList child_process_arguments(VerbosityOptions verbosity, const QString& verb)
 {
-    QStringList arguments{QStringLiteral("child")};
+    QStringList arguments{verb};
     if (verbosity.verbose) {
         arguments.append(QStringLiteral("--verbose"));
     }
@@ -139,12 +139,24 @@ ChildProcessManager::~ChildProcessManager()
 
 QVariantMap ChildProcessManager::launch_host(const SavedHost& host)
 {
-    return activate_or_launch(host);
+    return activate_or_launch(host, LaunchAction::Connect);
 }
 
-QVariantMap ChildProcessManager::activate_or_launch(const SavedHost& host)
+QVariantMap ChildProcessManager::cold_reset_host(const SavedHost& host)
 {
-    const QList<Session*> existing_sessions = sessions_.values(host.id);
+    return activate_or_launch(host, LaunchAction::ColdReset);
+}
+
+QVariantMap ChildProcessManager::activate_or_launch(const SavedHost& host, LaunchAction action)
+{
+    // Per-action session key: a cold reset must not activate an existing KVM
+    // window (and vice versa), but a second cold reset for the same host reuses
+    // the one already open.
+    const QString session_key = action == LaunchAction::ColdReset
+        ? host.id + QStringLiteral("#coldreset")
+        : host.id;
+
+    const QList<Session*> existing_sessions = sessions_.values(session_key);
     for (Session* session : existing_sessions) {
         if (session != nullptr
             && session->process != nullptr
@@ -163,8 +175,11 @@ QVariantMap ChildProcessManager::activate_or_launch(const SavedHost& host)
     }
 
     auto session = std::make_unique<Session>();
-    session->host_id = host.id;
+    session->host_id = session_key;
     session->log_prefix = log_prefix_for_host(host);
+    if (action == LaunchAction::ColdReset) {
+        session->log_prefix += QStringLiteral(" (cold reset)");
+    }
     session->process = new QProcess();
     QProcess* process = session->process;
 
@@ -190,7 +205,7 @@ QVariantMap ChildProcessManager::activate_or_launch(const SavedHost& host)
 
     const QByteArray payload = serialize_child_session_launch_request(request);
     Session* raw_session = session.get();
-    sessions_.insert(host.id, session.release());
+    sessions_.insert(session_key, session.release());
 
     connect(process, &QProcess::readyReadStandardOutput, this, [this, raw_session] {
         drain_stdout(*raw_session);
@@ -225,9 +240,12 @@ QVariantMap ChildProcessManager::activate_or_launch(const SavedHost& host)
         }
     });
 
-    process->start(QCoreApplication::applicationFilePath(), child_process_arguments(verbosity_));
+    const QString verb = action == LaunchAction::ColdReset
+        ? QStringLiteral("coldreset")
+        : QStringLiteral("child");
+    process->start(QCoreApplication::applicationFilePath(), child_process_arguments(verbosity_, verb));
     if (!process->waitForStarted(3000)) {
-        sessions_.remove(host.id, raw_session);
+        sessions_.remove(session_key, raw_session);
         const QString message = process->errorString();
         process->disconnect(this);
         process->deleteLater();

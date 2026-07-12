@@ -316,6 +316,16 @@ QVariantMap LauncherHostModel::connectHost(const QString& host_id)
     return result;
 }
 
+QVariantMap LauncherHostModel::coldResetHost(const QString& host_id)
+{
+    const int row = index_for_id(host_id);
+    if (row < 0) {
+        return error_result(QStringLiteral("Saved host was not found."));
+    }
+
+    return child_processes_.cold_reset_host(hosts_.at(row));
+}
+
 QString LauncherHostModel::lastConnectedHost() const
 {
     const QString id = store_.load_last_connected();

@@ -6,13 +6,18 @@
 
 #ifdef _WIN32
 #include <array>
+#include <atomic>
+#include <csignal>
 #include <cstdint>
 #include <cstdlib>
+#include <fstream>
+#include <string>
 #include <iomanip>
 #include <sstream>
 #include <vector>
 #include <windows.h>
 #include <dbghelp.h>
+#include <shlobj.h>
 #else
 #include <cstdlib>
 #endif
@@ -144,8 +149,133 @@ void print_context_stack_trace(std::ostream& output, CONTEXT* context)
     }
 }
 
+// %USERPROFILE%\AppData\LocalLow\hitsc -- created on demand. LocalLow so even a
+// crashing low-integrity process could write here.
+std::wstring crash_report_directory()
+{
+    PWSTR base = nullptr;
+    if (FAILED(SHGetKnownFolderPath(FOLDERID_LocalAppDataLow, KF_FLAG_CREATE, nullptr, &base))
+        || base == nullptr) {
+        return {};
+    }
+    std::wstring directory(base);
+    CoTaskMemFree(base);
+    directory += L"\\hitsc";
+    CreateDirectoryW(directory.c_str(), nullptr);
+    return directory;
+}
+
+// Writes hitsc-crash-<date>-<time>-<pid>.dmp (minidump) and .txt (reason, command
+// line, exception code, symbolized stack) for post-mortem debugging. The launcher
+// runs windowless with no console, so stderr traces vanish -- these files are the
+// only artifact of a crash. Best-effort by design: it runs on the crashing thread,
+// so any failure just means no report. The first crasher wins; a fault while
+// reporting (or a second thread crashing) returns immediately.
+void write_crash_report(EXCEPTION_POINTERS* exception_info, const char* reason)
+{
+    static std::atomic_bool writing{false};
+    if (writing.exchange(true)) {
+        return;
+    }
+
+    const std::wstring directory = crash_report_directory();
+    if (directory.empty()) {
+        return;
+    }
+
+    SYSTEMTIME time{};
+    GetLocalTime(&time);
+    wchar_t name[128];
+    _snwprintf_s(
+        name,
+        _TRUNCATE,
+        L"\\hitsc-crash-%04u%02u%02u-%02u%02u%02u-%lu",
+        time.wYear,
+        time.wMonth,
+        time.wDay,
+        time.wHour,
+        time.wMinute,
+        time.wSecond,
+        GetCurrentProcessId());
+    const std::wstring base_path = directory + name;
+
+    const std::wstring dump_path = base_path + L".dmp";
+    HANDLE file = CreateFileW(
+        dump_path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file != INVALID_HANDLE_VALUE) {
+        MINIDUMP_EXCEPTION_INFORMATION exception_param{};
+        exception_param.ThreadId = GetCurrentThreadId();
+        exception_param.ExceptionPointers = exception_info;
+        exception_param.ClientPointers = FALSE;
+        const auto dump_type = static_cast<MINIDUMP_TYPE>(
+            MiniDumpWithDataSegs | MiniDumpWithHandleData | MiniDumpWithThreadInfo
+            | MiniDumpWithIndirectlyReferencedMemory | MiniDumpWithUnloadedModules);
+        MiniDumpWriteDump(
+            GetCurrentProcess(),
+            GetCurrentProcessId(),
+            file,
+            dump_type,
+            exception_info != nullptr ? &exception_param : nullptr,
+            nullptr,
+            nullptr);
+        CloseHandle(file);
+    }
+
+    try {
+        std::ofstream report((base_path + L".txt").c_str());
+        if (!report) {
+            return;
+        }
+        report << "hitsc crash report\n"
+               << "reason: " << reason << '\n'
+               << "command line: " << GetCommandLineA() << '\n';
+        if (exception_info != nullptr && exception_info->ExceptionRecord != nullptr) {
+            report << "exception code: 0x" << std::hex
+                   << exception_info->ExceptionRecord->ExceptionCode << std::dec
+                   << " address: " << exception_info->ExceptionRecord->ExceptionAddress << '\n';
+        }
+        if (const std::exception_ptr current = std::current_exception()) {
+            try {
+                std::rethrow_exception(current);
+            } catch (const std::exception& ex) {
+                report << "current exception: " << ex.what() << '\n';
+            } catch (...) {
+                report << "current exception: non-standard exception\n";
+            }
+        }
+        if (exception_info != nullptr) {
+            print_context_stack_trace(report, exception_info->ContextRecord);
+        } else {
+            print_stack_trace(report, reason, 1);
+        }
+    } catch (...) {
+    }
+}
+
+extern "C" void abort_signal_handler(int)
+{
+    // qFatal/assert/CRT paths reach process death through abort(), which never
+    // passes the unhandled-exception filter -- catch it here. No-op if a crash
+    // report is already being written (e.g. terminate_handler's abort).
+    write_crash_report(nullptr, "abort (SIGABRT)");
+}
+
+void purecall_handler()
+{
+    write_crash_report(nullptr, "pure virtual call");
+    std::abort();
+}
+
+void invalid_parameter_handler(
+    const wchar_t*, const wchar_t*, const wchar_t*, unsigned int, uintptr_t)
+{
+    write_crash_report(nullptr, "CRT invalid parameter");
+    std::abort();
+}
+
 LONG WINAPI unhandled_exception_filter(EXCEPTION_POINTERS* exception_info)
 {
+    write_crash_report(exception_info, "unhandled SEH exception");
     try {
         const DWORD code = exception_info && exception_info->ExceptionRecord
             ? exception_info->ExceptionRecord->ExceptionCode
@@ -176,6 +306,9 @@ void terminate_handler() noexcept
     } catch (...) {
     }
 
+#ifdef _WIN32
+    write_crash_report(nullptr, "std::terminate");
+#endif
     std::abort();
 }
 
@@ -186,6 +319,9 @@ void install_exception_handlers()
     std::set_terminate(terminate_handler);
 #ifdef _WIN32
     SetUnhandledExceptionFilter(unhandled_exception_filter);
+    std::signal(SIGABRT, abort_signal_handler);
+    _set_purecall_handler(purecall_handler);
+    _set_invalid_parameter_handler(invalid_parameter_handler);
 #endif
 }
 

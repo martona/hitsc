@@ -239,6 +239,19 @@ struct AutoDetection {
 
 } // namespace
 
+std::string detect_kvm_backend_name(LoginOptions& login)
+{
+    const KvmBackendFingerprint fingerprint = detect_kvm_backend(login);
+    if (fingerprint.backend == DetectedKvmBackend::Unknown) {
+        return {};
+    }
+    log_info() << "auto KVM detection selected"
+               << " backend=" << backend_name(fingerprint.backend)
+               << " score=" << fingerprint.score
+               << " reason=" << join_reasons(fingerprint.reasons);
+    return backend_name(fingerprint.backend);
+}
+
 void run_auto_view(const AutoViewOptions& options)
 {
     // One window for both phases: the harness owns the QApplication + window and

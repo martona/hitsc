@@ -2,6 +2,7 @@
 
 #include "backends/auto/auto_view.hpp"
 #include "backends/aten/aten_view.hpp"
+#include "bmc_cold_reset.hpp"
 #include "errors.hpp"
 #include "launcher_child_protocol.hpp"
 #include "backends/megarac/megarac_view.hpp"
@@ -55,9 +56,12 @@ LoginOptions make_login_options(const ChildSessionLaunchRequest& request)
     return login;
 }
 
-} // namespace
+enum class ChildAction {
+    Connect,
+    ColdReset,
+};
 
-int run_launcher_child(VerbosityOptions verbosity)
+int run_child_session(VerbosityOptions verbosity, ChildAction action)
 {
     const ChildSessionLaunchRequest request = read_launch_request();
     LoginOptions login = make_login_options(request);
@@ -70,6 +74,23 @@ int run_launcher_child(VerbosityOptions verbosity)
     const QByteArray ready = serialize_child_session_status(request.session_id, QStringLiteral("ready"));
     std::cout.write(ready.constData(), ready.size());
     std::cout.flush();
+
+    if (action == ChildAction::ColdReset) {
+        BmcColdResetOptions options;
+        options.login = std::move(login);
+        switch (request.type) {
+        case LauncherHostType::Auto:
+            options.detect_backend = true;
+            break;
+        case LauncherHostType::Megarac:
+            options.detect_backend = false;
+            break;
+        case LauncherHostType::Aten:
+        case LauncherHostType::Pikvm:
+            throw UserError("BMC cold reset is only supported for MegaRAC and auto-detected hosts");
+        }
+        return run_bmc_cold_reset(options);
+    }
 
     switch (request.type) {
     case LauncherHostType::Auto: {
@@ -99,6 +120,18 @@ int run_launcher_child(VerbosityOptions verbosity)
     }
 
     throw UserError("unsupported child session host type");
+}
+
+} // namespace
+
+int run_launcher_child(VerbosityOptions verbosity)
+{
+    return run_child_session(verbosity, ChildAction::Connect);
+}
+
+int run_launcher_child_cold_reset(VerbosityOptions verbosity)
+{
+    return run_child_session(verbosity, ChildAction::ColdReset);
 }
 
 } // namespace hitsc

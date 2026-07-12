@@ -52,6 +52,12 @@ ApplicationWindow {
             console.error(result.error)
     }
 
+    function coldResetHost(hostId) {
+        const result = hostModel.coldResetHost(hostId)
+        if (!result.ok)
+            console.error(result.error)
+    }
+
     function toggleMaximized() {
         root.visibility = root.visibility === Window.Maximized ? Window.Windowed : Window.Maximized
     }
@@ -402,6 +408,7 @@ ApplicationWindow {
                     id: hostTile
 
                     required property string hostId
+                    required property string type
                     required property string typeLabel
                     required property string url
                     required property string host
@@ -557,6 +564,14 @@ ApplicationWindow {
                                 text: "Edit"
                                 palette: root.palette
                                 onTriggered: hostTile.activateEdit()
+                            }
+
+                            MenuItem {
+                                text: "BMC cold reset"
+                                visible: hostTile.type === "auto" || hostTile.type === "megarac"
+                                height: visible ? implicitHeight : 0
+                                palette: root.palette
+                                onTriggered: root.coldResetHost(hostTile.hostId)
                             }
 
                             MenuItem {
