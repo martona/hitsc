@@ -45,6 +45,7 @@ enum class MegaracCommand : std::uint16_t {
 };
 
 constexpr std::uint8_t kMegaracValidateSessionValid = 1;
+constexpr std::uint8_t kMegaracValidateSessionInvalidInfo = 3;    // legacy ASMB9: its flavor of the commit race
 constexpr std::uint8_t kMegaracValidateSessionUnregistered = 8;  // BMC hasn't committed the session yet
 constexpr std::uint16_t kMegaracViewPrivReqMaster = 1;
 constexpr std::uint16_t kMegaracViewReqAllowed = 0;

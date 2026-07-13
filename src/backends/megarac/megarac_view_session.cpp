@@ -88,6 +88,7 @@ using PacketBuffer = MegaracPacketBuffer;
 using SharedCursor = MegaracHardwareCursor;
 
 constexpr std::uint8_t kValidateSessionValid = kMegaracValidateSessionValid;
+constexpr std::uint8_t kValidateSessionInvalidInfo = kMegaracValidateSessionInvalidInfo;
 constexpr std::uint8_t kValidateSessionUnregistered = kMegaracValidateSessionUnregistered;
 constexpr std::uint16_t kKvmPrivReqMaster = kMegaracViewPrivReqMaster;
 constexpr std::uint16_t kKvmReqAllowed = kMegaracViewReqAllowed;
@@ -651,12 +652,19 @@ private:
         }
 
         const auto response = static_cast<std::uint8_t>(packet.payload[0]);
-        if (response == kValidateSessionUnregistered) {
-            // The BMC hasn't committed the h5viewercfg session yet (registration race).
-            // Don't fail the session -- flag it so the network loop reopens the socket and
-            // re-validates with the SAME token; re-login/re-fetch would restart the race.
+        // The BMC hands out the KVM token before it has committed the session server-side, so a
+        // fast /kvm validate can race the commit. Newer firmware reports that as "session
+        // unregistered" (8); the legacy ASMB9 reports the SAME not-yet-committed condition as
+        // "invalid session info" (3) -- proven live: an identical validate that fails then
+        // succeeds on the immediate retry is a race, not a genuine rejection. Retry the socket
+        // with the SAME token (re-login/re-fetch would restart the race). Response 3 is only
+        // treated as retryable on legacy: newer firmware uses 3 for a genuine bad-session error.
+        const bool commit_race = response == kValidateSessionUnregistered ||
+            (config_.legacy && response == kValidateSessionInvalidInfo);
+        if (commit_race) {
             validation_unregistered_ = true;
-            log_warning() << "KVM validation: session unregistered; retrying socket";
+            log_warning() << "KVM validation: session not committed yet (response "
+                          << static_cast<int>(response) << "); retrying socket";
             close_socket();
             return;
         }
