@@ -88,6 +88,10 @@ std::optional<SoftwareFrame> AspeedView::latest_frame()
         const AspeedDecodedDelta delta =
             decoder_.decode(frame->decode_options, frame->compressed, frame->width, frame->height);
         if (!delta.ok) {
+            // A failed decode drops a link of the differential chain: every block
+            // this delta carried stays stale until something else redraws it. Ask
+            // for a full refresh instead of leaving the corruption up.
+            request_full_refresh();
             continue;
         }
         frame_presented(frame->width, frame->height);

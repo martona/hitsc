@@ -733,14 +733,34 @@ private:
 
     void handle_ast_rect(const AtenFramebufferRect& rect, const std::vector<std::uint8_t>& payload)
     {
+        // The BMC occasionally advertises garbage rect dimensions; the vendor client
+        // sanitizes EVERY update (rfb.js _ast_framebufferUpdate: >1920 wide or >1280
+        // tall => keep the previous dims, or 640x480 before any real frame). Passing
+        // a bogus size through would make the decoder treat it as a resolution
+        // change: reseed the framebuffer AND place every macroblock row at the wrong
+        // offset -- the rare "half the screen shifted" corruption.
+        int frame_width = rect.width;
+        int frame_height = rect.height;
+        if (frame_width == 0 || frame_height == 0 || frame_width > 1920 || frame_height > 1280) {
+            frame_width = previous_width_ > 0 ? previous_width_ : 640;
+            frame_height = previous_height_ > 0 ? previous_height_ : 480;
+            ++bogus_dimension_frames_;
+            if (bogus_dimension_frames_ == 1 || options_.login.vverbose) {
+                log_warning() << "ATEN frame advertised implausible dimensions "
+                              << rect.width << 'x' << rect.height
+                              << "; substituting " << frame_width << 'x' << frame_height
+                              << " (occurrence " << bogus_dimension_frames_ << ")";
+            }
+        }
+
         const AtenAstPayloadHeader ast = read_ast_payload_header(payload);
         if (ast_payload_is_frame_end_only(payload)) {
-            previous_width_ = rect.width;
-            previous_height_ = rect.height;
+            previous_width_ = frame_width;
+            previous_height_ = frame_height;
             static_frame_count_ = 0; // a real no-change frame from a live host: stay responsive
             if (options_.login.vverbose && (updates_ <= 20 || updates_ % 60 == 0)) {
                 log_info() << "skipped ATEN no-op frame #" << updates_
-                           << " size=" << rect.width << 'x' << rect.height
+                           << " size=" << frame_width << 'x' << frame_height
                            << " payload=" << payload.size()
                            << " mode=" << ast.mode;
             }
@@ -772,8 +792,8 @@ private:
         if (compressed_size == previous_compressed_.size() &&
             std::memcmp(compressed_data, previous_compressed_.data(), compressed_size) == 0) {
             state_.view_status.kvm_display_status(true); // still showing the identical image
-            previous_width_ = rect.width;
-            previous_height_ = rect.height;
+            previous_width_ = frame_width;
+            previous_height_ = frame_height;
             // Only a LARGE identical repeat (the ~20KB powered-off image) counts toward
             // the request-rate backoff; a tiny all-SKIP "nothing changed" delta from a
             // live idle host does not, so an idle-but-ALIVE screen keeps full latency.
@@ -797,9 +817,9 @@ private:
 
         blank_screen_packets_ = 0;
         AspeedCompressedFrame frame;
-        frame.width = rect.width;
-        frame.height = rect.height;
-        frame.decode_options = make_aten_aspeed_decode_options(rect.width, rect.height, ast);
+        frame.width = frame_width;
+        frame.height = frame_height;
+        frame.decode_options = make_aten_aspeed_decode_options(frame_width, frame_height, ast);
         frame.compressed.assign(payload.begin() + 4, payload.end());
         frame.received_at = std::chrono::steady_clock::now();
         frame.websocket_bytes = last_websocket_message_bytes_;
@@ -807,12 +827,12 @@ private:
         state_.frames.publish(std::move(frame));
         state_.view_status.kvm_display_status(true);
 
-        previous_width_ = rect.width;
-        previous_height_ = rect.height;
+        previous_width_ = frame_width;
+        previous_height_ = frame_height;
 
         if (options_.login.vverbose && (updates_ <= 20 || updates_ % 60 == 0)) {
             log_info() << "queued ATEN frame #" << updates_
-                       << " size=" << rect.width << 'x' << rect.height
+                       << " size=" << frame_width << 'x' << frame_height
                        << " compressed=" << (payload.size() - 4)
                        << " mode=" << ast.mode
                        << " y-sel=" << ast.y_selector
@@ -828,10 +848,12 @@ private:
         previous_compressed_.clear(); // never dedup across a blank: force the next real frame to decode
         static_frame_count_ = 0;      // and resume full-rate polling
 
-        if (rect.width > 0) {
+        // Same sanitization as handle_ast_rect: never let bogus advertised dims
+        // poison the tracked resolution.
+        if (rect.width > 0 && rect.width <= 1920) {
             previous_width_ = rect.width;
         }
-        if (rect.height > 0) {
+        if (rect.height > 0 && rect.height <= 1280) {
             previous_height_ = rect.height;
         }
 
@@ -1138,6 +1160,7 @@ private:
     int cursor_pattern_height_ = 0;
     int updates_ = 0;
     int blank_screen_packets_ = 0;
+    int bogus_dimension_frames_ = 0;
     bool write_in_progress_ = false;
     bool close_pending_ = false;
     bool close_sent_ = false;

@@ -83,6 +83,10 @@ static unsigned char first_frame = 1;
 // input compressed data
 static unsigned long* in_buf;
 static unsigned long in_buf_index;
+// Last valid word index of in_buf. A corrupt/truncated frame (no FRAME_END) used
+// to let SkipBits read past the input until the runaway guard fired -- a heap
+// overread. The AMI HTML5 worker clamps its read index the same way.
+static unsigned long in_buf_last_index;
 
 // how many bits of 32-bit data pointed by 'in_buf_index' is not skipped yet
 static int newbits;
@@ -551,7 +555,10 @@ static WORD ShowBits(BYTE bits)
 static void SkipBits(BYTE bits)
 {
     if (newbits <= bits) {
-        unsigned long data = in_buf[in_buf_index++];
+        unsigned long data;
+        if (in_buf_index > in_buf_last_index)
+            in_buf_index = in_buf_last_index;
+        data = in_buf[in_buf_index++];
 
         cur_data = (cur_data << bits) | ((next_data | (data >> (newbits))) >> (32 - bits));
         next_data = data << (bits - newbits);
@@ -1266,6 +1273,11 @@ void decode_ext(unsigned long* _in_buf, int _len, unsigned char* _out_buf, int _
         mbheight = ALIGN(height, 8) / 8;
     }
     in_buf = _in_buf;
+    // The wrapper allocates (len + 3) / 4 + 2 words; the highest valid index is one
+    // less than that. _len is in BYTES (so is the do/while guard in DecodeBuffer,
+    // comparing it against a WORD index -- an upstream quirk that makes the clamp
+    // in SkipBits the real end-of-input backstop).
+    in_buf_last_index = (unsigned long)(_len + 3) / 4 + 1;
 
     cur_data = in_buf[0];
     next_data = in_buf[1];
