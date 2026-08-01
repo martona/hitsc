@@ -80,14 +80,17 @@ int run_child_session(VerbosityOptions verbosity, ChildAction action)
         options.login = std::move(login);
         switch (request.type) {
         case LauncherHostType::Auto:
-            options.detect_backend = true;
+            options.backend = ColdResetBackend::Detect;
             break;
         case LauncherHostType::Megarac:
-            options.detect_backend = false;
+            options.backend = ColdResetBackend::Megarac;
             break;
         case LauncherHostType::Aten:
+            options.backend = ColdResetBackend::Aten;
+            break;
         case LauncherHostType::Pikvm:
-            throw UserError("BMC cold reset is only supported for MegaRAC and auto-detected hosts");
+            throw UserError(
+                "BMC cold reset is only supported for MegaRAC, ATEN, and auto-detected hosts");
         }
         return run_bmc_cold_reset(options);
     }

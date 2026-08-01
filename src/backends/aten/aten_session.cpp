@@ -232,6 +232,29 @@ std::string redfish_session_id(const StringResponse& response)
 
 } // namespace
 
+AtenRedfishLogin login_aten_redfish(BmcWebSession& web, const LoginOptions& options)
+{
+    auto response = web.request(
+        http::verb::post,
+        kRedfishSessionsTarget,
+        redfish_login_body(options),
+        "application/json");
+
+    AtenRedfishLogin result;
+    result.status = static_cast<int>(response.result_int());
+    if (result.status < 200 || result.status >= 300) {
+        result.error_body = body_snippet(decode_response_body(response));
+        return result;
+    }
+
+    result.session_id = redfish_session_id(response);
+    const auto token = response.find("X-Auth-Token");
+    if (token != response.end()) {
+        result.auth_token = std::string(token->value());
+    }
+    return result;
+}
+
 AtenSession login_aten(const LoginOptions& options)
 {
     BmcWebSession web(options);
@@ -258,26 +281,18 @@ AtenSession login_aten(const LoginOptions& options)
                    << "; trying redfish session login";
     }
 
-    auto redfish = web.request(
-        http::verb::post,
-        kRedfishSessionsTarget,
-        redfish_login_body(options),
-        "application/json");
-    const int redfish_status = static_cast<int>(redfish.result_int());
-    if (redfish_status < 200 || redfish_status >= 300) {
+    const AtenRedfishLogin redfish = login_aten_redfish(web, options);
+    if (redfish.status < 200 || redfish.status >= 300) {
         throw UserError(
             "aten login failed: legacy HTTP " + std::to_string(legacy_status)
-            + ", redfish HTTP " + std::to_string(redfish_status) + ": "
-            + body_snippet(decode_response_body(redfish)));
+            + ", redfish HTTP " + std::to_string(redfish.status) + ": "
+            + redfish.error_body);
     }
 
     AtenSession session{std::move(web)};
     session.dialect = AtenLoginDialect::Redfish;
-    session.redfish_session_id = redfish_session_id(redfish);
-    const auto token = redfish.find("X-Auth-Token");
-    if (token != redfish.end()) {
-        session.redfish_auth_token = std::string(token->value());
-    }
+    session.redfish_session_id = redfish.session_id;
+    session.redfish_auth_token = redfish.auth_token;
 
     if (session.web.cookie_count() == 0) {
         // Without the SID cookie neither the CGI pages nor the KVM websocket will
@@ -302,7 +317,7 @@ AtenSession login_aten(const LoginOptions& options)
     }
 
     if (options.verbose) {
-        log_info() << "aten login dialect=redfish http=" << redfish_status
+        log_info() << "aten login dialect=redfish http=" << redfish.status
                    << " session-id=" << session.redfish_session_id
                    << " auth-token=" << (session.redfish_auth_token.empty() ? "missing" : "present");
     }

@@ -123,7 +123,7 @@ int run_cli(int argc, char* argv[])
     CLI::App* gui = app.add_subcommand("gui", "Open the saved-host launcher.");
     CLI::App* child = app.add_subcommand("child", "Run a launcher child session.");
     CLI::App* coldreset = app.add_subcommand(
-        "coldreset", "Run a launcher child BMC cold reset (MegaRAC only).");
+        "coldreset", "Run a launcher child BMC cold reset (MegaRAC and ATEN).");
     VerbosityOptions process_verbosity;
     configure_verbosity_options(*gui, process_verbosity.verbose, process_verbosity.vverbose);
     configure_verbosity_options(*child, process_verbosity.verbose, process_verbosity.vverbose);

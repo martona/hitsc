@@ -25,6 +25,18 @@ struct AtenSession {
 
 AtenSession login_aten(const LoginOptions& options);
 bool logout_aten(const LoginOptions& options, AtenSession& session);
+
+// One Redfish session POST (the newer firmware's login). Does not throw on an
+// HTTP-level rejection -- login_aten uses it as the fallback dialect, and the
+// cold reset uses it to obtain an X-Auth-Token on legacy-dialect firmware.
+struct AtenRedfishLogin {
+    int status = 0;           // HTTP status of the Sessions POST
+    std::string session_id;
+    std::string auth_token;
+    std::string error_body;   // body snippet when status is not 2xx
+};
+
+AtenRedfishLogin login_aten_redfish(BmcWebSession& web, const LoginOptions& options);
 std::string fetch_aten_ikvm_bootstrap(const LoginOptions& options, BmcWebSession& web);
 
 class AtenLogoutGuard {

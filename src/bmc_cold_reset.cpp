@@ -1,5 +1,6 @@
 #include "bmc_cold_reset.hpp"
 
+#include "backends/aten/aten_session.hpp"
 #include "backends/auto/auto_view.hpp"
 #include "backends/megarac/megarac_session.hpp"
 #include "console_screen.hpp"
@@ -52,22 +53,66 @@ void request_megarac_cold_reset(const LoginOptions& login)
     log_info() << "BMC accepted the cold reset request";
 }
 
+// ATEN/Supermicro reboot: Redfish POST Managers/1/Actions/Manager.Reset.
+// AllowableValues on 01.09.05 firmware are GracefulRestart and ForceRestart;
+// GracefulRestart is what the web UI's own "Unit Reset" issues. Deliberately no
+// logout -- the BMC reboots on acceptance, so the session dies with it.
+void request_aten_cold_reset(const LoginOptions& login)
+{
+    AtenSession session = login_aten(login);
+    log_info() << "aten login succeeded";
+
+    std::string auth_token = session.redfish_auth_token;
+    if (session.dialect != AtenLoginDialect::Redfish) {
+        // Legacy-dialect firmware: the form login carries no Redfish token, so
+        // open a Redfish session just for the manager reset.
+        const AtenRedfishLogin redfish = login_aten_redfish(session.web, login);
+        if (redfish.status < 200 || redfish.status >= 300) {
+            throw UserError(
+                "aten cold reset failed: redfish session HTTP "
+                + std::to_string(redfish.status) + ": " + redfish.error_body);
+        }
+        auth_token = redfish.auth_token;
+    }
+
+    std::vector<Header> headers;
+    if (!auth_token.empty()) {
+        headers.push_back(Header{http::field::unknown, "X-Auth-Token", auth_token});
+    }
+
+    auto response = session.web.request(
+        http::verb::post,
+        "/redfish/v1/Managers/1/Actions/Manager.Reset",
+        R"({"ResetType":"GracefulRestart"})",
+        "application/json",
+        headers);
+    require_success_status(response, "Manager.Reset");
+    log_info() << "BMC accepted the cold reset request";
+}
+
 void perform_cold_reset(BmcColdResetOptions& options)
 {
-    if (options.detect_backend) {
-        const std::string backend = detect_kvm_backend_name(options.login);
-        if (backend != "megarac") {
-            // TODO: investigate cold-reset paths for the other backends -- ATEN
-            // likely has its own maintenance endpoint, and Redfish
-            // Manager.Reset exists on some firmware; PiKVM restarts via its API.
+    ColdResetBackend backend = options.backend;
+    if (backend == ColdResetBackend::Detect) {
+        const std::string name = detect_kvm_backend_name(options.login);
+        if (name == "megarac") {
+            backend = ColdResetBackend::Megarac;
+        } else if (name == "aten") {
+            backend = ColdResetBackend::Aten;
+        } else {
+            // TODO: PiKVM restarts via its own API.
             throw UserError(
                 "unsupported BMC type for cold reset: "
-                + (backend.empty() ? std::string("unknown") : backend)
-                + " (only MegaRAC is supported)");
+                + (name.empty() ? std::string("unknown") : name)
+                + " (MegaRAC and ATEN are supported)");
         }
     }
 
-    request_megarac_cold_reset(options.login);
+    if (backend == ColdResetBackend::Aten) {
+        request_aten_cold_reset(options.login);
+    } else {
+        request_megarac_cold_reset(options.login);
+    }
 }
 
 std::string error_message(const std::exception_ptr& error)

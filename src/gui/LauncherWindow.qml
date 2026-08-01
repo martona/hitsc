@@ -569,6 +569,7 @@ ApplicationWindow {
                             MenuItem {
                                 text: "BMC cold reset"
                                 visible: hostTile.type === "auto" || hostTile.type === "megarac"
+                                         || hostTile.type === "aten"
                                 height: visible ? implicitHeight : 0
                                 palette: root.palette
                                 onTriggered: root.coldResetHost(hostTile.hostId)
