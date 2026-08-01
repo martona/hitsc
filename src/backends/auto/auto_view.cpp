@@ -3,6 +3,7 @@
 #include "backends/aten/aten_view.hpp"
 #include "backends/megarac/megarac_view.hpp"
 #include "backends/pikvm/pikvm_view.hpp"
+#include "console_screen.hpp"
 #include "cookie_jar.hpp"
 #include "errors.hpp"
 #include "gui/viewer/qt_viewer_host.hpp"
@@ -298,8 +299,27 @@ void run_auto_view(const AutoViewOptions& options)
             if (detection->worker.joinable()) {
                 detection->worker.join();
             }
+            // A pre-login failure (unreachable host, TLS error, unknown backend) is
+            // DISPLAYED in the window like any post-login session error, instead of
+            // fail() closing it before the user can read anything.
+            const auto show_failure = [&host](const std::exception_ptr& error) {
+                std::string message = "Unknown error";
+                try {
+                    std::rethrow_exception(error);
+                } catch (const std::exception& ex) {
+                    message = ex.what();
+                } catch (...) {
+                }
+                log_error() << "auto detection failed: " << message;
+                ConsoleScreen screen;
+                screen.severity = ConsoleSeverity::Error;
+                screen.headline = "Connection failed";
+                screen.detail = message;
+                screen.hint = "Esc to close";
+                host.set_console(screen);
+            };
             if (detection->error) {
-                host.fail(detection->error);
+                show_failure(detection->error);
                 return;
             }
             // Runs inside the event loop: keep a view-constructor throw out of Qt.
@@ -308,7 +328,7 @@ void run_auto_view(const AutoViewOptions& options)
                     host.attach_view(make_detected_view(*detection->backend, detection->options));
                 }
             } catch (...) {
-                host.fail(std::current_exception());
+                show_failure(std::current_exception());
             }
         });
     });
