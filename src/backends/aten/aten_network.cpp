@@ -861,6 +861,11 @@ private:
             log_warning() << "remote requested ATEN blank screen"
                           << " size=" << rect.width << 'x' << rect.height
                           << " mode=" << rect.mode;
+            // First blank of a streak: tell the view (ordered with the video stream)
+            // to drop its framebuffer and hide the cursor.
+            AspeedCompressedFrame marker;
+            marker.display_blank = true;
+            state_.frames.publish(std::move(marker));
         }
     }
 

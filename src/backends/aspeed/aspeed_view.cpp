@@ -82,9 +82,23 @@ std::optional<SoftwareFrame> AspeedView::latest_frame()
     // SKIP/PASS2 delta chain until the next full refresh.
     bool base_changed = false;
     bool dirty_full = false;
+    bool cursor_hidden = false;
     QRect dirty_rect;  // empty until a frame reports a partial change
     for (const std::shared_ptr<const AspeedCompressedFrame>& frame : aspeed_state_.frames.drain()) {
         hosted_last_sequence_ = frame->sequence;
+        if (frame->display_blank) {
+            // Blank-screen marker: drop the framebuffer so the eventual resume starts
+            // from a fresh full decode (building deltas on pre-blank pixels is how a
+            // wake-up comes back corrupted), and hide the hardware cursor.
+            decoder_.reset();
+            hosted_cursor_ = HardwareCursor{};
+            has_hosted_cursor_ = false;
+            cursor_hidden = true;
+            base_changed = false;
+            dirty_full = false;
+            dirty_rect = QRect();
+            continue;
+        }
         const AspeedDecodedDelta delta =
             decoder_.decode(frame->decode_options, frame->compressed, frame->width, frame->height);
         if (!delta.ok) {
@@ -135,6 +149,8 @@ std::optional<SoftwareFrame> AspeedView::latest_frame()
     // decoupled -- only the tiny sprite re-uploads.
     if ((cursor_changed || base_changed) && has_hosted_cursor_) {
         out.cursor = build_cursor_overlay();
+    } else if (cursor_hidden) {
+        out.cursor = CursorOverlay{};  // empty sprite => hide
     }
 
 #ifdef HITSC_DEBUG_HW_CURSOR
