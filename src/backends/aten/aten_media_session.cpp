@@ -579,8 +579,16 @@ void run_aten_media_session(
         });
         auto ws = opened.connection->stream();
         asio::io_context& io = opened.connection->io_context();
-        const std::string subprotocol = bmc_ws_selected_subprotocol(opened.response);
-        log_info() << "aten /vm websocket subprotocol=" << subprotocol;
+        // The vendor client opens /vm with a bare `new WebSocket(uri)` -- no
+        // subprotocol -- and hard-codes binary mode ("Server choose non-websockify",
+        // websock.js). Older firmware echoed our "binary" offer back; 01.09.05
+        // echoes nothing, and bmc_ws_selected_subprotocol's absent-header default
+        // of base64 then garbled every reply (the mount status never parsed and the
+        // BMC eventually dropped the socket -> "read end of file"). The /vm stream
+        // is binary no matter what the response says.
+        const std::string subprotocol = "binary";
+        log_info() << "aten /vm websocket subprotocol="
+                   << bmc_ws_selected_subprotocol(opened.response) << " (treating as binary)";
 
         auto async_session = std::make_shared<AtenBotAsyncSession>(
             io, ws, options, credential, subprotocol, filename_from_path(iso_path),
