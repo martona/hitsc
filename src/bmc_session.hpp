@@ -106,8 +106,10 @@ public:
     explicit BmcWebSession(const LoginOptions& options);
     ~BmcWebSession();
 
-    BmcWebSession(BmcWebSession&&) noexcept = default;
-    BmcWebSession& operator=(BmcWebSession&&) noexcept = default;
+    // Defined in the .cpp: the defaulted bodies need the complete WebSocketRegistry
+    // type, which only bmc_session.cpp has.
+    BmcWebSession(BmcWebSession&&) noexcept;
+    BmcWebSession& operator=(BmcWebSession&&) noexcept;
     BmcWebSession(const BmcWebSession&) = delete;
     BmcWebSession& operator=(const BmcWebSession&) = delete;
 

@@ -218,6 +218,9 @@ BmcWebSession::~BmcWebSession()
     close_all_websockets();
 }
 
+BmcWebSession::BmcWebSession(BmcWebSession&&) noexcept = default;
+BmcWebSession& BmcWebSession::operator=(BmcWebSession&&) noexcept = default;
+
 StringResponse BmcWebSession::request(
     http::verb method,
     std::string_view target,
