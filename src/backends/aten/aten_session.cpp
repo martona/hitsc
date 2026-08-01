@@ -1,14 +1,18 @@
 #include "aten_session.hpp"
 
+#include "backends/megarac/bmc_ws_framing.hpp"
 #include "bmc_session.hpp"
+#include "errors.hpp"
 #include "http_client.hpp"
 #include "log.hpp"
 #include "text.hpp"
 #include "url.hpp"
 
 #include <boost/beast/http.hpp>
+#include <boost/json.hpp>
 
 #include <chrono>
+#include <cstdint>
 #include <cctype>
 #include <stdexcept>
 #include <string>
@@ -179,33 +183,135 @@ std::string extract_entry_value_from_html(std::string_view body)
     return {};
 }
 
-const BmcLoginProfile& aten_login_profile()
+constexpr std::string_view kRedfishSessionsTarget = "/redfish/v1/SessionService/Sessions";
+
+std::string base64_credential(std::string_view value)
 {
-    static const BmcLoginProfile profile{
-        "aten",
-        "/cgi/login.cgi",
-        {
-            BmcLoginField{"?name", BmcCredentialSource::Username, {}, BmcCredentialTransform::Base64, false},
-            BmcLoginField{"pwd", BmcCredentialSource::Password, {}, BmcCredentialTransform::Base64},
-            BmcLoginField{"check", BmcCredentialSource::Literal, "00", BmcCredentialTransform::None},
-        },
-        "application/x-www-form-urlencoded",
-        nullptr,
-        {},
-        399,
-    };
-    return profile;
+    return bmc_base64_encode(std::vector<std::uint8_t>(value.begin(), value.end()));
+}
+
+std::string legacy_login_body(const LoginOptions& options)
+{
+    // The "?" in "?name" is deliberate: the classic login form posts it verbatim.
+    return "?name=" + form_url_encode(base64_credential(options.username))
+        + "&pwd=" + form_url_encode(base64_credential(options.password))
+        + "&check=00";
+}
+
+std::string redfish_login_body(const LoginOptions& options)
+{
+    boost::json::object body;
+    body["UserName"] = options.username;
+    body["Password"] = options.password;
+    return boost::json::serialize(body);
+}
+
+std::string redfish_session_id(const StringResponse& response)
+{
+    const auto location = response.find(http::field::location);
+    if (location != response.end()) {
+        const std::string value = trim_copy(location->value());
+        const std::size_t slash = value.find_last_of('/');
+        if (slash != std::string::npos && slash + 1 < value.size()) {
+            return value.substr(slash + 1);
+        }
+    }
+
+    boost::system::error_code error;
+    const boost::json::value parsed = boost::json::parse(decode_response_body(response), error);
+    if (!error && parsed.is_object()) {
+        if (const boost::json::value* id = parsed.get_object().if_contains("Id")) {
+            if (const boost::json::string* id_string = id->if_string()) {
+                return std::string(id_string->c_str(), id_string->size());
+            }
+        }
+    }
+
+    return {};
 }
 
 } // namespace
 
 AtenSession login_aten(const LoginOptions& options)
 {
-    return AtenSession{login_bmc_web_session(options, aten_login_profile())};
+    BmcWebSession web(options);
+
+    auto legacy = web.request(
+        http::verb::post,
+        "/cgi/login.cgi",
+        legacy_login_body(options),
+        "application/x-www-form-urlencoded");
+    const int legacy_status = static_cast<int>(legacy.result_int());
+    if (legacy_status >= 200 && legacy_status < 400) {
+        if (web.cookie_count() == 0) {
+            throw UserError(
+                "aten login failed: authentication response did not set a session cookie");
+        }
+        if (options.verbose) {
+            log_info() << "aten login dialect=legacy http=" << legacy_status;
+        }
+        return AtenSession{std::move(web)};
+    }
+
+    if (options.verbose) {
+        log_info() << "aten legacy login rejected http=" << legacy_status
+                   << "; trying redfish session login";
+    }
+
+    auto redfish = web.request(
+        http::verb::post,
+        kRedfishSessionsTarget,
+        redfish_login_body(options),
+        "application/json");
+    const int redfish_status = static_cast<int>(redfish.result_int());
+    if (redfish_status < 200 || redfish_status >= 300) {
+        throw UserError(
+            "aten login failed: legacy HTTP " + std::to_string(legacy_status)
+            + ", redfish HTTP " + std::to_string(redfish_status) + ": "
+            + body_snippet(decode_response_body(redfish)));
+    }
+
+    AtenSession session{std::move(web)};
+    session.dialect = AtenLoginDialect::Redfish;
+    session.redfish_session_id = redfish_session_id(redfish);
+    const auto token = redfish.find("X-Auth-Token");
+    if (token != redfish.end()) {
+        session.redfish_auth_token = std::string(token->value());
+    }
+
+    if (session.web.cookie_count() == 0) {
+        // Without the SID cookie neither the CGI pages nor the KVM websocket will
+        // authenticate. Best-effort delete so the dead session does not count
+        // against the BMC's session limit, then report.
+        try {
+            std::vector<Header> headers;
+            if (!session.redfish_auth_token.empty()) {
+                headers.push_back(
+                    Header{http::field::unknown, "X-Auth-Token", session.redfish_auth_token});
+            }
+            session.web.request(
+                http::verb::delete_,
+                std::string(kRedfishSessionsTarget) + "/" + session.redfish_session_id,
+                {},
+                {},
+                headers);
+        } catch (const std::exception&) {
+        }
+        throw UserError(
+            "aten login failed: redfish session opened but did not set the CGI session cookie");
+    }
+
+    if (options.verbose) {
+        log_info() << "aten login dialect=redfish http=" << redfish_status
+                   << " session-id=" << session.redfish_session_id
+                   << " auth-token=" << (session.redfish_auth_token.empty() ? "missing" : "present");
+    }
+    return session;
 }
 
-bool logout_aten(const LoginOptions& options, BmcWebSession& web)
+bool logout_aten(const LoginOptions& options, AtenSession& session)
 {
+    BmcWebSession& web = session.web;
     web.close_all_websockets();
     // Teardown is best-effort: a dead or black-holed BMC must never hold process
     // exit hostage on a courtesy logout.
@@ -222,11 +328,31 @@ bool logout_aten(const LoginOptions& options, BmcWebSession& web)
     };
 
     try {
-        auto response = web.request(
-            http::verb::get,
-            "/cgi/logout.cgi",
-            {},
-            {});
+        StringResponse response;
+        if (session.dialect == AtenLoginDialect::Redfish) {
+            if (session.redfish_session_id.empty()) {
+                log_warning() << "aten logout warning: redfish session id unknown; skipping";
+                log_duration();
+                return false;
+            }
+            std::vector<Header> headers;
+            if (!session.redfish_auth_token.empty()) {
+                headers.push_back(
+                    Header{http::field::unknown, "X-Auth-Token", session.redfish_auth_token});
+            }
+            response = web.request(
+                http::verb::delete_,
+                std::string(kRedfishSessionsTarget) + "/" + session.redfish_session_id,
+                {},
+                {},
+                headers);
+        } else {
+            response = web.request(
+                http::verb::get,
+                "/cgi/logout.cgi",
+                {},
+                {});
+        }
 
         if (response.result_int() >= 200 && response.result_int() < 300) {
             if (options.verbose) {
@@ -255,7 +381,7 @@ AtenLogoutGuard::AtenLogoutGuard(const LoginOptions& options)
 AtenLogoutGuard::~AtenLogoutGuard()
 {
     if (active_ && session_ != nullptr) {
-        logout_aten(options_, session_->web);
+        logout_aten(options_, *session_);
     }
 }
 

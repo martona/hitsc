@@ -445,6 +445,7 @@ public:
         , strand_(asio::make_strand(io))
         , framebuffer_request_timer_(io)
         , power_poll_timer_(io)
+        , close_timer_(io)
     {
     }
 
@@ -508,7 +509,7 @@ public:
         auto self = shared_from_this();
         asio::post(strand_, [self] {
             self->stop_requested_.store(true);
-            self->close_now();
+            self->begin_graceful_close();
         });
     }
 
@@ -1028,7 +1029,53 @@ private:
             log_info() << "sent ATEN packet " << describe_aten_client_packet(active_write_.packet);
         }
         active_write_ = {};
+        if (close_pending_) {
+            maybe_send_close();
+            return;
+        }
         start_write();
+    }
+
+    // Orderly stop: send a websocket Close frame so the BMC reaps its KVM session
+    // immediately (the vendor client always closes this way via the browser), instead
+    // of a bare TCP reset that leaves the session to die by server-side timeout --
+    // stale sessions are exactly what piles up toward the BMC's session limit. Hard
+    // 1s deadline so a dead BMC cannot stall teardown; error paths keep the abortive
+    // close_now().
+    void begin_graceful_close()
+    {
+        if (closed_ || close_pending_) {
+            return;
+        }
+        close_pending_ = true;
+        write_queue_.clear();
+        close_timer_.expires_after(std::chrono::seconds(1));
+        auto self = shared_from_this();
+        close_timer_.async_wait(asio::bind_executor(strand_, [self](beast::error_code error) {
+            if (!error) {
+                self->close_now();
+            }
+        }));
+        maybe_send_close();
+    }
+
+    void maybe_send_close()
+    {
+        // async_close counts as a write op: wait until the in-flight write drains.
+        if (closed_ || !close_pending_ || close_sent_ || write_in_progress_) {
+            return;
+        }
+        close_sent_ = true;
+        auto self = shared_from_this();
+        ws_.async_close(
+            websocket::close_code::normal,
+            asio::bind_executor(strand_, [self](beast::error_code error) {
+                // Close frame is on the wire; the pending read completes the handshake
+                // (websocket::error::closed -> close_now) and the deadline backstops it.
+                if (error && error != asio::error::operation_aborted) {
+                    self->close_now();
+                }
+            }));
     }
 
     void close_now()
@@ -1040,6 +1087,7 @@ private:
         state_.input.clear();
         framebuffer_request_timer_.cancel();
         power_poll_timer_.cancel();
+        close_timer_.cancel();
         parser_.clear();
 
         beast::error_code error;
@@ -1069,6 +1117,7 @@ private:
     asio::strand<asio::io_context::executor_type> strand_;
     asio::steady_timer framebuffer_request_timer_;
     asio::steady_timer power_poll_timer_;
+    asio::steady_timer close_timer_;
     beast::flat_buffer read_buffer_;
     AtenRfbMessageBuffer parser_;
     std::deque<AtenQueuedWrite> write_queue_;
@@ -1090,6 +1139,8 @@ private:
     int updates_ = 0;
     int blank_screen_packets_ = 0;
     bool write_in_progress_ = false;
+    bool close_pending_ = false;
+    bool close_sent_ = false;
     bool framebuffer_request_pending_ = false;
     bool framebuffer_request_timer_active_ = false;
     bool cursor_position_request_pending_ = false;
