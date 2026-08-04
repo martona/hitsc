@@ -86,6 +86,14 @@ public:
     // Call from the same thread that issues the requests.
     void set_timeout_seconds(int timeout_seconds) noexcept;
 
+    // Stop consulting the shared cancel token on subsequent requests. Teardown
+    // paths (logout) call this once a sticky token cancel has done its job --
+    // aborting the connect phase -- so the courtesy logout still goes out under
+    // the shortened deadline instead of being swallowed by the same cancel and
+    // leaking the session on the BMC. Call from the same thread that issues the
+    // requests.
+    void detach_cancel_token() noexcept;
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

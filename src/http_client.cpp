@@ -400,6 +400,11 @@ struct HttpsClient::Impl {
         timeout_seconds_ = timeout_seconds;
     }
 
+    void detach_cancel_token() noexcept
+    {
+        cancel_token_ = nullptr;
+    }
+
 private:
     // Throws if this request was canceled, then readies io_ for the next step.
     // (io_.restart() clears a stop flag, so the cancel checks must come first; a
@@ -691,6 +696,13 @@ void HttpsClient::set_timeout_seconds(int timeout_seconds) noexcept
 {
     if (impl_) {
         impl_->set_timeout_seconds(timeout_seconds);
+    }
+}
+
+void HttpsClient::detach_cancel_token() noexcept
+{
+    if (impl_) {
+        impl_->detach_cancel_token();
     }
 }
 

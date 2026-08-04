@@ -257,6 +257,11 @@ void BmcWebSession::set_http_timeout_seconds(int seconds) noexcept
     client_.set_timeout_seconds(seconds);
 }
 
+void BmcWebSession::detach_cancel_token() noexcept
+{
+    client_.detach_cancel_token();
+}
+
 BmcWebSocketOpenResult BmcWebSession::open_websocket(BmcWebSocketConnectOptions options)
 {
     auto connection = BmcWebSocketConnectionPtr(new BmcWebSocketConnection(options.role));

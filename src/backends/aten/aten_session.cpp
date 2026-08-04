@@ -331,6 +331,11 @@ bool logout_aten(const LoginOptions& options, AtenSession& session)
     // Teardown is best-effort: a dead or black-holed BMC must never hold process
     // exit hostage on a courtesy logout.
     web.set_http_timeout_seconds(3);
+    // A sticky token cancel may have aborted the connect phase (window closed
+    // while logging in); without this the same cancel would swallow the logout
+    // too and leak the session toward the BMC's session limit. The shortened
+    // deadline above still bounds a dead BMC.
+    web.detach_cancel_token();
 
     const auto started_at = std::chrono::steady_clock::now();
     const auto log_duration = [&] {
@@ -362,6 +367,27 @@ bool logout_aten(const LoginOptions& options, AtenSession& session)
                 {},
                 headers);
         } else {
+            // A legacy-dialect flow may still have opened a Redfish session on
+            // the side (cold reset does, for its X-Auth-Token); delete it too so
+            // it cannot pile up against the BMC's session limit.
+            if (!session.redfish_session_id.empty()) {
+                try {
+                    std::vector<Header> headers;
+                    if (!session.redfish_auth_token.empty()) {
+                        headers.push_back(Header{
+                            http::field::unknown, "X-Auth-Token", session.redfish_auth_token});
+                    }
+                    web.request(
+                        http::verb::delete_,
+                        std::string(kRedfishSessionsTarget) + "/" + session.redfish_session_id,
+                        {},
+                        {},
+                        headers);
+                } catch (const std::exception& ex) {
+                    log_warning() << "aten logout warning: redfish side-session delete: "
+                                  << ex.what();
+                }
+            }
             response = web.request(
                 http::verb::get,
                 "/cgi/logout.cgi",
@@ -370,9 +396,7 @@ bool logout_aten(const LoginOptions& options, AtenSession& session)
         }
 
         if (response.result_int() >= 200 && response.result_int() < 300) {
-            if (options.verbose) {
-                log_info() << "aten logout succeeded";
-            }
+            log_info() << "aten logout succeeded";
             log_duration();
             return true;
         }

@@ -51,10 +51,15 @@ PikvmSession login_pikvm(const LoginOptions& options)
 
 bool logout_pikvm(const LoginOptions& options, BmcWebSession& web)
 {
+    (void)options;
     web.close_all_websockets();
     // Teardown is best-effort: a dead or black-holed BMC must never hold process
     // exit hostage on a courtesy logout.
     web.set_http_timeout_seconds(3);
+    // A sticky token cancel may have aborted the connect phase (window closed
+    // while logging in); without this the same cancel would swallow the logout
+    // too and leak the session toward the BMC's session limit.
+    web.detach_cancel_token();
 
     try {
         auto response = web.request(
@@ -64,9 +69,7 @@ bool logout_pikvm(const LoginOptions& options, BmcWebSession& web)
             {});
 
         if (response.result_int() >= 200 && response.result_int() < 300) {
-            if (options.verbose) {
-                log_info() << "pikvm logout succeeded";
-            }
+            log_info() << "pikvm logout succeeded";
             return true;
         }
 

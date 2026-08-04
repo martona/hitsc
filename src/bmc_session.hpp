@@ -132,6 +132,11 @@ public:
     // (logout) uses it so a dead BMC cannot hold process exit hostage.
     void set_http_timeout_seconds(int seconds) noexcept;
 
+    // Stop consulting the shared cancel token for subsequent requests. Teardown
+    // (logout) uses it so a sticky cancel that aborted the connect phase cannot
+    // also swallow the courtesy logout that keeps the BMC's session table clean.
+    void detach_cancel_token() noexcept;
+
     std::size_t cookie_count() const;
     std::string_view session_token() const;
     void set_cookie(std::string name, std::string value);

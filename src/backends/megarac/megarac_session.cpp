@@ -74,6 +74,10 @@ bool logout_megarac(const LoginOptions& options, BmcWebSession& web)
     // Teardown is best-effort: a dead or black-holed BMC must never hold process
     // exit hostage on a courtesy DELETE.
     web.set_http_timeout_seconds(3);
+    // A sticky token cancel may have aborted the connect phase (window closed
+    // while logging in); without this the same cancel would swallow the logout
+    // too and leak the session toward the BMC's session limit.
+    web.detach_cancel_token();
 
     std::vector<Header> headers;
     const std::string_view csrf_token = web.session_token();

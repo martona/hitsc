@@ -30,11 +30,15 @@ namespace {
 namespace http = boost::beast::http;
 
 // SP-X REST reboot: POST /api/maintenance/reset. Present even on firmware whose
-// web UI has no restart button (older AST2500-era builds). Deliberately no
-// logout -- the BMC reboots on acceptance, so the session dies with it.
+// web UI has no restart button (older AST2500-era builds). No logout on
+// acceptance -- the BMC reboots and the session dies with it -- but a REJECTED
+// reset does log out (via the guard), so failed attempts cannot stack stale
+// sessions onto a BMC that is likely already struggling.
 void request_megarac_cold_reset(const LoginOptions& login)
 {
     MegaRacSession session = login_megarac(login);
+    MegaRacLogoutGuard logout_guard(login);
+    logout_guard.arm(session);
     log_info() << "megarac login succeeded";
 
     std::vector<Header> headers;
@@ -50,22 +54,28 @@ void request_megarac_cold_reset(const LoginOptions& login)
         {},
         headers);
     require_success_status(response, "/api/maintenance/reset");
+    logout_guard.dismiss();
     log_info() << "BMC accepted the cold reset request";
 }
 
 // ATEN/Supermicro reboot: Redfish POST Managers/1/Actions/Manager.Reset.
 // AllowableValues on 01.09.05 firmware are GracefulRestart and ForceRestart;
-// GracefulRestart is what the web UI's own "Unit Reset" issues. Deliberately no
-// logout -- the BMC reboots on acceptance, so the session dies with it.
+// GracefulRestart is what the web UI's own "Unit Reset" issues. No logout on
+// acceptance -- the BMC reboots and the session dies with it -- but a REJECTED
+// reset does log out (via the guard), so failed attempts cannot stack stale
+// sessions onto a BMC that is likely already struggling.
 void request_aten_cold_reset(const LoginOptions& login)
 {
     AtenSession session = login_aten(login);
+    AtenLogoutGuard logout_guard(login);
+    logout_guard.arm(session);
     log_info() << "aten login succeeded";
 
     std::string auth_token = session.redfish_auth_token;
     if (session.dialect != AtenLoginDialect::Redfish) {
         // Legacy-dialect firmware: the form login carries no Redfish token, so
-        // open a Redfish session just for the manager reset.
+        // open a Redfish session just for the manager reset. Recorded on the
+        // session so a failed reset's logout deletes it as well.
         const AtenRedfishLogin redfish = login_aten_redfish(session.web, login);
         if (redfish.status < 200 || redfish.status >= 300) {
             throw UserError(
@@ -73,6 +83,8 @@ void request_aten_cold_reset(const LoginOptions& login)
                 + std::to_string(redfish.status) + ": " + redfish.error_body);
         }
         auth_token = redfish.auth_token;
+        session.redfish_session_id = redfish.session_id;
+        session.redfish_auth_token = redfish.auth_token;
     }
 
     std::vector<Header> headers;
@@ -87,6 +99,7 @@ void request_aten_cold_reset(const LoginOptions& login)
         "application/json",
         headers);
     require_success_status(response, "Manager.Reset");
+    logout_guard.dismiss();
     log_info() << "BMC accepted the cold reset request";
 }
 
